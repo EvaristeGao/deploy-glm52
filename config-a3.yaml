@@ -1,6 +1,6 @@
 # =============================================================================
 # deploy-glm52 — A3 变体配置（未实机验证，仅拓扑/路径推演）
-# 拓扑：4xA3 2P+2D；Prefill dp4tp8（每节点 2 引擎），Decode dp4tp16（每节点 4 引擎）
+# 拓扑：4xA3 2P+2D；Prefill dp4tp8（每节点 2 引擎），Decode dp8tp4（每节点 4 引擎）
 # A3 未实机验证，字段依 A2 蓝本推演，实机跑通后需复核。
 # 使用： ./deploy.sh check && ./deploy.sh pull && ./deploy.sh start
 #   切换集群： CLUSTER_CONFIG=config-a3.yaml ./deploy.sh <command>
