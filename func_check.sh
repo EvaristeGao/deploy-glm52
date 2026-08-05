@@ -33,8 +33,8 @@ URL="http://${HOST}:${PORT}/v1/completions"
 echo "[func_check] 目标: $URL (model=$MODEL, count=$COUNT)"
 
 if [ "$WAIT" = "1" ]; then
-    echo "[func_check] 等待 proxy 可用..."
-    until curl -sf -o /dev/null --max-time 5 "$URL" 2>/dev/null; do sleep 5; done
+    echo "[func_check] 等待 proxy 可用 (GET http://${HOST}:${PORT}/healthcheck)..."
+    until curl -sf -o /dev/null --max-time 5 "http://${HOST}:${PORT}/healthcheck" 2>/dev/null; do sleep 5; done
 fi
 
 ok=0
