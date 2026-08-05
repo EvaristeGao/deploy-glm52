@@ -12,7 +12,7 @@ cluster:
 
 ssh:
   user: root
-  opts: "-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
+  opts: "-i /home/g00832294/.ssh/KeyPair-2956.pem -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
 
 image: quay.io/ascend/vllm-ascend:v0.23.0rc1-a3
 
@@ -21,7 +21,7 @@ model:
   served_model_name: glm-52
   dir_host: "/root/.cache"   # 非空则挂载 -v <dir_host>:/root/.cache（A3 用）
   mounts:                    # 原 EXTRA_MOUNTS 列表形式，每项一个 -v 参数
-    []
+    - "/mnt/share_space/:/mnt/share_space/"   # 共享目录挂载（日志持久化，与 A2 对齐）
 
 nodes:
   prefill:
@@ -58,9 +58,8 @@ runtime:
   ready_timeout: 2400
   proxy_ready_timeout: 600   # 与 config.yaml 对齐
 
-# A3 未挂载共享目录(mounts 为空)，日志用容器内 /root；若需持久化需在 model.mounts 加共享目录挂载
 logs:
-  dir: /root
+  dir: /mnt/share_space/g00832294/deploy-glm52/logs   # 与 config.yaml 对齐（共享目录，容器销毁后日志保留）
   vllm: vllm_{node}.log     # {node} 按节点替换，避免节点互相覆盖
   mooncake: mooncake.log
   proxy: proxy.log
