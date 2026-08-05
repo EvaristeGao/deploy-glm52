@@ -56,3 +56,5 @@ container:
 
 runtime:
   ready_timeout: 2400
+  # TODO(a3): 与 config.yaml 对齐补 proxy_ready_timeout 与 logs 段（deploy.sh 缺省值已覆盖，
+  #   不补也能用；待 A3 实机验证时一并确认）

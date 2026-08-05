@@ -44,8 +44,9 @@ CLUSTER_CONFIG=config-a3.yaml ./deploy.sh start
   渲染并分发到所有节点容器
 - **vllm 引擎**：每节点容器内运行 `launch_online_dp.py` + 渲染后的
   `run_dp_template.sh`，多引擎按 `dp_size_local` 逐卡拉起
-- **proxy**：镜像自带的 `load_balance_proxy_server_example.py`，在 `proxy.node`
-  （默认 p0）容器内拉起，端点列表按拓扑自动生成（`resolve/resolve_router.py`）
+- **proxy**：项目自带的 `load_balance_proxy_server_example.py`（内容以 a2.md 蓝本为准），
+  `deploy.sh start` 自动分发进 `proxy.node`（默认 p0）容器 `/root/pd/` 后拉起，
+  端点列表按拓扑自动生成（`resolve/resolve_router.py`）
 
 ## config.yaml 字段说明
 
@@ -67,12 +68,14 @@ CLUSTER_CONFIG=config-a3.yaml ./deploy.sh start
 | | `enable_prefix_caching` | 是否启用前缀缓存 |
 | `proxy` | `node` | proxy 所在节点名（默认 `p0`） |
 | | `port` | proxy 对外端口（A2 `1999`，A3 `8000`） |
-| | `script_path` | proxy 脚本在镜像内路径；留空时自动查找，找不到需手动指定 |
+| | `script_path` | proxy 脚本在**容器内**路径；留空时 `deploy.sh` 把项目自带脚本分发进 `/root/pd/` 并使用 |
 | `mooncake` | `port` | mooncake_master 端口（默认 `50088`） |
 | | `evict` | 驱逐高水位比例 |
 | | `config` | `global_segment_size` / `default_kv_lease_ttl`，写入 `mooncake.json` |
 | `container` | `name` / `shm_size` | 容器名（`vllm-ascend`）与共享内存大小（`1024g`） |
 | `runtime` | `ready_timeout` | `/health` 就绪等待超时（秒，默认 2400 = 40 分钟，可用 `READY_TIMEOUT` 覆盖） |
+| | `proxy_ready_timeout` | proxy `/healthcheck` 就绪超时（秒，默认 600；引擎全部就绪后才启动 proxy，此项兜住 vllm/torch 冷启动） |
+| `logs` | `vllm` / `mooncake` / `proxy` | 三个进程的容器内日志路径（默认 `/root/{vllm,mooncake,proxy}.log`，可改） |
 
 ## 前置条件
 
@@ -84,8 +87,8 @@ CLUSTER_CONFIG=config-a3.yaml ./deploy.sh start
   因此**执行 deploy.sh / verify.sh / func_check.sh 前先 `source .venv/bin/activate`**，
   让 `python3` 指向 venv（见 `deploy.sh` 顶部 TODO，后续计划改为自动检测 venv）。
 - 模型权重就绪：A2 默认共享目录 `/mnt/share_space/models`；A3 默认 `/root/.cache`
-- 镜像内包含 `mooncake_master` 与 `load_balance_proxy_server_example.py`
-  （proxy 路径自动查找，找不到时用 `config.proxy.script_path` 手动指定）
+- 镜像内含 `mooncake_master`；proxy 脚本由项目自带（`load_balance_proxy_server_example.py`，
+  `deploy.sh start` 自动分发进容器，也可用 `config.proxy.script_path` 指定容器内其他路径）
 - 本地开发/测试环境：`uv sync` 安装依赖后可用 `uv run pytest` 跑解析器用例
 
 ## 使用
@@ -110,7 +113,8 @@ CLUSTER_CONFIG=config-a3.yaml ./deploy.sh start
 ```bash
 ./deploy.sh status            # 各节点容器状态 + 每节点引擎 API 健康 + mooncake_master 状态
 ./deploy.sh logs p0           # 节点 vllm 日志 (p0..pN / d0..dN)，TAIL=100 可改行数
-./deploy.sh logs mooncake     # mooncake_master 日志 (p0 容器内 /root/mooncake.log)
+./deploy.sh logs mooncake     # mooncake_master 日志 (p0 容器内)
+./deploy.sh logs proxy        # proxy 日志（proxy 节点容器内）
 ./deploy.sh stop              # 停 proxy / mooncake_master + 删除所有节点容器
 ./deploy.sh gen               # 只渲染各节点模板与 mooncake.json 到 generated/ (调试用)
 ./deploy.sh --dry-run start   # 打印将执行的命令而不实际执行
@@ -144,6 +148,7 @@ curl http://<P0_IP>:1999/v1/completions \
 - `deploy.sh` — 主编排（check/pull/start/stop/status/logs/gen + `--dry-run`）
 - `verify.sh` / `func_check.sh` — 就绪探测与功能验证
 - `launch_online_dp.py` — 多引擎启动器（与 a2.md / 官方文档一致）
+- `load_balance_proxy_server_example.py` — 项目自带 proxy 脚本（a2.md 蓝本，`start` 自动分发进容器）
 - `resolve/resolve_node.py` — 按节点名输出启动参数（供 deploy.sh `eval`）
 - `resolve/resolve_instances.py` — 输出全部实例与 proxy 的 `role ip port` 探测目标
 - `resolve/resolve_router.py` — 输出 proxy 的 prefiller/decoder 端点列表
@@ -160,8 +165,8 @@ curl http://<P0_IP>:1999/v1/completions \
 
 - `start` 幂等：会先 `docker rm -f` 旧容器、pkill 旧 proxy/mooncake_master 再重建
 - mooncake_master 是单点（跑在 p0），p0 故障则 KV pool 不可用，需重新部署
-- proxy 脚本若未在镜像内自动找到，`deploy.sh start` 会报错退出，此时在
-  `config.proxy.script_path` 手动填入镜像内路径即可
+- proxy 脚本由项目自带，`deploy.sh start` 自动分发进容器 `/root/pd/` 后拉起；如需改用
+  容器内其他路径，在 `config.proxy.script_path` 手动填入容器内路径即可
 - `--dry-run` 全局可用：打印将执行的 SSH/SCP/docker 命令而不实际执行，适合先核对
   部署动作
 - A2 配置以跑通的 a2.md 为蓝本；**A3 版本（`config-a3.yaml`）尚未实机验证**，字段

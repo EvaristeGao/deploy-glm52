@@ -60,3 +60,9 @@ container:
 
 runtime:
   ready_timeout: 2400
+  proxy_ready_timeout: 600   # proxy 就绪等待（引擎全部就绪后启动，含 vllm/torch 冷启动）
+
+logs:
+  vllm: /root/vllm.log
+  mooncake: /root/mooncake.log
+  proxy: /root/proxy.log
