@@ -56,5 +56,11 @@ container:
 
 runtime:
   ready_timeout: 2400
-  # TODO(a3): 与 config.yaml 对齐补 proxy_ready_timeout 与 logs 段（deploy.sh 缺省值已覆盖，
-  #   不补也能用；待 A3 实机验证时一并确认）
+  proxy_ready_timeout: 600   # 与 config.yaml 对齐
+
+# A3 未挂载共享目录(mounts 为空)，日志用容器内 /root；若需持久化需在 model.mounts 加共享目录挂载
+logs:
+  dir: /root
+  vllm: vllm_{node}.log     # {node} 按节点替换，避免节点互相覆盖
+  mooncake: mooncake.log
+  proxy: proxy.log
