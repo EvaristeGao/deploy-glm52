@@ -25,10 +25,12 @@ probe() {
     local role="$1" ip="$2" port="$3" path="/health"
     [ "$role" = "proxy" ] && path="/healthcheck"
     local resp
-    resp=$($RES -c "import urllib.request,sys
+    resp=$($RES -c "import urllib.request, urllib.error, sys
 try:
     r=urllib.request.urlopen('http://$ip:$port$path',timeout=5)
     print(r.status)
+except urllib.error.HTTPError as e:
+    print(e.code)
 except Exception:
     print('000')")
     if [ "$resp" = "200" ]; then printf "  ✓ %-7s %s:%s  READY\n" "$role" "$ip" "$port"; return 0
