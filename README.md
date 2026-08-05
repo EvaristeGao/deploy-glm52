@@ -79,7 +79,10 @@ CLUSTER_CONFIG=config-a3.yaml ./deploy.sh start
 - 控制机能 SSH 免密登录所有节点（默认 root）
 - 所有节点已安装 docker，NPU 驱动正常（`npu-smi` 可用），内存足够（`--shm-size=1024g`）
 - 控制机装有 Python3 与 `pyyaml`（`pip install pyyaml`）；`deploy.sh` 启动时会校验，
-  缺失报错退出
+  缺失报错退出。**注意**：解析器（`resolve/`）只在控制机本地跑，**8 台远程节点不需要 pyyaml**。
+  本机用 uv 管理环境时，pyyaml 只装在 `.venv` 里，而脚本默认调系统 `python3`（可能无 pyyaml）；
+  因此**执行 deploy.sh / verify.sh / func_check.sh 前先 `source .venv/bin/activate`**，
+  让 `python3` 指向 venv（见 `deploy.sh` 顶部 TODO，后续计划改为自动检测 venv）。
 - 模型权重就绪：A2 默认共享目录 `/mnt/share_space/models`；A3 默认 `/root/.cache`
 - 镜像内包含 `mooncake_master` 与 `load_balance_proxy_server_example.py`
   （proxy 路径自动查找，找不到时用 `config.proxy.script_path` 手动指定）
@@ -89,8 +92,12 @@ CLUSTER_CONFIG=config-a3.yaml ./deploy.sh start
 
 以 A2 为例（A3 加 `CLUSTER_CONFIG=config-a3.yaml` 前缀）：
 
-1. 编辑 `config.yaml`，填入节点 IP、网卡名（`ifconfig` 可查）、镜像、模型路径。
-2. 依次执行：
+1. 先激活 venv（解析器需要 pyyaml，见「前置条件」）：
+   ```bash
+   source .venv/bin/activate
+   ```
+2. 编辑 `config.yaml`，填入节点 IP、网卡名（`ifconfig` 可查）、镜像、模型路径。
+3. 依次执行：
 
 ```bash
 ./deploy.sh check    # 预检: config 可解析 + SSH 连通 + 远端 docker

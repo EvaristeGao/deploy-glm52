@@ -46,6 +46,9 @@ CMD="${1:-}"; shift || true
 
 # ---------- 加载配置 ----------
 [[ -f "$CONFIG" ]] || die "配置文件不存在: $CONFIG (用 CLUSTER_CONFIG=config-a3.yaml 切换)"
+# TODO: 解析器需要在控制机本地跑 pyyaml, 但本机系统 python3(3.9) 无 pyyaml, 仅 .venv 内 python 有。
+#   当前依赖执行前手动 `source .venv/bin/activate` (README "前置条件" 已注明)。
+#   更稳的做法: 顶部自动检测 .venv/bin/python 存在则用之, 否则回退 python3, 消除对 source 的依赖。
 python3 -c "import yaml" 2>/dev/null || die "远程/控制机缺少 pyyaml, 请 pip install pyyaml"
 
 # 推导节点表 (p0..pN, d0..dN) 与各自 IP/NIC

@@ -11,7 +11,7 @@ cluster:
 
 ssh:
   user: root
-  opts: "-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
+  opts: "-i /home/g00832294/.ssh/KeyPair-2956.pem -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
 
 image: quay.io/ascend/vllm-ascend:v0.23.0rc1
 
@@ -25,15 +25,15 @@ model:
 
 nodes:
   prefill:
-    - { ip: "", nic: "" }
-    - { ip: "", nic: "" }
-    - { ip: "", nic: "" }
-    - { ip: "", nic: "" }
+    - { ip: "192.168.0.245", nic: "enp67s0f5" }
+    - { ip: "192.168.0.15",  nic: "enp67s0f5" }
+    - { ip: "192.168.0.160", nic: "enp67s0f5" }
+    - { ip: "192.168.0.91",  nic: "enp67s0f5" }
   decode:
-    - { ip: "", nic: "" }
-    - { ip: "", nic: "" }
-    - { ip: "", nic: "" }
-    - { ip: "", nic: "" }
+    - { ip: "192.168.0.127", nic: "enp67s0f5" }
+    - { ip: "192.168.0.161", nic: "enp67s0f5" }
+    - { ip: "192.168.0.154", nic: "enp67s0f5" }
+    - { ip: "192.168.0.140", nic: "enp67s0f5" }
 
 pd_cluster:
   max_model_len: 200000

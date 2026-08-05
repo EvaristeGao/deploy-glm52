@@ -4,3 +4,4 @@ __pycache__/
 *_logs/
 .venv/
 uv.lock
+.claude/settings.local.json*
