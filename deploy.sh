@@ -51,17 +51,8 @@ python3 -c "import yaml" 2>/dev/null || die "远程/控制机缺少 pyyaml, 请 
 # 推导节点表 (p0..pN, d0..dN) 与各自 IP/NIC
 NODES=()
 declare -A IP NIC ROLE IDX
-eval "$(python3 "$RESOLVE/resolve_node.py" --config "$CONFIG" --node p0 >/dev/null 2>/dev/null; true)" 2>/dev/null || true
-# 用 resolve_instances 构建 role ip 映射
-while read -r role ip port; do
-    [[ -n "$role" ]] || continue
-    if [[ "$role" == proxy ]]; then continue; fi
-    break
-done < <(python3 "$RESOLVE/resolve_instances.py" --config "$CONFIG")
-# 上面循环仅用于探测 config 可解析；真正建表用 resolve_node 逐节点查询
 _parse_nodes() {
-    local role_prefix="$1" role="$2" count i
-    count=$(python3 "$RESOLVE/resolve_node.py" --config "$CONFIG" --node "${role_prefix}0" 2>/dev/null | grep -c '^')
+    local role_prefix="$1" role="$2" i
     # 节点数从 config 的 nodes 派生
     local n
     n=$(python3 -c "
@@ -69,9 +60,11 @@ import yaml,sys
 cfg=yaml.safe_load(open('$CONFIG'))
 print(len(cfg['nodes']['$role']))")
     for i in $(seq 0 $((n-1))); do
-        local node="${role_prefix}${i}"
+        local node="${role_prefix}${i}" out
         NODES+=("$node")
-        eval "$(python3 "$RESOLVE/resolve_node.py" --config "$CONFIG" --node "$node")"
+        out=$(python3 "$RESOLVE/resolve_node.py" --config "$CONFIG" --node "$node") || die "解析节点 $node 失败"
+        [[ -n "$out" ]] || die "解析节点 $node 失败"
+        eval "$out"
         IP[$node]="$LOCAL_IP"; NIC[$node]="$NIC"; ROLE[$node]="$ROLE"; IDX[$node]="$NODE_INDEX"
     done
 }
@@ -144,12 +137,12 @@ cmd_pull() {
 }
 
 wait_ready() {
-    local name="$1" url="$2" elapsed=0
-    log "等待 $name 就绪 ($url, 超时 ${READY_TIMEOUT}s)"
+    local name="$1" url="$2" timeout="${3:-$READY_TIMEOUT}" elapsed=0
+    log "等待 $name 就绪 ($url, 超时 ${timeout}s)"
     if [[ $DRY_RUN -eq 1 ]]; then echo "[dry-run] poll $url"; return 0; fi
     while true; do
         if curl -sf -o /dev/null --max-time 5 "$url"; then log "$name 已就绪 (${elapsed}s)"; return 0; fi
-        [[ $elapsed -ge $READY_TIMEOUT ]] && return 1
+        [[ $elapsed -ge $timeout ]] && return 1
         sleep 15; elapsed=$((elapsed+15))
     done
 }
@@ -224,6 +217,7 @@ cmd_start() {
     done < <(python3 "$RESOLVE/resolve_instances.py" --config "$CONFIG")
 
     start_proxy
+    wait_ready "proxy" "http://${IP[$PROXY_NODE]:-}:$PROXY_PORT/healthcheck" 120 || die "proxy /healthcheck 就绪超时"
     smoke_test
     log "部署完成, 统一入口: http://${IP[$PROXY_NODE]:-}:$PROXY_PORT/v1 (model: $MODEL_NAME)"
 }
@@ -241,7 +235,6 @@ start_proxy() {
     pnode=$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG'))['proxy']['node'])")
     pport=$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG'))['proxy']['port'])")
     PROXY_PORT=$pport
-    local pidx="${pnode#p}"
     pnode_ip="${IP[$pnode]:-}"
     [[ -n "$pnode_ip" ]] || die "PROXY_NODE=$pnode 无效, 可选: ${NODES[*]}"
     PROXY_NODE=$pnode
@@ -271,7 +264,7 @@ smoke_test() {
         -d "{\"model\": \"$MODEL_NAME\", \"prompt\": \"The future of AI is\", \"max_completion_tokens\": 20, \"temperature\": 0}"); then
         log "冒烟测试通过: $(echo "$resp" | head -c 200)"
     else
-        warn "冒烟测试失败, 请查看 proxy.log 与各节点日志"
+        die "冒烟测试失败, 请查看 proxy.log 与各节点日志"
     fi
 }
 
