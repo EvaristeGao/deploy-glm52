@@ -20,7 +20,7 @@
 - **当前分支**：`main`（已合并实现分支，工作区干净）。
 - **最新提交**：`509de9f fix: config.yaml 权重改 w4a8c8、挂载加 /data2（对齐实机 solution-2）`。
 - **测试**：`uv run pytest tests/` → **23 个用例全部通过**；5 个脚本 `bash -n` 语法检查通过。
-- **实机验证**：**尚未在真实集群上跑通**（A2 与 A3 均未实机验证）。代码基于 a2.md 蓝本还原，逻辑已通过单测和 dry-run 预演，但**没在 8 机 A2 上真正部署成功过**。
+- **实机验证（A2 已跑通）**：已在 8 机 A2 上**完整部署成功**——`./deploy.sh start` 正式编排全流程跑通（8 容器 + mooncake_master + 4P/8D 共 12 引擎 + proxy + 内建冒烟），13/13 实例 READY，端到端请求经 proxy 走通 P/D 分离链路（`fingerprint tp4-dp8` 证明 decode 参与），`verify.sh` 13/13、`func_check.sh` 通过。修复了 3 个实机问题（见 commit `fd4843f`）：① `--pid=host` 下 pkill -f 误杀 ssh（改 `pkill -x` / 锚定 `^python3`）② proxy 脚本为手动提供非镜像内置（已随附 `load_balance_proxy_server_example.py`，start 自动分发）③ proxy 就绪超时 120s 改可配默认 600s。A3 仍**未实机验证**。
 
 ---
 
@@ -143,7 +143,7 @@ deploy-glm52/
 
 ## 7. 已知事项与风险
 
-1. **A2 与 A3 均未实机验证**——A3 更是纯推演（config-a3.yaml 顶部已标注）。首次部署前建议 `./deploy.sh gen` 审查渲染产物，并用 `--dry-run` 预演。
+1. **A2 已实机验证通过**（见第 2 节）；**A3 仍未实机验证**——纯推演（config-a3.yaml 顶部已标注），首次部署 A3 前建议 `./deploy.sh gen` 审查渲染产物并用 `--dry-run` 预演。
 2. **A3 镜像 tag** `v0.23.0rc1-a3` 未确认存在；A3 的 `VLLM_ASCEND_ENABLE_MLAPO` 等环境变量是否适用未验证。
 3. **proxy 脚本来源**：proxy 脚本（`load_balance_proxy_server_example.py`）是**手动提供的**，内容以 a2.md 蓝本为准，不在镜像内。已落进项目根目录，`deploy.sh start` 自动分发进容器 `/root/pd/` 后拉起（可用 `proxy.script_path` 指定容器内其他路径）。**注意**：容器 `--pid=host`，deploy.sh 内清理 mooncake/proxy 的 pkill 已改用精确匹配（`pkill -x mooncake_master` / `pkill -f '^python3 .*load_balance_proxy_server_example'`），避免误杀控制机 ssh 会话。
 4. **mooncake_master 单点**：跑在 p0，p0 故障则 KV pool 不可用。
@@ -153,7 +153,7 @@ deploy-glm52/
 
 ## 8. 后续建议（移交给下个 Agent 的候选任务）
 
-1. **实机验证 A2**：在真实 8 机 A2 上跑 `check → pull → start`，重点确认 mooncake_master 在容器内可启动、proxy 分发后能就绪（import vllm/torch 冷启动较慢，`runtime.proxy_ready_timeout` 默认 600s 已覆盖）、全引擎就绪等待是否正常。
+1. **实机验证 A2**：**已完成**（`./deploy.sh start` 全流程跑通，见第 2 节）。后续如需复验，直接 `check` → `start` → `verify.sh`。
 2. **A3 实机验证**：确认 `-a3` 镜像 tag、RoCE 关闭后的拓扑与参数是否适用。
 3. **可选改进**：把「单节点多引擎共用 rpc_port」在 README 里补一句说明（master-bind 语义），避免其他人误判为 bug。
 4. **可选**：把本次 solution-2 对比结论沉淀进 README，并清掉 docs/ 里过时的 w4a8 历史引用。
