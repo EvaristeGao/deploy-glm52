@@ -43,7 +43,7 @@ def main():
     # proxy 节点名 → IP
     pnode = cfg["proxy"]["node"].lower()
     pidx = int(pnode[1:])
-    p_role, p_ip = ("prefill", cfg["nodes"]["prefill"][pidx]) if pnode.startswith("p") else ("decode", cfg["nodes"]["decode"][pidx])
+    p_ip = cfg["nodes"]["prefill"][pidx] if pnode.startswith("p") else cfg["nodes"]["decode"][pidx]
     proxy_ip = p_ip["ip"] if isinstance(p_ip, dict) else p_ip
 
     print(f"PROXY_HOST={proxy_ip}")

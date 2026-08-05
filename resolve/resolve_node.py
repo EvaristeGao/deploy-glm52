@@ -43,7 +43,11 @@ def main():
     args = ap.parse_args()
 
     cfg = load(args.config)
-    role, idx, nd = node_info(cfg, args.node)
+    try:
+        role, idx, nd = node_info(cfg, args.node)
+    except ValueError:
+        sys.stderr.write(f"ERROR: 未知节点名: {args.node}\n")
+        sys.exit(2)
     pdc = cfg["pd_cluster"]
     pconf = pdc["prefill"]
     dconf = pdc["decode"]
