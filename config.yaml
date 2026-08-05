@@ -1,0 +1,61 @@
+# =============================================================================
+# deploy-glm52 — 唯一配置源（A2 示例，以跑通的 a2.md 为蓝本）
+# 拓扑：8xA2 4P+4D；Prefill dp4tp8（每节点 1 引擎 :9081），Decode dp8tp4（每节点 2 引擎 :9900 :9901）
+# 使用： ./deploy.sh check && ./deploy.sh pull && ./deploy.sh start
+#   切换集群： CLUSTER_CONFIG=config-a3.yaml ./deploy.sh <command>
+# =============================================================================
+
+cluster:
+  name: a2
+  desc: "8xA2 4P+4D"
+
+ssh:
+  user: root
+  opts: "-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
+
+image: quay.io/ascend/vllm-ascend:v0.23.0rc1
+
+model:
+  path: /mnt/share_space/models/GLM-5.2-w4a8
+  served_model_name: glm-52
+  dir_host: ""            # 非空则挂载 -v <dir_host>:/root/.cache（A3 用）
+  mounts:                 # 原 EXTRA_MOUNTS 列表形式，每项一个 -v 参数
+    - "/mnt/share_space/:/mnt/share_space/"
+
+nodes:
+  prefill:
+    - { ip: "", nic: "" }
+    - { ip: "", nic: "" }
+    - { ip: "", nic: "" }
+    - { ip: "", nic: "" }
+  decode:
+    - { ip: "", nic: "" }
+    - { ip: "", nic: "" }
+    - { ip: "", nic: "" }
+    - { ip: "", nic: "" }
+
+pd_cluster:
+  max_model_len: 200000
+  num_cards: 8
+  prefill: { dp_size: 4, tp_size: 8, dp_size_local: 1, base_port: 9081, kv_port: 30000, rpc_port: 16591 }
+  decode:  { dp_size: 8, tp_size: 4, dp_size_local: 2, base_port: 9900, kv_port: 30100, rpc_port: 16600 }
+  enable_prefix_caching: true
+
+proxy:
+  node: p0
+  port: 1999
+  script_path: ""
+
+mooncake:
+  port: 50088
+  evict: 0.9
+  config:
+    global_segment_size: "80GB"
+    default_kv_lease_ttl: 11000
+
+container:
+  name: vllm-ascend
+  shm_size: 1024g
+
+runtime:
+  ready_timeout: 2400
