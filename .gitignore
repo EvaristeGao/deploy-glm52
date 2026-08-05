@@ -2,3 +2,5 @@ generated/
 __pycache__/
 *.pyc
 *_logs/
+.venv/
+uv.lock
