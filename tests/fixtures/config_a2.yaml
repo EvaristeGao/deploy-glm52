@@ -1,0 +1,24 @@
+cluster: { name: a2, desc: test }
+image: img:test
+model: { path: /m/models, served_model_name: glm-52, dir_host: "", mounts: [] }
+nodes:
+  prefill:
+    - { ip: "10.0.0.1", nic: enp23s0f3 }
+    - { ip: "10.0.0.2", nic: enp23s0f3 }
+    - { ip: "10.0.0.3", nic: enp23s0f3 }
+    - { ip: "10.0.0.4", nic: enp23s0f3 }
+  decode:
+    - { ip: "10.0.0.5", nic: enp23s0f3 }
+    - { ip: "10.0.0.6", nic: enp23s0f3 }
+    - { ip: "10.0.0.7", nic: enp23s0f3 }
+    - { ip: "10.0.0.8", nic: enp23s0f3 }
+pd_cluster:
+  max_model_len: 200000
+  num_cards: 8
+  prefill: { dp_size: 4, tp_size: 8, dp_size_local: 1, base_port: 9081, kv_port: 30000, rpc_port: 16591 }
+  decode:  { dp_size: 8, tp_size: 4, dp_size_local: 2, base_port: 9900, kv_port: 30100, rpc_port: 16600 }
+  enable_prefix_caching: true
+proxy: { node: p0, port: 1999, script_path: "" }
+mooncake: { port: 50088, evict: 0.9 }
+container: { name: vllm-ascend, shm_size: 1024g }
+runtime: { ready_timeout: 2400 }
