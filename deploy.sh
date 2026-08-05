@@ -187,7 +187,7 @@ start_mooncake_master() {
     log "在 p0 (${IP[p0]}) 容器内拉起 mooncake_master (:$MOONCAKE_PORT)"
     # 注意容器 --pid=host: pkill/pgrep 会看到 host 全部进程, 必须用 -x 精确匹配进程名,
     # 否则 -f 会匹配控制机 ssh 会话自身命令行而误杀/误判
-    sshn p0 "docker exec $CONTAINER_NAME pkill -x mooncake_master 2>/dev/null || true; \
+    sshn p0 "docker exec $CONTAINER_NAME mkdir -p '$LOGS_DIR' 2>/dev/null || true; docker exec $CONTAINER_NAME pkill -x mooncake_master 2>/dev/null || true; \
         docker exec -d $CONTAINER_NAME bash -c \
         'mooncake_master -port $MOONCAKE_PORT -eviction_high_watermark_ratio $MOONCAKE_EVICT >> $MOONCAKE_LOG 2>&1' && \
         sleep 2 && docker exec $CONTAINER_NAME pgrep -x mooncake_master >/dev/null && echo mooncake_master alive"
@@ -196,11 +196,11 @@ start_mooncake_master() {
 start_engines() {
     local node="$1"
     eval "$(python3 "$RESOLVE/resolve_node.py" --config "$CONFIG" --node "$node")"
-    sshn "$node" "docker exec -d $CONTAINER_NAME bash -c \
+    sshn "$node" "docker exec $CONTAINER_NAME mkdir -p '$LOGS_DIR' 2>/dev/null || true; docker exec -d $CONTAINER_NAME bash -c \
         'cd /root/pd && python3 launch_online_dp.py \
         --dp-size $DP_SIZE --tp-size $TP_SIZE --dp-size-local $DP_SIZE_LOCAL \
         --dp-rank-start $DP_RANK_START --dp-address $DP_ADDRESS \
-        --dp-rpc-port $DP_RPC_PORT --vllm-start-port $VLLM_START_PORT >> $VLLM_LOG 2>&1'"
+        --dp-rpc-port $DP_RPC_PORT --vllm-start-port $VLLM_START_PORT >> $(vllm_log $node) 2>&1'"
     log "$node vllm 已后台拉起"
 }
 
@@ -257,7 +257,7 @@ start_proxy() {
     log "在节点 $pnode 拉起 proxy: $script_path"
     # 注意容器 --pid=host: pkill 会看到 host 全部进程, proxy 进程 cmdline 以 python3 开头,
     # 锚定 ^python3 避免误杀控制机 ssh 会话(其 cmdline 以 ssh 开头)
-    sshn "$pnode" "docker exec $CONTAINER_NAME pkill -f '^python3 .*load_balance_proxy_server_example' 2>/dev/null || true; \
+    sshn "$pnode" "docker exec $CONTAINER_NAME mkdir -p '$LOGS_DIR' 2>/dev/null || true; docker exec $CONTAINER_NAME pkill -f '^python3 .*load_balance_proxy_server_example' 2>/dev/null || true; \
         docker exec -d $CONTAINER_NAME bash -c \
         'unset http_proxy https_proxy; python3 $script_path $args >> $PROXY_LOG 2>&1' && echo proxy started"
 }
@@ -315,7 +315,7 @@ cmd_logs() {
         sshn "$pn" "docker exec $CONTAINER_NAME tail -n ${TAIL:-100} $PROXY_LOG"; return
     fi
     [[ -n "${IP[$node]:-}" ]] || die "未知节点: $node (可选: ${NODES[*]})"
-    sshn "$node" "docker exec $CONTAINER_NAME tail -n ${TAIL:-100} $VLLM_LOG"
+    sshn "$node" "docker exec $CONTAINER_NAME tail -n ${TAIL:-100} $(vllm_log $node)"
 }
 
 cmd_gen() {
@@ -343,9 +343,12 @@ MOONCAKE_EVICT=$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG'))['
 NUM_CARDS=$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG'))['pd_cluster'].get('num_cards',8))")
 CLUSTER_TYPE=$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG'))['cluster']['name'])")
 # 日志路径与 proxy 超时（config logs 段 / runtime.proxy_ready_timeout，缺省按 deploy.sh 原默认）
-MOONCAKE_LOG=$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG')).get('logs',{}).get('mooncake','/root/mooncake.log'))")
-VLLM_LOG=$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG')).get('logs',{}).get('vllm','/root/vllm.log'))")
-PROXY_LOG=$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG')).get('logs',{}).get('proxy','/root/proxy.log'))")
+# logs.dir 为共享目录(容器内可见)时，容器销毁后日志仍保留；vllm 日志按节点区分(vllm_{node}.log)避免互相覆盖
+LOGS_DIR=$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG')).get('logs',{}).get('dir','') or '/root')")
+VLLM_LOG_TPL=$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG')).get('logs',{}).get('vllm','vllm_{node}.log'))")
+MOONCAKE_LOG="$LOGS_DIR/$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG')).get('logs',{}).get('mooncake','mooncake.log'))")"
+PROXY_LOG="$LOGS_DIR/$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG')).get('logs',{}).get('proxy','proxy.log'))")"
+vllm_log() { local node="$1"; echo "$LOGS_DIR/${VLLM_LOG_TPL/\{node\}/$node}"; }
 PROXY_READY_TIMEOUT=$(python3 -c "import yaml;print(yaml.safe_load(open('$CONFIG'))['runtime'].get('proxy_ready_timeout',600))")
 
 case "$CMD" in

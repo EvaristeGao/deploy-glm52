@@ -75,7 +75,8 @@ CLUSTER_CONFIG=config-a3.yaml ./deploy.sh start
 | `container` | `name` / `shm_size` | 容器名（`vllm-ascend`）与共享内存大小（`1024g`） |
 | `runtime` | `ready_timeout` | `/health` 就绪等待超时（秒，默认 2400 = 40 分钟，可用 `READY_TIMEOUT` 覆盖） |
 | | `proxy_ready_timeout` | proxy `/healthcheck` 就绪超时（秒，默认 600；引擎全部就绪后才启动 proxy，此项兜住 vllm/torch 冷启动） |
-| `logs` | `vllm` / `mooncake` / `proxy` | 三个进程的容器内日志路径（默认 `/root/{vllm,mooncake,proxy}.log`，可改） |
+| `logs` | `dir` | 日志目录（容器内路径；可指向挂载的共享目录如 `/mnt/share_space/<工号>/deploy-glm52/logs`，**容器销毁后日志仍保留**；留空则用 `/root`） |
+| | `vllm` / `mooncake` / `proxy` | 日志文件名（`vllm` 支持 `{node}` 占位符按节点替换为 `vllm_p0.log`/`vllm_d0.log` 等，**避免节点互相覆盖**；默认 `vllm_{node}.log`/`mooncake.log`/`proxy.log`） |
 
 ## 前置条件
 
