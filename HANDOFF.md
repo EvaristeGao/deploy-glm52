@@ -94,9 +94,34 @@ deploy-glm52/
 
 ---
 
-## 6. 与实机配置 solution-2 的对比结论
+## 6. 上层目录依赖与随附参考（只移交本目录时必读）
 
-`/home/gao/code/script/solution-2/` 是**同事最新实机跑通的配置**（8 机 A2，含真实运行日志 run.log.bak）。已逐项核对，结论如下：
+`deploy-glm52/` 的代码大量源于上层目录（`/home/gao/code/script/`）的蓝本文件。**如果只拷贝 `deploy-glm52/` 目录，下面这些信息必须知晓**，否则代码里的引用会悬空、实机排障会无从下手。
+
+### 已经随附进本目录的
+- **`reference/a2.md`**（2516 行）—— 权威蓝本。deploy.sh / templates / config.yaml 都声明「以跑通的 a2.md 为蓝本」，本目录内所有参数均还原自它。**这是最重要的随附文件**，务必保留。
+
+### 真机已有、无需随附的
+- **`/mnt/share_space/solution-2/`** —— 同事实机跑通的配置（8 机 A2，含各节点 `model-run.sh`、`run_dp_template.sh`、`docker-run.sh`、`start-proxy.sh`、`mooncake.json`、`load_balance_proxy_server_example.py`，以及 `run.log`/`run.log.bak` 真实运行日志）。**目标机器上已存在此目录**（正是从 A2 服务器拷贝过去的），所以未随附。需要实机对照时，直接参考真机上的 `/mnt/share_space/solution-2/`。
+
+### 上层目录其他文件（未随附，说明去向）
+| 上层文件 | 说明 |
+| --- | --- |
+| `scripts/launch_online_dp.py` | 已拷贝进本目录根 `launch_online_dp.py`（diff 确认一致） |
+| `templates/a2/`、`templates/a3/` | 已改造为参数化模板 `templates/run_dp_*_template.sh` |
+| `deploy.sh`（根目录的旧版） | 本套件是它的改进版，无需随附 |
+| `cluster-a2.env` / `cluster-a3.env` | 旧 env 配置，已被 config.yaml 取代 |
+| `README.md`（根目录） | 旧方案说明，本目录有新版 README |
+| `vllm-ascend/.ci/example-glm5.2-1m/` | 合作方 1M 版脚本，仅架构借鉴，无运行时依赖 |
+
+### 实机部署时两种模式的取舍
+- solution-2 用的是**单 `MooncakeConnectorV1`**（无 mooncake_master KV pool）——这是同事测「不开 MoonCake 性能」的版本。
+- 本套件用的是 **`MultiConnector`（MooncakeConnectorV1 + AscendStoreConnector）+ mooncake_master** KV pool——这是 a2.md 蓝本、也是同事确认「对的」配置。
+- 部署时若想对照/切换两种模式，可编辑 `templates/run_dp_*_template.sh` 的 `kv-transfer-config` 段（当前是 MultiConnector；改成单 Mooncake 需参考真机 `/mnt/share_space/solution-2/*/run_dp_template.sh`）。
+
+---
+
+## 7. 与实机配置 solution-2 的对比结论
 
 ### 已确认一致的（无需改）
 - **拓扑**：p0-p3 dp-size-local 1（rank 0/1/2/3，dp4tp8）、d0-d3 dp-size-local 2（rank 0/2/4/6，dp8tp4）——与我们的 config.yaml 及运行日志完全一致。
