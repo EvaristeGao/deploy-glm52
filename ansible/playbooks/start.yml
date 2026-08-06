@@ -9,7 +9,7 @@
 #
 # 阶段 tags（对应 deploy.sh 子流程，便于分段重跑/排查）：
 #   container / mooncake / engine / wait / proxy / smoke
-#   `--tags engine` 等只跑对应阶段；配置加载（include_vars / cfg）标 always 恒执行。
+#   `--tags engine` 等只跑对应阶段；配置加载（include_vars）标 always 恒执行。
 #   --dry-run 近似：Ansible 无 dry-run 子命令，用 `--check` 试跑（渲染/命令任务只报告不执行）。
 - name: deploy-glm52 一键部署（第一阶段：起容器 + 分发 + mooncake）
   hosts: all
@@ -73,40 +73,34 @@
 
     # ==================== 第二阶段：引擎（任务 6，对照 deploy.sh start_engines） ====================
     # 核心：Jinja2 模板的 local_ip 用节点命令 register（节点命令替换，非静态值），
-    #       启动参数用 resolve filter（resolve_node 大写 KEY → 小写模板变量）。
+    #       启动参数用 set_fact 派生（Jinja2，N3 语义，替代 resolve_node filter）。
     # 安全点：只渲染模板 + 起引擎，不实机跑（syntax-check 只验语法）。
 
-    - name: 读取 config 全量 dict（供 resolve filter；include_vars 只拆了顶层字段）
+    - name: 派生本节点角色/索引（Jinja2 表达式，N3 语义，替代 resolve_node filter）
       set_fact:
-        cfg: "{{ lookup('file', playbook_dir + '/../../config.yaml') | from_yaml }}"
-      tags: always
-
-    - name: resolve_node 计算本节点启动参数（大写 KEY）
-      set_fact:
-        node_cfg: "{{ cfg | resolve_node(inventory_hostname) }}"
+        node_role: "{{ 'prefill' if inventory_hostname[0] == 'p' else 'decode' }}"
+        node_idx: "{{ inventory_hostname[1:] | int }}"
+        served_model_name: "{{ model_name }}"
+        mooncake_config_path: "/root/pd/mooncake.json"
       tags: engine
 
-    - name: 组装模板变量（filter 大写 KEY → 小写模板变量，+ 跨角色 dp/tp + mooncake 路径）
+    - name: 派生本节点启动参数（Jinja2 表达式，N3 语义，替代 resolve_node filter）
       set_fact:
-        node_role: "{{ node_cfg['ROLE'] }}"
-        nic: "{{ node_cfg['NIC'] }}"
-        model_path: "{{ node_cfg['MODEL_PATH'] }}"
-        served_model_name: "{{ node_cfg['SERVED_MODEL_NAME'] }}"
-        max_model_len: "{{ node_cfg['MAX_MODEL_LEN'] }}"
-        kv_port: "{{ node_cfg['KV_PORT'] }}"
-        start_port: "{{ node_cfg['VLLM_START_PORT'] }}"
-        dp_size: "{{ node_cfg['DP_SIZE'] }}"
-        dp_size_local: "{{ node_cfg['DP_SIZE_LOCAL'] }}"
-        dp_rank: "{{ node_cfg['DP_RANK_START'] }}"
-        dp_address: "{{ node_cfg['DP_ADDRESS'] }}"
-        rpc_port: "{{ node_cfg['DP_RPC_PORT'] }}"
-        tp_size: "{{ node_cfg['TP_SIZE'] }}"
-        cluster_type: "{{ node_cfg['CLUSTER_TYPE'] }}"
-        prefill_dp: "{{ cfg['pd_cluster']['prefill']['dp_size'] }}"
-        prefill_tp: "{{ cfg['pd_cluster']['prefill']['tp_size'] }}"
-        decode_dp: "{{ cfg['pd_cluster']['decode']['dp_size'] }}"
-        decode_tp: "{{ cfg['pd_cluster']['decode']['tp_size'] }}"
-        mooncake_config_path: "/root/pd/mooncake.json"
+        dp_size: "{{ pd_cluster[node_role].dp_size }}"
+        dp_size_local: "{{ pd_cluster[node_role].dp_size_local }}"
+        tp_size: "{{ pd_cluster[node_role].tp_size }}"
+        dp_rank: "{{ node_idx * pd_cluster[node_role].dp_size_local }}"
+        dp_address: "{{ hostvars[groups[node_role][0]].ansible_host }}"
+        rpc_port: "{{ pd_cluster[node_role].rpc_port }}"
+        start_port: "{{ pd_cluster[node_role].base_port }}"
+        kv_port: "{{ pd_cluster[node_role].kv_port }}"
+        max_model_len: "{{ pd_cluster.max_model_len }}"
+        cluster_type: "{{ cluster_type }}"
+        model_path: "{{ model_path }}"
+        prefill_dp: "{{ pd_cluster.prefill.dp_size }}"
+        prefill_tp: "{{ pd_cluster.prefill.tp_size }}"
+        decode_dp: "{{ pd_cluster.decode.dp_size }}"
+        decode_tp: "{{ pd_cluster.decode.tp_size }}"
       tags: engine
 
     - name: 计算 vllm 日志路径（logs.dir 为空回退 /root，{node} 按节点替换，对照 deploy.sh vllm_log）
@@ -139,9 +133,23 @@
       tags: engine
 
     # ==================== wait_ready（对照 deploy.sh cmd_start 的 wait_ready 段） ====================
-    # 实例清单经 run_once 在控制端生成（resolve_instances 返回 role ip port，跳过 proxy）；
+    # 实例清单经 run_once 在控制端生成（Jinja2 替代 resolve_instances，返回 role ip port，跳过 proxy）；
     # retries 由 runtime.ready_timeout 折算（2400s / 15s = 160）
-    - name: 等待全部实例就绪（uri + until，遍历 resolve_instances）
+    - name: 生成实例清单（run_once，Jinja2 替代 resolve_instances filter）
+      run_once: true
+      set_fact:
+        instance_list: |-
+          {% set il = [] -%}
+          {% for role in ['prefill', 'decode'] -%}
+          {% for h, r in groups[role] | product(range(pd_cluster[role].dp_size_local)) -%}
+          {% set _ = il.append([role, hostvars[h].ansible_host, pd_cluster[role].base_port + r]) -%}
+          {% endfor -%}
+          {% endfor -%}
+          {% set _ = il.append(['proxy', hostvars[groups['proxy'][0]].ansible_host, proxy.port]) -%}
+          {{ il }}
+      tags: wait
+
+    - name: 等待全部实例就绪（uri + until，遍历实例清单）
       run_once: true
       uri:
         url: "http://{{ item[1] }}:{{ item[2] }}/health"
@@ -151,30 +159,28 @@
       until: result.status == 200
       retries: "{{ (runtime.ready_timeout | default(2400)) | int // 15 }}"
       delay: 15
-      loop: "{{ cfg | resolve_instances }}"
+      loop: "{{ instance_list }}"
       when: item[0] != 'proxy'
       tags: wait
 
     # ==================== proxy + 冒烟（任务 7，对照 deploy.sh start_proxy + wait_ready proxy + smoke_test） ====================
-    # 端点来源：resolve_router filter 返回 dict（PROXY_HOST/PROXY_PORT/PREFILLER_HOSTS/PREFILLER_PORTS/DECODER_HOSTS/DECODER_PORTS）。
-    #   多值字段（PREFILLER_HOSTS 等）在 filter 里已按空白拆成 list，这里 join(' ') 还原成空格分隔，
-    #   与 deploy.sh proxy_args 里 '$PREFILLER_HOSTS' 展开效果一致（proxy 脚本 nargs='+' 接收）。
+    # 端点来源：Jinja2 生成（N4 PROXY_ENDPOINTS 表达式，替代 resolve_router filter）。
+    #   多值字段（prefiller_hosts 等）在表达式内 join(' ') 成空格分隔，与 deploy.sh proxy_args 里
+    #   '$PREFILLER_HOSTS' 展开效果一致（proxy 脚本 nargs='+' 接收）。
     # 安全点：容器 --pid=host，pkill 锚定 '^python3 .*load_balance_proxy_server_example'，
     #   避免误杀控制机 ssh 会话（其 cmdline 以 ssh 开头，不匹配）。
 
-    - name: resolve_router 计算 proxy 端点（大写 KEY dict）
+    - name: 生成 proxy 端点（Jinja2 替代 resolve_router filter；run_once 于 p0 并回收 facts）
+      run_once: true
+      delegate_to: p0
+      delegate_facts: yes
       set_fact:
-        router_cfg: "{{ cfg | resolve_router }}"
-      tags: proxy
-
-    - name: 组装 proxy 模板变量（filter 大写 KEY → 小写模板变量；多值列表 join(' ') 展开）
-      set_fact:
-        proxy_host: "{{ router_cfg['PROXY_HOST'] }}"
-        proxy_port: "{{ router_cfg['PROXY_PORT'] }}"
-        prefiller_hosts: "{{ router_cfg['PREFILLER_HOSTS'] | join(' ') }}"
-        prefiller_ports: "{{ router_cfg['PREFILLER_PORTS'] | join(' ') }}"
-        decoder_hosts: "{{ router_cfg['DECODER_HOSTS'] | join(' ') }}"
-        decoder_ports: "{{ router_cfg['DECODER_PORTS'] | join(' ') }}"
+        proxy_host: "{{ hostvars[groups['proxy'][0]].ansible_host }}"
+        proxy_port: "{{ proxy.port | string }}"
+        prefiller_hosts: "{% set out = [] -%}{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ansible_host) -%}{% endfor -%}{{ out | join(' ') }}"
+        prefiller_ports: "{% set out = [] -%}{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}{% set _ = out.append((pd_cluster.prefill.base_port + r) | string) -%}{% endfor -%}{{ out | join(' ') }}"
+        decoder_hosts: "{% set out = [] -%}{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ansible_host) -%}{% endfor -%}{{ out | join(' ') }}"
+        decoder_ports: "{% set out = [] -%}{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}{% set _ = out.append((pd_cluster.decode.base_port + r) | string) -%}{% endfor -%}{{ out | join(' ') }}"
       tags: proxy
 
     - name: 计算 proxy 日志路径（logs.dir 为空回退 /root，对照 deploy.sh PROXY_LOG）
@@ -221,7 +227,7 @@
         url: "http://{{ proxy_host }}:{{ proxy_port }}/v1/completions"
         method: POST
         body:
-          model: "{{ model.served_model_name }}"
+          model: "{{ served_model_name }}"
           prompt: "The future of AI is"
           max_completion_tokens: 20
           temperature: 0
