@@ -9,16 +9,12 @@
 #
 # 阶段 tags（对应 deploy.sh 子流程，便于分段重跑/排查）：
 #   container / mooncake / engine / wait / proxy / smoke
-#   `--tags engine` 等只跑对应阶段；配置加载（include_vars）标 always 恒执行。
+#   `--tags engine` 等只跑对应阶段；变量来自 group_vars（inventory 自动加载，不再 include_vars config.yaml）。
 #   --dry-run 近似：Ansible 无 dry-run 子命令，用 `--check` 试跑（渲染/命令任务只报告不执行）。
 - name: deploy-glm52 一键部署（第一阶段：起容器 + 分发 + mooncake）
   hosts: all
   gather_facts: no
   tasks:
-    - name: 加载 config 变量（顶层字段 image/model/container 等变为同名变量）
-      include_vars: "../../config.yaml"
-      tags: always
-
     - name: 删除旧容器（幂等，对照 deploy.sh 的 docker rm -f $CONTAINER_NAME）
       shell: docker rm -f {{ container.name }} 2>/dev/null || true
       tags: container

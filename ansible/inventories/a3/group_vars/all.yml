@@ -15,6 +15,11 @@ cluster_type: a3
 image: quay.io/ascend/vllm-ascend:v0.23.0rc1-a3
 model_path: /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8
 model_name: glm-52
+model:
+  path: /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8
+  served_model_name: glm-52
+  dir_host: "/root/.cache"        # 非空则挂载 -v <dir_host>:/root/.cache（A3 用）
+  mounts: []                      # 审查决定留空（注：config-a3.yaml 的 model.mounts 有共享目录挂载，本次按指示留空）
 
 pd_cluster:
   max_model_len: 200000
