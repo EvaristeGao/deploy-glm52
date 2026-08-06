@@ -42,7 +42,7 @@
         src: "{{ item.src }}"
         dest: "{{ item.dest }}"
       loop:
-        - { src: "../../launch_online_dp.py", dest: "/tmp/launch_online_dp.py" }
+        - { src: "../launch_online_dp.py", dest: "/tmp/launch_online_dp.py" }
         - { src: "../generated/mooncake.json", dest: "/tmp/mooncake.json" }
       tags: container
 
@@ -186,7 +186,7 @@
 
     - name: 分发 proxy 脚本到节点 /tmp（对照 deploy.sh 的 scpn）
       copy:
-        src: "../../load_balance_proxy_server_example.py"
+        src: "../load_balance_proxy_server_example.py"
         dest: "/tmp/load_balance_proxy_server_example.py"
       when: inventory_hostname == 'p0'
       tags: proxy
