@@ -10,7 +10,16 @@ groups / hostvars / pd_cluster 派生，不再依赖 resolve/*.py 脚本。
 - 用 jinja2 Environment 直接渲染表达式字符串
 
 仅纯本地渲染，不跑 playbook、不 ssh 节点、不占卡、不起服务。
+
+任务 N4 在本文件补充「实例清单 + proxy 端点」生成表达式（设计规格 §4.2/§4.3，
+替代旧 resolve_instances.py / resolve_router.py 脚本）：
+- 实例清单：prefill/decode 每节点 dp_size_local 个实例 [role, ip, base_port+r]，
+  proxy 单列。A2 期望 4×1 + 4×2 + 1 = 13 个探测目标。
+- proxy 端点：prefiller_hosts/ports、decoder_hosts/ports、proxy_host/port，
+  供 load_balance_proxy 启动时注入。
 """
+from itertools import product as _itertools_product
+
 from jinja2 import StrictUndefined
 from jinja2.nativetypes import NativeEnvironment
 
@@ -33,6 +42,8 @@ A2_GV = {
         },
         "enable_prefix_caching": True,
     },
+    # 来源：a2/group_vars/all.yml 的 proxy: { port: 1999 }
+    "proxy": {"port": 1999},
 }
 
 # ---- 派生表达式（设计规格 §4.1，每节点 set_fact）----
@@ -53,10 +64,67 @@ DERIVED = {
 }
 
 
+# ---- 实例清单 + proxy 端点表达式（设计规格 §4.2/§4.3，替代旧 resolve_instances.py / resolve_router.py）----
+# 纯 jinja2 3.1.x 没有 Python 式列表推导 / product / extract 过滤，Ansible 运行时由
+# ansible.builtin 提供 product。这里用「嵌套 for + product + list.append」的等价写法，
+# 即可在 playbook 中直接复用（set_fact 循环），也能在本地 NativeEnvironment 渲染。
+#
+# 实例清单：prefill/decode 每节点 dp_size_local 个实例 [role, ip, base_port+r]，proxy 单列。
+INSTANCE_LIST_TPL = """{#
+  prefill/decode：groups[role] × range(dp_size_local)，端口 base_port + r
+  proxy：单列，取 groups['proxy'][0]（A2 为 p0）的 IP + proxy.port
+#}{% set il = [] -%}
+{% for role in ['prefill', 'decode'] -%}
+{% for h, r in groups[role] | product(range(pd_cluster[role].dp_size_local)) -%}
+{% set _ = il.append([role, hostvars[h].ansible_host, pd_cluster[role].base_port + r]) -%}
+{% endfor -%}
+{% endfor -%}
+{% set _ = il.append(['proxy', hostvars[groups['proxy'][0]].ansible_host, proxy.port]) -%}
+{{ il }}"""
+
+# proxy 端点：load_balance_proxy 启动用（hosts = 各节点 IP 重复 dp_size_local 次，
+# ports = base_port+r 递增；A2 prefill 4×"9081"、decode 8×("9900","9901" 交替)）。
+PROXY_ENDPOINTS = {
+    "prefiller_hosts": (
+        "{% set out = [] -%}"
+        "{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}"
+        "{% set _ = out.append(hostvars[h].ansible_host) -%}"
+        "{% endfor -%}"
+        "{{ out }}"
+    ),
+    "prefiller_ports": (
+        "{% set out = [] -%}"
+        "{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}"
+        "{% set _ = out.append((pd_cluster.prefill.base_port + r) | string) -%}"
+        "{% endfor -%}"
+        "{{ out }}"
+    ),
+    "decoder_hosts": (
+        "{% set out = [] -%}"
+        "{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}"
+        "{% set _ = out.append(hostvars[h].ansible_host) -%}"
+        "{% endfor -%}"
+        "{{ out }}"
+    ),
+    "decoder_ports": (
+        "{% set out = [] -%}"
+        "{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}"
+        "{% set _ = out.append((pd_cluster.decode.base_port + r) | string) -%}"
+        "{% endfor -%}"
+        "{{ out }}"
+    ),
+    # proxy 端点：proxy 节点（groups['proxy'][0]，A2 为 p0）IP + proxy.port
+    "proxy_host": "{{ hostvars[groups['proxy'][0]].ansible_host }}",
+    "proxy_port": "{{ proxy.port }}",
+}
+
+
 # ---- 模拟 Ansible 全局变量：groups / hostvars（与 a2/inventory.yaml 一致）----
 GROUPS = {
     "prefill": ["p0", "p1", "p2", "p3"],
     "decode": ["d0", "d1", "d2", "d3"],
+    # 来源：a2/inventory.yaml 的 proxy: { hosts: { p0: {} } }（proxy/mooncake 落在 p0）
+    "proxy": ["p0"],
 }
 HOSTVARS = {
     "p0": {"ansible_host": "192.168.0.245"},
@@ -90,6 +158,91 @@ def _derive(inventory_hostname):
         out[name] = env.from_string(tpl).render(**{**ctx, **out})
         ctx[name] = out[name]
     return out
+
+
+def _new_env():
+    """返回与 Ansible 运行时一致的 NativeEnvironment。
+
+    Ansible 的 jinja2 环境额外提供 product 过滤（ansible.builtin），纯 jinja2 需
+    手动注册，才能在本地等价模拟 playbook 里的 product 表达式。
+    """
+    env = NativeEnvironment(undefined=StrictUndefined)
+    env.filters["product"] = lambda *iterables: list(_itertools_product(*iterables))
+    return env
+
+
+def _render_instance_list():
+    env = _new_env()
+    ctx = dict(A2_GV, groups=GROUPS, hostvars=HOSTVARS)
+    return env.from_string(INSTANCE_LIST_TPL).render(**ctx)
+
+
+def _render_proxy_endpoints():
+    env = _new_env()
+    ctx = dict(A2_GV, groups=GROUPS, hostvars=HOSTVARS)
+    return {k: env.from_string(v).render(**ctx) for k, v in PROXY_ENDPOINTS.items()}
+
+
+# ---- 任务 N4：实例清单 + proxy 端点 ----
+
+def test_instance_list_count_a2():
+    """实例清单 A2 = 13：prefill 4×1 + decode 4×2 + proxy 1。"""
+    il = _render_instance_list()
+    assert len(il) == 13
+    # 顺序：prefill p0..p3 → decode d0..d3 → proxy
+    assert il[0] == ["prefill", "192.168.0.245", 9081]
+    assert il[3] == ["prefill", "192.168.0.91", 9081]
+    assert il[4] == ["decode", "192.168.0.127", 9900]
+    assert il[5] == ["decode", "192.168.0.127", 9901]
+    assert il[11] == ["decode", "192.168.0.140", 9901]
+    assert il[12] == ["proxy", "192.168.0.245", 1999]
+
+
+def test_instance_list_roles_and_ports():
+    """实例清单每行 [role, ip, port]；每节点 dp_size_local 个、端口 base_port+r 递增。"""
+    il = _render_instance_list()
+    prefill_rows = [r for r in il if r[0] == "prefill"]
+    decode_rows = [r for r in il if r[0] == "decode"]
+    assert prefill_rows == [
+        ["prefill", ip, 9081] for ip in
+        ["192.168.0.245", "192.168.0.15", "192.168.0.160", "192.168.0.91"]
+    ]
+    assert decode_rows == [
+        ["decode", ip, prt] for ip, prt in
+        [("192.168.0.127", 9900), ("192.168.0.127", 9901),
+         ("192.168.0.161", 9900), ("192.168.0.161", 9901),
+         ("192.168.0.154", 9900), ("192.168.0.154", 9901),
+         ("192.168.0.140", 9900), ("192.168.0.140", 9901)]
+    ]
+
+
+def test_proxy_endpoints_prefill():
+    """prefiller_hosts = 4 个 prefill IP，prefiller_ports = 4×"9081"。"""
+    pe = _render_proxy_endpoints()
+    assert pe["prefiller_hosts"] == [
+        "192.168.0.245", "192.168.0.15", "192.168.0.160", "192.168.0.91"
+    ]
+    assert pe["prefiller_ports"] == ["9081", "9081", "9081", "9081"]
+
+
+def test_proxy_endpoints_decode():
+    """decoder_hosts = 8 个（每 decode 节点重复 2 次），decoder_ports = 8 个（9900 9901 交替）。"""
+    pe = _render_proxy_endpoints()
+    assert pe["decoder_hosts"] == [
+        "192.168.0.127", "192.168.0.127",
+        "192.168.0.161", "192.168.0.161",
+        "192.168.0.154", "192.168.0.154",
+        "192.168.0.140", "192.168.0.140",
+    ]
+    assert pe["decoder_ports"] == ["9900", "9901", "9900", "9901",
+                                   "9900", "9901", "9900", "9901"]
+
+
+def test_proxy_endpoint_host_port():
+    """proxy_host = p0 IP(192.168.0.245)，proxy_port = 1999。"""
+    pe = _render_proxy_endpoints()
+    assert pe["proxy_host"] == "192.168.0.245"
+    assert pe["proxy_port"] == 1999
 
 
 def test_p0_prefill_full():
