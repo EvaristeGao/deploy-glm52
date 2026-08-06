@@ -14,6 +14,10 @@
     # 输出到 ansible/generated/（playbook_dir = ansible/playbooks，../generated = ansible/generated）
     gen_dir: "{{ playbook_dir }}/../generated"
   tasks:
+    - name: 确保 ansible/generated/ 目录存在（generated/ 在 .gitignore，首次运行需创建）
+      file:
+        path: "{{ gen_dir }}"
+        state: directory
     - name: 渲染各节点 run_dp_template.sh 到 ansible/generated/（对照 deploy.sh cmd_gen 的 render_template 循环）
       vars:
         node_role: "{{ 'prefill' if item[0] == 'p' else 'decode' }}"
@@ -38,8 +42,8 @@
 
     # 对照 deploy.sh render_mooncake_json()：master 地址 = prefill 首节点 IP + mooncake.port。
     # 用 group_vars 平铺变量直接渲染（不再调 render_mooncake.py）。
-    # 注：mooncake 的 global_segment_size/default_kv_lease_ttl 可选，缺省用默认值（80GB / 11000），
-    #    group_vars 补字段后自动生效。
+    # mooncake 的 global_segment_size/default_kv_lease_ttl 已固定在 group_vars/all.yml（a2/a3: 80GB / 11000），
+    #   这里直接使用、不再默认兜底（group_vars 缺字段时渲染直接报错提醒）。
     - name: 渲染 mooncake.json（Jinja2 直接渲染）
       vars:
         master_ip: "{{ hostvars[groups['prefill'][0]].ansible_host }}"
@@ -51,6 +55,6 @@
             "protocol": "ascend",
             "device_name": "",
             "master_server_address": "{{ master_ip }}:{{ mooncake.port }}",
-            "global_segment_size": "{{ mooncake.global_segment_size | default('80GB') }}",
-            "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl | default(11000) }}
+            "global_segment_size": "{{ mooncake.global_segment_size }}",
+            "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }}
           }

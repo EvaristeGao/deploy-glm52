@@ -156,7 +156,7 @@ ansible-playbook -i inventories/a2/inventory.yaml playbooks/start.yml --check
 ## 7. 已知事项
 
 - **A3 未实机**：inventory IP 为空占位（TODO 待填），字段依 A2 蓝本推演，实机跑通后需复核
-- **A3 model.mounts 待补共享目录**：当前留空，实机时按 config-a3.yaml 的共享目录挂载补填
+- **A3 model.mounts 待补共享目录**：当前留空，实机时按旧 config-a3.yaml（已移除）的共享目录挂载补填
 - **运行需在 `ansible/` 目录内**（`ansible.cfg` 在 `ansible/`，让 Ansible 加载配置）
 - 完整 `--check` 是干跑近似，不等价 `--dry-run` 的完整模拟
 - `--tags engine` 等分段重跑依赖前置阶段（如 smoke 需 proxy 已起）

@@ -37,6 +37,22 @@
         {{ image }} bash
       tags: container
 
+    - name: 校验 generated/mooncake.json 存在（generated/ 被 .gitignore 忽略，首次部署必缺）
+      delegate_to: localhost
+      run_once: true
+      stat:
+        path: "{{ playbook_dir }}/../generated/mooncake.json"
+      register: mooncake_json_stat
+      tags: container
+
+    - name: generated/mooncake.json 缺失——请先跑 gen.yml 生成
+      delegate_to: localhost
+      run_once: true
+      fail:
+        msg: "缺少 {{ playbook_dir }}/../generated/mooncake.json。generated/ 在 .gitignore（不随仓库交付），首次部署需先在 ansible/ 下运行 gen 生成后再跑本 playbook：ansible-playbook -i inventories/<集群>/inventory.yaml playbooks/gen.yml"
+      when: not mooncake_json_stat.stat.exists
+      tags: container
+
     - name: 分发启动文件到各节点 /tmp（对照 deploy.sh 的 scpn）
       copy:
         src: "{{ item.src }}"

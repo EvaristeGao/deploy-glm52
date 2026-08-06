@@ -30,7 +30,7 @@ pd_cluster:
   enable_prefix_caching: true
 
 proxy: { port: 1999 }
-mooncake: { port: 50088, evict: 0.9 }
+mooncake: { port: 50088, evict: 0.9, global_segment_size: 80GB, default_kv_lease_ttl: 11000 }
 
 container: { name: glm52-ansible-test, shm_size: 1024g }
 runtime: { ready_timeout: 2400, proxy_ready_timeout: 600 }
