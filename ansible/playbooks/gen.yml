@@ -6,7 +6,7 @@
 #   这里只渲染部署期确定的变量（与 start.yml 的 template 任务完全一致）。
 # 只读 + 本地写 ansible/generated/，不 ssh 节点、不起服务、不占卡。
 # 近似 --dry-run：渲染产物可人工审查，效果等同 `deploy.sh gen` 的调试用途。
-# 配置源：group_vars/inventory 平铺（model/pd_cluster/cluster_type/mooncake/container 等），不再读 config.yaml。
+# 配置源：group_vars/inventory 平铺（model/pd_cluster/cluster_type/mooncake/container 等）。
 - name: deploy-glm52 gen（渲染各节点模板 + mooncake.json 到 ansible/generated/）
   hosts: localhost
   gather_facts: no
@@ -24,7 +24,7 @@
         max_model_len: "{{ pd_cluster.max_model_len }}"
         kv_port: "{{ pd_cluster[node_role].kv_port }}"
         # gen 为控制端调试，local_ip 用 inventory 的静态 ansible_host（非节点 register，
-        #   语义同 resolve_node 的静态 LOCAL_IP = 节点 IP）
+        #   语义同派生变量的静态 LOCAL_IP = 节点 IP）
         local_ip: { stdout: "{{ hostvars[item].ansible_host }}" }
         prefill_dp: "{{ pd_cluster.prefill.dp_size }}"
         prefill_tp: "{{ pd_cluster.prefill.tp_size }}"
@@ -37,10 +37,10 @@
       loop: "{{ groups['all'] | sort }}"
 
     # 对照 deploy.sh render_mooncake_json()：master 地址 = prefill 首节点 IP + mooncake.port。
-    # 改为 group_vars 平铺变量直接渲染（不再调 render_mooncake.py --config config.yaml）。
-    # 注：config.yaml 的 mooncake.config.global_segment_size/default_kv_lease_ttl 未进 group_vars，
-    #   此处用与 render_mooncake.py 一致的默认值（80GB / 11000），group_vars 补字段后自动生效。
-    - name: 渲染 mooncake.json（Jinja2 替代 render_mooncake.py，去 config.yaml 依赖）
+    # 用 group_vars 平铺变量直接渲染（不再调 render_mooncake.py）。
+    # 注：mooncake 的 global_segment_size/default_kv_lease_ttl 可选，缺省用默认值（80GB / 11000），
+    #    group_vars 补字段后自动生效。
+    - name: 渲染 mooncake.json（Jinja2 直接渲染）
       vars:
         master_ip: "{{ hostvars[groups['prefill'][0]].ansible_host }}"
       copy:

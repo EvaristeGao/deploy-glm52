@@ -1,14 +1,14 @@
 ---
 # deploy-glm52 status playbook（只读：容器状态 + 引擎/proxy 健康探测）
 # 对照 deploy.sh cmd_status()。不起任何服务、不占卡，可随时实机运行。
-# 连接参数统一在 group_vars/all.yml（来源：config.yaml 的 ssh 段）
+# 连接参数统一在 inventories/<集群>/group_vars/all.yml（inventory 自动加载）
 #
 # 用法：
 #   ansible-playbook -i ansible/inventory.yaml ansible/playbooks/status.yml
 #   ansible-playbook -i ansible/inventory.yaml ansible/playbooks/status.yml -l p0   # 只查 p0
 #
-# 引擎健康端口：由节点参数派生（Jinja2，替代 resolve_node filter）。start_port = pd_cluster[node_role].base_port
-#   （对照 resolve_node.py 的 VLLM_START_PORT = base_port，语义一致）。
+# 引擎健康端口：由节点参数派生（Jinja2）。start_port = pd_cluster[node_role].base_port
+#   （语义与既有 VLLM_START_PORT = base_port 一致）。
 #   当前集群停止时容器不存在 → inspect 报 no-container，engine/proxy uri 非 200 由 ignore_errors 兜底。
 - name: deploy-glm52 实例探测
   hosts: all
@@ -19,9 +19,9 @@
       shell: docker inspect -f '{{ '{{' }}.State.Status{{ '}}' }}' {{ container.name }} 2>/dev/null || echo no-container
       register: cst
 
-    # 对照 deploy.sh cmd_status(): 引擎 /health（resolve_node 的 VLLM_START_PORT = base_port）
+    # 对照 deploy.sh cmd_status(): 引擎 /health（start_port = pd_cluster[node_role].base_port）
     # 派生分两步（同 set_fact 内 key 相互不可见，start.yml 同款模式）
-    - name: 派生本节点角色（Jinja2，替代 resolve_node filter）
+    - name: 派生本节点角色（Jinja2）
       set_fact:
         node_role: "{{ 'prefill' if inventory_hostname[0] == 'p' else 'decode' }}"
 

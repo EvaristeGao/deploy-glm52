@@ -1,7 +1,7 @@
 ---
 # deploy-glm52 — 第一阶段 start playbook（起容器 + 分发启动文件 + mooncake_master）
 # 对照 deploy.sh: start_node() + start_mooncake_master()
-# 连接参数统一在 group_vars/all.yml（来源：config.yaml 的 ssh 段）
+# 连接参数统一在 inventories/<集群>/group_vars/all.yml（inventory 自动加载）
 #
 # 安全点：容器 --pid=host，容器内 pkill/pgrep 会看到 host 全部进程。
 #   必须用 -x 精确匹配进程名（mooncake_master），不能用 -f——
@@ -9,7 +9,7 @@
 #
 # 阶段 tags（对应 deploy.sh 子流程，便于分段重跑/排查）：
 #   container / mooncake / engine / wait / proxy / smoke
-#   `--tags engine` 等只跑对应阶段；变量来自 group_vars（inventory 自动加载，不再 include_vars config.yaml）。
+#   `--tags engine` 等只跑对应阶段；变量来自 group_vars（inventory 自动加载）。
 #   --dry-run 近似：Ansible 无 dry-run 子命令，用 `--check` 试跑（渲染/命令任务只报告不执行）。
 - name: deploy-glm52 一键部署（第一阶段：起容器 + 分发 + mooncake）
   hosts: all
@@ -69,10 +69,10 @@
 
     # ==================== 第二阶段：引擎（任务 6，对照 deploy.sh start_engines） ====================
     # 核心：Jinja2 模板的 local_ip 用节点命令 register（节点命令替换，非静态值），
-    #       启动参数用 set_fact 派生（Jinja2，N3 语义，替代 resolve_node filter）。
+    #       启动参数用 set_fact 派生（Jinja2，N3 语义）。
     # 安全点：只渲染模板 + 起引擎，不实机跑（syntax-check 只验语法）。
 
-    - name: 派生本节点角色/索引（Jinja2 表达式，N3 语义，替代 resolve_node filter）
+    - name: 派生本节点角色/索引（Jinja2 表达式，N3 语义）
       set_fact:
         node_role: "{{ 'prefill' if inventory_hostname[0] == 'p' else 'decode' }}"
         node_idx: "{{ inventory_hostname[1:] | int }}"
@@ -80,7 +80,7 @@
         mooncake_config_path: "/root/pd/mooncake.json"
       tags: engine
 
-    - name: 派生本节点启动参数（Jinja2 表达式，N3 语义，替代 resolve_node filter）
+    - name: 派生本节点启动参数（Jinja2 表达式，N3 语义）
       set_fact:
         dp_size: "{{ pd_cluster[node_role].dp_size }}"
         dp_size_local: "{{ pd_cluster[node_role].dp_size_local }}"
@@ -129,9 +129,9 @@
       tags: engine
 
     # ==================== wait_ready（对照 deploy.sh cmd_start 的 wait_ready 段） ====================
-    # 实例清单经 run_once 在控制端生成（Jinja2 替代 resolve_instances，返回 role ip port，跳过 proxy）；
+    # 实例清单经 run_once 在控制端生成（Jinja2 生成 role ip port，跳过 proxy）；
     # retries 由 runtime.ready_timeout 折算（2400s / 15s = 160）
-    - name: 生成实例清单（run_once，Jinja2 替代 resolve_instances filter）
+    - name: 生成实例清单（run_once，Jinja2 生成）
       run_once: true
       set_fact:
         instance_list: |-
@@ -160,13 +160,13 @@
       tags: wait
 
     # ==================== proxy + 冒烟（任务 7，对照 deploy.sh start_proxy + wait_ready proxy + smoke_test） ====================
-    # 端点来源：Jinja2 生成（N4 PROXY_ENDPOINTS 表达式，替代 resolve_router filter）。
+    # 端点来源：Jinja2 生成（N4 PROXY_ENDPOINTS 表达式）。
     #   多值字段（prefiller_hosts 等）在表达式内 join(' ') 成空格分隔，与 deploy.sh proxy_args 里
     #   '$PREFILLER_HOSTS' 展开效果一致（proxy 脚本 nargs='+' 接收）。
     # 安全点：容器 --pid=host，pkill 锚定 '^python3 .*load_balance_proxy_server_example'，
     #   避免误杀控制机 ssh 会话（其 cmdline 以 ssh 开头，不匹配）。
 
-    - name: 生成 proxy 端点（Jinja2 替代 resolve_router filter；run_once 于 p0 并回收 facts）
+    - name: 生成 proxy 端点（Jinja2 生成；run_once 于 p0 并回收 facts）
       run_once: true
       delegate_to: p0
       delegate_facts: yes

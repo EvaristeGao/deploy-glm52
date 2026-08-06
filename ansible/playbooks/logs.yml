@@ -14,7 +14,7 @@
   hosts: "{{ target_host }}"
   gather_facts: no
   vars:
-    # 配置源 group_vars/inventory 平铺（image/container/logs/proxy 等），不再读 config.yaml
+    # 配置源 group_vars/inventory 平铺（image/container/logs/proxy 等）
     # target 缺省 p0（读 p0 的 vllm 日志，只读安全）；显式 -e target=... 覆盖
     tgt: "{{ target | default('p0') }}"
     # target==proxy 时落到 proxy 组首成员；否则 target 即节点名

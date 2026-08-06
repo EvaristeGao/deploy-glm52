@@ -1,8 +1,8 @@
 """节点参数派生 Jinja2 单测（TDD，Ansible 原生化任务 N3）。
 
-替代旧 resolve_node filter 的 set_fact 派生表达式（设计规格 §4.1）：
+set_fact 派生表达式（设计规格 §4.1）：
 在 play 里对每个节点 set_fact 以下变量，用 Jinja2 从 inventory_hostname /
-groups / hostvars / pd_cluster 派生，不再依赖 resolve/*.py 脚本。
+groups / hostvars / pd_cluster 派生，不依赖外部解析脚本。
 
 本测试只验证「派生表达式」的渲染结果：
 - 用样例 A2 group_vars（内联小字典，与 a2/group_vars/all.yml 一致）
@@ -11,8 +11,7 @@ groups / hostvars / pd_cluster 派生，不再依赖 resolve/*.py 脚本。
 
 仅纯本地渲染，不跑 playbook、不 ssh 节点、不占卡、不起服务。
 
-任务 N4 在本文件补充「实例清单 + proxy 端点」生成表达式（设计规格 §4.2/§4.3，
-替代旧 resolve_instances.py / resolve_router.py 脚本）：
+任务 N4 在本文件补充「实例清单 + proxy 端点」生成表达式（设计规格 §4.2/§4.3）：
 - 实例清单：prefill/decode 每节点 dp_size_local 个实例 [role, ip, base_port+r]，
   proxy 单列。A2 期望 4×1 + 4×2 + 1 = 13 个探测目标。
 - proxy 端点：prefiller_hosts/ports、decoder_hosts/ports、proxy_host/port，
@@ -64,7 +63,7 @@ DERIVED = {
 }
 
 
-# ---- 实例清单 + proxy 端点表达式（设计规格 §4.2/§4.3，替代旧 resolve_instances.py / resolve_router.py）----
+# ---- 实例清单 + proxy 端点表达式（设计规格 §4.2/§4.3）----
 # 纯 jinja2 3.1.x 没有 Python 式列表推导 / product / extract 过滤，Ansible 运行时由
 # ansible.builtin 提供 product。这里用「嵌套 for + product + list.append」的等价写法，
 # 即可在 playbook 中直接复用（set_fact 循环），也能在本地 NativeEnvironment 渲染。

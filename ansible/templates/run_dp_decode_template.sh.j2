@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 # run_dp_decode_template.sh.j2 — Decode 节点模板（kv_consumer，MultiConnector + AscendStore）
 # 由 Ansible template 模块渲染。部署期变量（Jinja2）来源同 prefill 模板：
-#   local_ip.stdout ← 节点执行命令 register（非静态值）；其余来自 resolve_node / 集群配置
+#   local_ip.stdout ← 节点执行命令 register（非静态值）；其余来自 group_vars 平铺 / 集群配置
 # 运行时引擎差异（端口/rank/dp/tp 等）由 launch_online_dp.py 以位置参数 $1..$7 传入，
 #   与 deploy.sh 原模板 templates/run_dp_decode_template.sh 一致（decode 节点 dp_size_local=2
 #   需拉起多个引擎，端口/rank 必须每次不同，绝不能固化成模板常量）。

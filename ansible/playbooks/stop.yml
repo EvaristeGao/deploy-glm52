@@ -1,7 +1,7 @@
 ---
 # deploy-glm52 停止清理 playbook（停 proxy/mooncake + 删容器）
 # 对照 deploy.sh cmd_stop()。会实际停服务/删容器，仅在需要停止集群时运行。
-# 连接参数统一在 group_vars/all.yml（来源：config.yaml 的 ssh 段）
+# 连接参数统一在 inventories/<集群>/group_vars/all.yml（inventory 自动加载）
 #
 # 安全点：容器 --pid=host，容器内 pkill/pgrep 会看到 host 全部进程。
 #   - proxy:  锚定 '^python3 .*load_balance_proxy_server_example'（cmdline 以 python3 开头），

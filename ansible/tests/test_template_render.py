@@ -1,8 +1,9 @@
-"""Jinja2 模板渲染单测（TDD，任务 3）。
+"""Jinja2 模板渲染单测（TDD，Ansible 原生化任务 N7 改造）。
 
 验证 run_dp_*_template.sh.j2 的渲染正确性：
 - 节点命令替换：local_ip 来自 register 的 local_ip.stdout，非静态值
-- 部署期变量（端口/维度/地址等）来自 resolve filter 输出（大写 KEY）
+- 部署期变量（端口/维度/地址等）直接取自 A2 group_vars 平铺变量 / 派生变量
+  （Ansible 原生化，直接传小写变量渲染模板）
 - vllm serve 的运行时参数（--port/--data-parallel-*/--tensor-parallel-size）保留为
   位置参数 $2..$7，由 launch_online_dp.py 按每引擎传入（与 deploy.sh 原模板一致）；
   绝不固化成 Jinja2 常量（否则 decode 多引擎端口/rank 冲突必挂）
@@ -14,17 +15,14 @@
 仅纯本地 Jinja2 渲染，不拉起任何服务、不 ssh 节点、不占卡。
 """
 import os
-import sys
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(PROJECT_ROOT, "ansible"))
-from filter_plugins.resolve import FilterModule  # noqa: E402
-
-CONFIG = os.path.join(PROJECT_ROOT, "config.yaml")
-TPL_DIR = os.path.join(PROJECT_ROOT, "ansible", "templates")
+ANSIBLE_DIR = os.path.join(PROJECT_ROOT, "ansible")
+GV_FILE = os.path.join(ANSIBLE_DIR, "inventories", "a2", "group_vars", "all.yml")
+TPL_DIR = os.path.join(ANSIBLE_DIR, "templates")
 
 
 def _env():
@@ -32,40 +30,43 @@ def _env():
     return Environment(loader=FileSystemLoader(TPL_DIR), undefined=StrictUndefined)
 
 
-def _render(node, role, cluster_type=None):
-    """渲染指定角色模板。role ∈ {prefill, decode}；运行时参数（$1..$7）不进 ctx——
-    它们由 launch_online_dp.py 按每引擎位置传入，模板只保留部署期确定的变量。
-    cluster_type 可覆盖 resolve 结果（测 RoCE 开关）。"""
-    cfg = yaml.safe_load(open(CONFIG))
-    node_cfg = FilterModule().resolve_node(cfg, node)
-    pdc = cfg["pd_cluster"]
-    ctx = {
-        # resolve filter 输出的大写 KEY（部署期确定，走 Jinja2）
-        "nic": node_cfg["NIC"],
-        "model_path": node_cfg["MODEL_PATH"],
-        "served_model_name": node_cfg["SERVED_MODEL_NAME"],
-        "max_model_len": node_cfg["MAX_MODEL_LEN"],
-        "kv_port": node_cfg["KV_PORT"],
-        "cluster_type": cluster_type or node_cfg["CLUSTER_TYPE"],
-        # 节点命令 register 变量（非静态值）
+def _ctx(role, cluster_type=None):
+    """直接用 A2 group_vars 平铺变量构造模板 ctx（小写变量，直接渲染）。
+    role ∈ {prefill, decode}；运行时参数（$1..$7）不进 ctx——它们由
+    launch_online_dp.py 按每引擎位置传入，模板只保留部署期确定的变量。
+    cluster_type 可覆盖 group_vars 值（测 RoCE 开关）。"""
+    gv = yaml.safe_load(open(GV_FILE))
+    pd = gv["pd_cluster"]
+    return {
+        # 节点级变量：nic 取自 A2 inventory 节点（host 级）；local_ip 为节点命令 register（非静态值）
+        "nic": "enp67s0f5",
         "local_ip": {"stdout": "192.168.0.245"},
-        # 集群级配置（kv-transfer 跨角色 dp/tp）+ mooncake 路径
-        "prefill_dp": pdc["prefill"]["dp_size"],
-        "prefill_tp": pdc["prefill"]["tp_size"],
-        "decode_dp": pdc["decode"]["dp_size"],
-        "decode_tp": pdc["decode"]["tp_size"],
+        # 集群级平铺变量（来源：a2/group_vars/all.yml 的 model / model_path / pd_cluster）
+        "model_path": gv["model_path"],
+        "served_model_name": gv["model"]["served_model_name"],
+        "max_model_len": pd["max_model_len"],
+        "kv_port": pd[role]["kv_port"],          # prefill=30000 / decode=30100
+        "cluster_type": cluster_type or gv["cluster_type"],
+        # 跨角色 dp/tp（kv-transfer 配置）+ mooncake 路径
+        "prefill_dp": pd["prefill"]["dp_size"],
+        "prefill_tp": pd["prefill"]["tp_size"],
+        "decode_dp": pd["decode"]["dp_size"],
+        "decode_tp": pd["decode"]["tp_size"],
         "mooncake_config_path": "/root/pd/mooncake.json",
     }
+
+
+def _render(role, cluster_type=None):
     tpl = _env().get_template(f"run_dp_{role}_template.sh.j2")
-    return tpl.render(**ctx)
+    return tpl.render(**{**_ctx(role, cluster_type)})
 
 
-def _render_prefill(node="p0", cluster_type=None):
-    return _render(node, "prefill", cluster_type)
+def _render_prefill(cluster_type=None):
+    return _render("prefill", cluster_type)
 
 
-def _render_decode(node="d1", cluster_type=None):
-    return _render(node, "decode", cluster_type)
+def _render_decode(cluster_type=None):
+    return _render("decode", cluster_type)
 
 
 def test_prefill_uses_register_local_ip():

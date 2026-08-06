@@ -1,7 +1,7 @@
 ---
 # deploy-glm52 拉取镜像 playbook（每节点 docker pull {{ image }}）
 # 会实际拉取镜像、可能占网络/磁盘，故任务 4 只做 syntax-check，不实跑。
-# 连接参数统一在 group_vars/all.yml 定义（来源：config.yaml 的 ssh 段）
+# 连接参数统一在 inventories/<集群>/group_vars/all.yml（inventory 自动加载）
 - name: 拉取镜像
   hosts: all
   gather_facts: no
