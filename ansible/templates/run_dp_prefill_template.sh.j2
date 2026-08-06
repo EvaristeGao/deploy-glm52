@@ -1,0 +1,88 @@
+#!/usr/bin/bash
+# run_dp_prefill_template.sh.j2 — Prefill 节点模板（kv_producer，MultiConnector + AscendStore）
+# 由 Ansible template 模块渲染。变量来源：
+#   nic / model_path / served_model_name / max_model_len / kv_port / start_port / dp_size /
+#   dp_rank / dp_address / rpc_port / tp_size / cluster_type / prefill_dp / prefill_tp /
+#   decode_dp / decode_tp   ← resolve_node / 集群配置
+#   local_ip.stdout          ← 节点执行命令 register（非静态值）
+nic_name="{{ nic }}"
+local_ip="{{ local_ip.stdout }}"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export VLLM_ASCEND_ENABLE_MLAPO=1
+export HCCL_BUFFSIZE=256
+export TASK_QUEUE_ENABLE=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_USE_V1=1
+export ASCEND_RT_VISIBLE_DEVICES=$1
+export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:/usr/local/lib:$LD_LIBRARY_PATH
+export ASCEND_AGGREGATE_ENABLE=1
+export ASCEND_TRANSPORT_PRINT=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+export PYTHONHASHSEED=0
+export MOONCAKE_CONFIG_PATH="{{ mooncake_config_path }}"
+# cluster_type = a2 时启用 RoCE；a3 走灵衢 UB，不启用
+{% if cluster_type == "a2" %}export HCCL_INTRA_ROCE_ENABLE=1
+{% endif %}export ACL_OP_INIT_MODE=1
+
+vllm serve {{ model_path }} \
+    --host 0.0.0.0 \
+    --port {{ start_port }} \
+    --data-parallel-size {{ dp_size }} \
+    --data-parallel-rank {{ dp_rank }} \
+    --data-parallel-address {{ dp_address }} \
+    --data-parallel-rpc-port {{ rpc_port }} \
+    --tensor-parallel-size {{ tp_size }} \
+    --enable-expert-parallel \
+    --enable-prefix-caching \
+    --seed 1024 \
+    --enable-chunked-prefill \
+    --served-model-name {{ served_model_name }} \
+    --async-scheduling \
+    --max-model-len {{ max_model_len }} \
+    --max-num-batched-tokens 8192 \
+    --trust-remote-code \
+    --max-num-seqs 256 \
+    --gpu-memory-utilization 0.95 \
+    --safetensors-load-strategy prefetch \
+    --quantization ascend \
+    --enforce-eager \
+    --enable-auto-tool-choice \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm45 \
+    --kv-transfer-config \
+    '{
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_producer",
+    "kv_load_failure_policy": "recompute",
+    "kv_connector_extra_config": {
+        "connectors": [
+            {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_producer",
+                "kv_port": "{{ kv_port }}",
+                "kv_connector_extra_config": {
+                    "prefill": { "dp_size": {{ prefill_dp }}, "tp_size": {{ prefill_tp }} },
+                    "decode": { "dp_size": {{ decode_dp }}, "tp_size": {{ decode_tp }} }
+                }
+            },
+            {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_producer",
+                "kv_connector_extra_config": {
+                    "lookup_rpc_port":"0",
+                    "backend": "mooncake"
+                }
+            }
+        ]
+    }
+    }' \
+    --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
+    --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager":true}'
