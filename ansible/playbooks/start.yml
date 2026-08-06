@@ -196,7 +196,7 @@
         body:
           model: "{{ model.served_model_name }}"
           prompt: "The future of AI is"
-          max_tokens: 20
+          max_completion_tokens: 20
           temperature: 0
         body_format: json
         status_code: 200
