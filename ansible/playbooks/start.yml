@@ -6,15 +6,22 @@
 # 安全点：容器 --pid=host，容器内 pkill/pgrep 会看到 host 全部进程。
 #   必须用 -x 精确匹配进程名（mooncake_master），不能用 -f——
 #   否则会匹配 Ansible 的 ssh 会话（其命令行含这些字符串）而误杀/误判连接。
+#
+# 阶段 tags（对应 deploy.sh 子流程，便于分段重跑/排查）：
+#   container / mooncake / engine / wait / proxy / smoke
+#   `--tags engine` 等只跑对应阶段；配置加载（include_vars / cfg）标 always 恒执行。
+#   --dry-run 近似：Ansible 无 dry-run 子命令，用 `--check` 试跑（渲染/命令任务只报告不执行）。
 - name: deploy-glm52 一键部署（第一阶段：起容器 + 分发 + mooncake）
   hosts: all
   gather_facts: no
   tasks:
     - name: 加载 config 变量（顶层字段 image/model/container 等变为同名变量）
       include_vars: "../../config.yaml"
+      tags: always
 
     - name: 删除旧容器（幂等，对照 deploy.sh 的 docker rm -f $CONTAINER_NAME）
       shell: docker rm -f {{ container.name }} 2>/dev/null || true
+      tags: container
 
     - name: 起容器（对照 deploy.sh start_node 的 docker run，无遗漏）
       shell: |
@@ -32,6 +39,7 @@
         {% for m in model.mounts %}-v {{ m }} {% endfor %}\
         {% if model.dir_host %}-v {{ model.dir_host }}:/root/.cache {% endif %}\
         {{ image }} bash
+      tags: container
 
     - name: 分发启动文件到各节点 /tmp（对照 deploy.sh 的 scpn）
       copy:
@@ -40,16 +48,19 @@
       loop:
         - { src: "../../launch_online_dp.py", dest: "/tmp/launch_online_dp.py" }
         - { src: "../../generated/mooncake.json", dest: "/tmp/mooncake.json" }
+      tags: container
 
     - name: docker cp 启动文件进容器 /root/pd/（对照 deploy.sh start_node）
       shell: docker exec {{ container.name }} mkdir -p /root/pd && docker cp /tmp/{{ item }} {{ container.name }}:/root/pd/
       loop:
         - launch_online_dp.py
         - mooncake.json
+      tags: container
 
     - name: 计算 mooncake 日志路径（logs.dir 为空回退 /root，对照 deploy.sh MOONCAKE_LOG）
       set_fact:
         mooncake_log: "{{ (logs.dir | default('')) or '/root' }}/{{ logs.mooncake | default('mooncake.log') }}"
+      tags: mooncake
 
     - name: mooncake_master 起在 p0（对照 deploy.sh start_mooncake_master，pkill -x 精确匹配）
       when: inventory_hostname == 'p0'
@@ -58,6 +69,7 @@
         docker exec {{ container.name }} pkill -x mooncake_master 2>/dev/null || true
         docker exec -d {{ container.name }} bash -c 'mooncake_master -port {{ mooncake.port }} -eviction_high_watermark_ratio {{ mooncake.evict }} >> {{ mooncake_log }} 2>&1'
         sleep 2 && docker exec {{ container.name }} pgrep -x mooncake_master >/dev/null
+      tags: mooncake
 
     # ==================== 第二阶段：引擎（任务 6，对照 deploy.sh start_engines） ====================
     # 核心：Jinja2 模板的 local_ip 用节点命令 register（节点命令替换，非静态值），
@@ -67,10 +79,12 @@
     - name: 读取 config 全量 dict（供 resolve filter；include_vars 只拆了顶层字段）
       set_fact:
         cfg: "{{ lookup('file', playbook_dir + '/../../config.yaml') | from_yaml }}"
+      tags: always
 
     - name: resolve_node 计算本节点启动参数（大写 KEY）
       set_fact:
         node_cfg: "{{ cfg | resolve_node(inventory_hostname) }}"
+      tags: engine
 
     - name: 组装模板变量（filter 大写 KEY → 小写模板变量，+ 跨角色 dp/tp + mooncake 路径）
       set_fact:
@@ -93,22 +107,27 @@
         decode_dp: "{{ cfg['pd_cluster']['decode']['dp_size'] }}"
         decode_tp: "{{ cfg['pd_cluster']['decode']['tp_size'] }}"
         mooncake_config_path: "/root/pd/mooncake.json"
+      tags: engine
 
     - name: 计算 vllm 日志路径（logs.dir 为空回退 /root，{node} 按节点替换，对照 deploy.sh vllm_log）
       set_fact:
         vllm_log: "{{ (logs.dir | default('')) or '/root' }}/{{ logs.vllm | default('vllm_{node}.log') | replace('{node}', inventory_hostname) }}"
+      tags: engine
 
     - name: 本机 IP（节点命令替换核心，register 供模板 local_ip.stdout）
       shell: ip -4 addr show {{ nic }} | grep -oP 'inet \K[0-9.]+' | head -1
       register: local_ip
+      tags: engine
 
     - name: 渲染 run_dp_template.sh（每节点，dest 为节点 /tmp，模板用本机 local_ip）
       template:
         src: "../templates/run_dp_{{ node_role }}_template.sh.j2"
         dest: "/tmp/run_dp_template_{{ inventory_hostname }}.sh"
+      tags: engine
 
     - name: docker cp 模板进容器 /root/pd/run_dp_template.sh（对照 deploy.sh start_node）
       shell: docker cp /tmp/run_dp_template_{{ inventory_hostname }}.sh {{ container.name }}:/root/pd/run_dp_template.sh
+      tags: engine
 
     - name: 启动引擎（对照 deploy.sh start_engines，docker exec -d 后台）
       shell: |
@@ -117,6 +136,7 @@
           --dp-size {{ dp_size }} --tp-size {{ tp_size }} --dp-size-local {{ dp_size_local }} \
           --dp-rank-start {{ dp_rank }} --dp-address {{ dp_address }} \
           --dp-rpc-port {{ rpc_port }} --vllm-start-port {{ start_port }} >> {{ vllm_log }} 2>&1'
+      tags: engine
 
     # ==================== wait_ready（对照 deploy.sh cmd_start 的 wait_ready 段） ====================
     # 实例清单经 run_once 在控制端生成（resolve_instances 返回 role ip port，跳过 proxy）；
@@ -133,6 +153,7 @@
       delay: 15
       loop: "{{ cfg | resolve_instances }}"
       when: item[0] != 'proxy'
+      tags: wait
 
     # ==================== proxy + 冒烟（任务 7，对照 deploy.sh start_proxy + wait_ready proxy + smoke_test） ====================
     # 端点来源：resolve_router filter 返回 dict（PROXY_HOST/PROXY_PORT/PREFILLER_HOSTS/PREFILLER_PORTS/DECODER_HOSTS/DECODER_PORTS）。
@@ -144,6 +165,7 @@
     - name: resolve_router 计算 proxy 端点（大写 KEY dict）
       set_fact:
         router_cfg: "{{ cfg | resolve_router }}"
+      tags: proxy
 
     - name: 组装 proxy 模板变量（filter 大写 KEY → 小写模板变量；多值列表 join(' ') 展开）
       set_fact:
@@ -153,16 +175,19 @@
         prefiller_ports: "{{ router_cfg['PREFILLER_PORTS'] | join(' ') }}"
         decoder_hosts: "{{ router_cfg['DECODER_HOSTS'] | join(' ') }}"
         decoder_ports: "{{ router_cfg['DECODER_PORTS'] | join(' ') }}"
+      tags: proxy
 
     - name: 计算 proxy 日志路径（logs.dir 为空回退 /root，对照 deploy.sh PROXY_LOG）
       set_fact:
         proxy_log: "{{ (logs.dir | default('')) or '/root' }}/{{ logs.proxy | default('proxy.log') }}"
+      tags: proxy
 
     - name: 分发 proxy 脚本到节点 /tmp（对照 deploy.sh 的 scpn）
       copy:
         src: "../../load_balance_proxy_server_example.py"
         dest: "/tmp/load_balance_proxy_server_example.py"
       when: inventory_hostname == 'p0'
+      tags: proxy
 
     - name: docker cp proxy 脚本进容器并启动（对照 deploy.sh start_proxy，pkill 锚定 ^python3）
       when: inventory_hostname == 'p0'
@@ -175,6 +200,7 @@
           --host 0.0.0.0 --port {{ proxy_port }} \
           --prefiller-hosts {{ prefiller_hosts }} --prefiller-ports {{ prefiller_ports }} \
           --decoder-hosts {{ decoder_hosts }} --decoder-ports {{ decoder_ports }} >> {{ proxy_log }} 2>&1'
+      tags: proxy
 
     - name: 等待 proxy /healthcheck 就绪（uri + until，对照 deploy.sh wait_ready "proxy"）
       when: inventory_hostname == 'p0'
@@ -186,6 +212,7 @@
       until: proxy_health.status == 200
       retries: "{{ (runtime.proxy_ready_timeout | default(600)) | int // 15 }}"
       delay: 15
+      tags: proxy
 
     - name: 冒烟测试（control 端 POST /v1/completions，对照 deploy.sh smoke_test）
       when: inventory_hostname == 'p0'
@@ -204,3 +231,4 @@
       until: smoke.status == 200
       retries: 10
       delay: 5
+      tags: smoke

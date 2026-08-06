@@ -1,0 +1,45 @@
+---
+# deploy-glm52 gen playbook（只渲染，不实机；对照 deploy.sh gen）
+# 在控制端 localhost 执行：把每个节点的 run_dp_template.sh 渲染到 generated/，
+#   并渲染 generated/mooncake.json（供 start.yml 分发，去除对 deploy.sh gen 的外部依赖）。
+# 运行时引擎参数（$1..$7）保留为位置参数，由 launch_online_dp.py 在容器内按每引擎传入，
+#   这里只渲染部署期确定的变量（与 start.yml 的 template 任务完全一致）。
+# 只读 + 本地写 generated/，不 ssh 节点、不起服务、不占卡。
+# 近似 --dry-run：渲染产物可人工审查，效果等同 `deploy.sh gen` 的调试用途。
+- name: deploy-glm52 gen（渲染各节点模板 + mooncake.json 到 generated/）
+  hosts: localhost
+  gather_facts: no
+  vars:
+    gen_dir: "{{ playbook_dir }}/../../generated"
+  tasks:
+    - name: 读取 config 全量 dict（供 resolve filter；include_vars 只拆了顶层字段）
+      set_fact:
+        cfg: "{{ lookup('file', playbook_dir + '/../../config.yaml') | from_yaml }}"
+
+    - name: 渲染各节点 run_dp_template.sh 到 generated/（对照 deploy.sh cmd_gen 的 render_template 循环）
+      vars:
+        node_cfg: "{{ cfg | resolve_node(item) }}"
+        node_role: "{{ node_cfg['ROLE'] }}"
+        nic: "{{ node_cfg['NIC'] }}"
+        model_path: "{{ node_cfg['MODEL_PATH'] }}"
+        served_model_name: "{{ node_cfg['SERVED_MODEL_NAME'] }}"
+        max_model_len: "{{ node_cfg['MAX_MODEL_LEN'] }}"
+        kv_port: "{{ node_cfg['KV_PORT'] }}"
+        cluster_type: "{{ node_cfg['CLUSTER_TYPE'] }}"
+        # gen 为控制端调试，local_ip 用 resolve_node 的静态 LOCAL_IP（非节点 register）
+        local_ip: { stdout: "{{ node_cfg['LOCAL_IP'] }}" }
+        prefill_dp: "{{ cfg['pd_cluster']['prefill']['dp_size'] }}"
+        prefill_tp: "{{ cfg['pd_cluster']['prefill']['tp_size'] }}"
+        decode_dp: "{{ cfg['pd_cluster']['decode']['dp_size'] }}"
+        decode_tp: "{{ cfg['pd_cluster']['decode']['tp_size'] }}"
+        mooncake_config_path: "/root/pd/mooncake.json"
+      template:
+        src: "../templates/run_dp_{{ node_role }}_template.sh.j2"
+        dest: "{{ gen_dir }}/run_dp_template_{{ item }}.sh"
+      loop: "{{ groups['all'] | sort }}"
+
+    - name: 渲染 mooncake.json（对照 deploy.sh render_mooncake_json）
+      command: >-
+        python3 {{ playbook_dir }}/../../resolve/render_mooncake.py
+        --config {{ playbook_dir }}/../../config.yaml
+        --output {{ gen_dir }}/mooncake.json
