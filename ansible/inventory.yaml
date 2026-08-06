@@ -12,3 +12,4 @@ all:
         d1: { ansible_host: 192.168.0.161, nic: enp67s0f5 }
         d2: { ansible_host: 192.168.0.154, nic: enp67s0f5 }
         d3: { ansible_host: 192.168.0.140, nic: enp67s0f5 }
+
