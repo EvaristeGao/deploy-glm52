@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 
+import pytest
 import yaml
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -107,6 +108,9 @@ def test_resolve_router_matches_script():
 def test_resolve_node_with_ansible_tagged_config():
     """真实 Ansible 传入的是带 tag 的包装类型（_AnsibleTaggedStr 等），
     pyyaml 无法直接 dump 它们，必须经 _to_plain 剥标签。回归测试。"""
+    # ansible-core 仅随部署环境安装（marker 限 >=3.12）；在无 ansible 的 Python 3.10/3.11
+    # 上此用例直接跳过，避免导入 _datatag 时 ImportError。
+    pytest.importorskip("ansible")
     from ansible.module_utils._internal._datatag import (
         _AnsibleTaggedInt,
         _AnsibleTaggedStr,

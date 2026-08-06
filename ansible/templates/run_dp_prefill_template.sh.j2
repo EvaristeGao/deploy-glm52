@@ -1,10 +1,12 @@
 #!/usr/bin/bash
 # run_dp_prefill_template.sh.j2 — Prefill 节点模板（kv_producer，MultiConnector + AscendStore）
-# 由 Ansible template 模块渲染。变量来源：
-#   nic / model_path / served_model_name / max_model_len / kv_port / start_port / dp_size /
-#   dp_rank / dp_address / rpc_port / tp_size / cluster_type / prefill_dp / prefill_tp /
-#   decode_dp / decode_tp   ← resolve_node / 集群配置
-#   local_ip.stdout          ← 节点执行命令 register（非静态值）
+# 由 Ansible template 模块渲染。部署期变量（Jinja2）：
+#   nic / model_path / served_model_name / max_model_len / kv_port / cluster_type /
+#   prefill_dp / prefill_tp / decode_dp / decode_tp   ← resolve_node / 集群配置
+#   local_ip.stdout                                     ← 节点执行命令 register（非静态值）
+# 运行时引擎差异（端口/rank/dp/tp 等）由 launch_online_dp.py 以位置参数 $1..$7 传入，
+#   与 deploy.sh 原模板 templates/run_dp_prefill_template.sh 一致（$1 可见卡、$2 端口、$3 dp_size、
+#   $4 dp_rank、$5 dp_address、$6 rpc_port、$7 tp_size）。
 nic_name="{{ nic }}"
 local_ip="{{ local_ip.stdout }}"
 
@@ -34,12 +36,12 @@ export MOONCAKE_CONFIG_PATH="{{ mooncake_config_path }}"
 
 vllm serve {{ model_path }} \
     --host 0.0.0.0 \
-    --port {{ start_port }} \
-    --data-parallel-size {{ dp_size }} \
-    --data-parallel-rank {{ dp_rank }} \
-    --data-parallel-address {{ dp_address }} \
-    --data-parallel-rpc-port {{ rpc_port }} \
-    --tensor-parallel-size {{ tp_size }} \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
     --enable-expert-parallel \
     --enable-prefix-caching \
     --seed 1024 \

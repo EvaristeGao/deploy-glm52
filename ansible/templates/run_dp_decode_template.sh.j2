@@ -1,7 +1,10 @@
 #!/usr/bin/bash
 # run_dp_decode_template.sh.j2 — Decode 节点模板（kv_consumer，MultiConnector + AscendStore）
-# 由 Ansible template 模块渲染。变量来源同 prefill 模板：
+# 由 Ansible template 模块渲染。部署期变量（Jinja2）来源同 prefill 模板：
 #   local_ip.stdout ← 节点执行命令 register（非静态值）；其余来自 resolve_node / 集群配置
+# 运行时引擎差异（端口/rank/dp/tp 等）由 launch_online_dp.py 以位置参数 $1..$7 传入，
+#   与 deploy.sh 原模板 templates/run_dp_decode_template.sh 一致（decode 节点 dp_size_local=2
+#   需拉起多个引擎，端口/rank 必须每次不同，绝不能固化成模板常量）。
 nic_name="{{ nic }}"
 local_ip="{{ local_ip.stdout }}"
 
@@ -31,12 +34,12 @@ export MOONCAKE_CONFIG_PATH="{{ mooncake_config_path }}"
 
 vllm serve {{ model_path }} \
     --host 0.0.0.0 \
-    --port {{ start_port }} \
-    --data-parallel-size {{ dp_size }} \
-    --data-parallel-rank {{ dp_rank }} \
-    --data-parallel-address {{ dp_address }} \
-    --data-parallel-rpc-port {{ rpc_port }} \
-    --tensor-parallel-size {{ tp_size }} \
+    --port $2 \
+    --data-parallel-size $3 \
+    --data-parallel-rank $4 \
+    --data-parallel-address $5 \
+    --data-parallel-rpc-port $6 \
+    --tensor-parallel-size $7 \
     --enable-expert-parallel \
     --enable-prefix-caching \
     --seed 1024 \
