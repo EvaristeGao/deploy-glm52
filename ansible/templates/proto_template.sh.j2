@@ -1,0 +1,8 @@
+#!/usr/bin/bash
+# 原型渲染测试：Jinja2 插值 + register 节点命令替换
+# 值来自各节点执行命令的结果（变量替换见下方行）
+local_ip="{{ local_ip.stdout }}"
+npu_count={{ npu_count.stdout }}
+docker_status="{{ docker_status.stdout }}"
+host={{ inventory_hostname }}
+nic={{ nic }}

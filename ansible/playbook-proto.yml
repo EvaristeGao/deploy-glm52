@@ -1,0 +1,34 @@
+---
+# deploy-glm52 Ansible 原型评估
+# 核心验证: ① SSH 连 8 节点 ② Jinja2 {{var}} + register 节点命令替换 ③ 多节点并行 + 模板渲染
+# 说明: 原型只做只读探测 + 写 /tmp 临时文件，不起容器、不改系统
+- name: deploy-glm52 Ansible 原型评估
+  hosts: all
+  gather_facts: no
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: /home/g00832294/.ssh/KeyPair-2956.pem
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
+  tasks:
+    - name: SSH 连通性
+      ping:
+
+    - name: docker 可用性
+      shell: docker info >/dev/null 2>&1 && echo docker-ok || echo docker-fail
+      register: docker_status
+
+    - name: npu 卡数（节点命令替换核心验证）
+      shell: npu-smi info | grep -cE "^\| *[0-9]+"
+      register: npu_count
+
+    - name: 本机 IP（HCCL_IF_IP 常用，按节点 nic 取）
+      shell: ip -4 addr show {{ nic }} | grep -oP 'inet \K[0-9.]+' | head -1
+      register: local_ip
+
+    - name: 渲染测试模板（Jinja2 + register 节点替换）
+      template:
+        src: templates/proto_template.sh.j2
+        dest: /tmp/deploy-glm52-proto-{{ inventory_hostname }}.sh
+
+    - name: 显示渲染结果（节点端 cat）
+      shell: cat /tmp/deploy-glm52-proto-{{ inventory_hostname }}.sh
