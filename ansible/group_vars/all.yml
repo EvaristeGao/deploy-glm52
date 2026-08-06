@@ -1,1 +1,5 @@
 # 集群级变量（任务2 从 config.yaml include_vars 加载）
+# --- SSH 连接参数（来源：config.yaml 的 ssh 段，所有 playbook 共享）---
+ansible_user: root                              # config.yaml ssh.user
+ansible_ssh_private_key_file: /home/g00832294/.ssh/KeyPair-2956.pem  # config.yaml ssh.opts 的 -i
+ansible_ssh_common_args: "-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"  # config.yaml ssh.opts 的 -o 选项

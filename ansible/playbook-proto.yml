@@ -2,13 +2,10 @@
 # deploy-glm52 Ansible 原型评估
 # 核心验证: ① SSH 连 8 节点 ② Jinja2 {{var}} + register 节点命令替换 ③ 多节点并行 + 模板渲染
 # 说明: 原型只做只读探测 + 写 /tmp 临时文件，不起容器、不改系统
+# 连接参数统一在 group_vars/all.yml 定义（来源：config.yaml 的 ssh 段）
 - name: deploy-glm52 Ansible 原型评估
   hosts: all
   gather_facts: no
-  vars:
-    ansible_user: root
-    ansible_ssh_private_key_file: /home/g00832294/.ssh/KeyPair-2956.pem
-    ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
   tasks:
     - name: SSH 连通性
       ping:
