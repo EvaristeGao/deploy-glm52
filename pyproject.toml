@@ -10,4 +10,5 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "ansible-core>=2.21; python_version >= '3.12'",
 ]
