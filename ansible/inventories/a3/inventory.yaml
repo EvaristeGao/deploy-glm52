@@ -1,0 +1,18 @@
+# =============================================================================
+# A3 inventory — 4xA3 2P+2D
+# 拓扑：Prefill dp4tp8（每节点 2 引擎），Decode dp8tp4（每节点 4 引擎）
+# 注意：config-a3.yaml nodes IP 为空（A3 未实机验证），此处占位，实机确认后填写
+# proxy / mooncake 落在 p0
+# =============================================================================
+all:
+  children:
+    prefill:
+      hosts:
+        p0: { ansible_host: "", nic: "", idx: 0 }   # TODO: 待填 A3 prefill 节点 IP/nic
+        p1: { ansible_host: "", nic: "", idx: 1 }   # TODO: 待填 A3 prefill 节点 IP/nic
+    decode:
+      hosts:
+        d0: { ansible_host: "", nic: "", idx: 0 }   # TODO: 待填 A3 decode 节点 IP/nic
+        d1: { ansible_host: "", nic: "", idx: 1 }   # TODO: 待填 A3 decode 节点 IP/nic
+    proxy:  { hosts: { p0: {} } }
+    mooncake: { hosts: { p0: {} } }

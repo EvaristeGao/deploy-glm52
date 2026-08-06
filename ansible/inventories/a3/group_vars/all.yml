@@ -1,0 +1,36 @@
+# =============================================================================
+# A3 group_vars/all.yml — 集群级变量（原生化：集群参数并入各 inventory 的 group_vars）
+# SSH 连接参数 + 集群参数（平铺，无 nodes/cluster 段；值抄自 config-a3.yaml）
+# A3 未实机验证，字段依 A2 蓝本推演，实机跑通后需复核
+# =============================================================================
+
+# --- SSH 连接参数（来源：config-a3.yaml ssh 段，所有 playbook 共享）---
+ansible_user: root                              # config-a3.yaml ssh.user
+ansible_ssh_private_key_file: /home/g00832294/.ssh/KeyPair-2956.pem  # config-a3.yaml ssh.opts 的 -i
+ansible_ssh_common_args: "-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ConnectionAttempts=3 -o ServerAliveInterval=30 -o ServerAliveCountMax=3"  # config-a3.yaml ssh.opts 的 -o 选项 + 重试/心跳（实机瞬时 reset 容错）
+ansible_ssh_retries: 3                          # UNREACHABLE 自动重试（实机验证: 节点容器起后 sshd 瞬时不稳会 reset）
+
+# --- 集群参数（值抄自 config-a3.yaml，平铺、无 nodes/cluster 段）---
+cluster_type: a3
+image: quay.io/ascend/vllm-ascend:v0.23.0rc1-a3
+model_path: /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8
+model_name: glm-52
+
+pd_cluster:
+  max_model_len: 200000
+  num_cards: 16
+  prefill: { dp_size: 4, tp_size: 8, dp_size_local: 2, base_port: 9081, kv_port: 30000, rpc_port: 16591 }
+  decode:  { dp_size: 8, tp_size: 4, dp_size_local: 4, base_port: 9900, kv_port: 30100, rpc_port: 16600 }
+  enable_prefix_caching: true
+
+proxy: { port: 8000 }
+mooncake: { port: 50088, evict: 0.9 }
+
+container: { name: vllm-ascend, shm_size: 1024g }
+runtime: { ready_timeout: 2400, proxy_ready_timeout: 600 }
+
+logs:
+  dir: /mnt/share_space/g00832294/deploy-glm52/logs   # 共享目录（容器内可见，容器销毁后日志仍在）
+  vllm: vllm_{node}.log     # {node} 按节点替换（p0/p1/d0..），避免节点互相覆盖
+  mooncake: mooncake.log
+  proxy: proxy.log
