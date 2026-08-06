@@ -6,9 +6,6 @@
   hosts: all
   gather_facts: no
   tasks:
-    - name: 加载 config 变量（顶层字段如 image/model/container 变为同名变量）
-      include_vars: "../../config.yaml"
-
     - name: SSH 连通
       ping:
 

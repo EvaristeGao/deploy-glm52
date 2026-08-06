@@ -43,7 +43,7 @@
         dest: "{{ item.dest }}"
       loop:
         - { src: "../../launch_online_dp.py", dest: "/tmp/launch_online_dp.py" }
-        - { src: "../../generated/mooncake.json", dest: "/tmp/mooncake.json" }
+        - { src: "../generated/mooncake.json", dest: "/tmp/mooncake.json" }
       tags: container
 
     - name: docker cp 启动文件进容器 /root/pd/（对照 deploy.sh start_node）

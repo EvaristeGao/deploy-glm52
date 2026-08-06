@@ -7,42 +7,41 @@
 #   ansible-playbook -i ansible/inventory.yaml ansible/playbooks/status.yml
 #   ansible-playbook -i ansible/inventory.yaml ansible/playbooks/status.yml -l p0   # 只查 p0
 #
-# 引擎健康端口：resolve_node filter 复用 resolve_node.py 的 VLLM_START_PORT（按节点计算）。
+# 引擎健康端口：由节点参数派生（Jinja2，替代 resolve_node filter）。start_port = pd_cluster[node_role].base_port
+#   （对照 resolve_node.py 的 VLLM_START_PORT = base_port，语义一致）。
 #   当前集群停止时容器不存在 → inspect 报 no-container，engine/proxy uri 非 200 由 ignore_errors 兜底。
 - name: deploy-glm52 实例探测
   hosts: all
   gather_facts: no
   tasks:
-    - name: 加载 config 变量（container.name 等顶层字段）
-      include_vars: "../../config.yaml"
-
-    - name: 读取 config 全量 dict（供 resolve_node filter / proxy 端点）
-      set_fact:
-        cfg: "{{ lookup('file', playbook_dir + '/../../config.yaml') | from_yaml }}"
-
     # 对照 deploy.sh cmd_status(): docker inspect -f '{{.State.Status}}' || echo no-container
     - name: 容器状态
       shell: docker inspect -f '{{ '{{' }}.State.Status{{ '}}' }}' {{ container.name }} 2>/dev/null || echo no-container
       register: cst
 
-    # 对照 deploy.sh cmd_status(): 引擎 /health（resolve_node 的 VLLM_START_PORT）
-    - name: resolve_node 计算本节点引擎端口
+    # 对照 deploy.sh cmd_status(): 引擎 /health（resolve_node 的 VLLM_START_PORT = base_port）
+    # 派生分两步（同 set_fact 内 key 相互不可见，start.yml 同款模式）
+    - name: 派生本节点角色（Jinja2，替代 resolve_node filter）
       set_fact:
-        node_cfg: "{{ cfg | resolve_node(inventory_hostname) }}"
+        node_role: "{{ 'prefill' if inventory_hostname[0] == 'p' else 'decode' }}"
+
+    - name: 派生引擎起始端口（= pd_cluster[node_role].base_port）
+      set_fact:
+        start_port: "{{ pd_cluster[node_role].base_port }}"
 
     - name: 引擎健康（uri /health；集群停止时非 200 由 ignore_errors 兜底）
       uri:
-        url: "http://{{ ansible_host }}:{{ node_cfg['VLLM_START_PORT'] }}/health"
+        url: "http://{{ ansible_host }}:{{ start_port }}/health"
         status_code: 200
         timeout: 5
       ignore_errors: yes
       register: engine_health
 
-    # 对照 deploy.sh cmd_status(): proxy /healthcheck（proxy 节点）
+    # 对照 deploy.sh cmd_status(): proxy /healthcheck（proxy 节点 = inventory proxy 组首成员）
     - name: proxy 健康（proxy 节点 /healthcheck）
-      when: inventory_hostname == cfg['proxy']['node']
+      when: inventory_hostname == groups['proxy'][0]
       uri:
-        url: "http://{{ ansible_host }}:{{ cfg['proxy']['port'] }}/healthcheck"
+        url: "http://{{ ansible_host }}:{{ proxy.port }}/healthcheck"
         status_code: 200
         timeout: 5
       ignore_errors: yes

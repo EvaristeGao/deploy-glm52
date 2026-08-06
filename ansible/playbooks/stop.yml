@@ -11,12 +11,10 @@
   hosts: all
   gather_facts: no
   tasks:
-    - name: 加载 config 变量（container.name / proxy.node 等顶层字段）
-      include_vars: "../../config.yaml"
-
     # 对照 deploy.sh cmd_stop(): $pnode=$(...proxy.node) 上停 proxy
+    # proxy 节点 = inventory 的 proxy 组首成员（group_vars 无 proxy.node 平铺字段）
     - name: 停 proxy（proxy 节点；--pid=host 锚定 ^python3）
-      when: inventory_hostname == proxy.node
+      when: inventory_hostname == groups['proxy'][0]
       shell: docker exec {{ container.name }} pkill -f '^python3 .*load_balance_proxy_server_example' 2>/dev/null || true
 
     # 对照 deploy.sh cmd_stop(): p0 上停 mooncake_master（pkill -x 精确进程名）

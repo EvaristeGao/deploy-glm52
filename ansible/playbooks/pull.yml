@@ -6,8 +6,5 @@
   hosts: all
   gather_facts: no
   tasks:
-    - name: 加载 config 变量
-      include_vars: "../../config.yaml"
-
     - name: docker pull
       shell: docker pull {{ image }}

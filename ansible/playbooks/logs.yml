@@ -8,31 +8,29 @@
 #   ansible-playbook ... -e "target=proxy"             # proxy 节点 logs.proxy
 #   ansible-playbook ... -e "target=d1 tail=200"       # 指定行数（缺省 100）
 #
-# 目标节点/日志路径在 play vars 用 lookup 读 config.yaml 计算（hosts 模式需在任务前解析，
-# 故不用 include_vars 的 set_fact，直接取 cfg dict）。{node} 占位按 target 节点替换（vllm 日志按节点区分）。
+# 目标节点/日志路径在 play vars 用 group_vars 平铺变量计算（hosts 模式需在任务前解析，
+# 故用 vars 段直接取 group_vars）。{node} 占位按 target 节点替换（vllm 日志按节点区分）。
 - name: deploy-glm52 查看日志
   hosts: "{{ target_host }}"
   gather_facts: no
   vars:
-    # 唯一配置源 config.yaml（相对仓库根的 lookup，与 ansible.cfg 的运行方式一致）
-    cfg: "{{ lookup('file', playbook_dir + '/../../config.yaml') | from_yaml }}"
-    logs_cfg: "{{ cfg.get('logs', {}) }}"
+    # 配置源 group_vars/inventory 平铺（image/container/logs/proxy 等），不再读 config.yaml
     # target 缺省 p0（读 p0 的 vllm 日志，只读安全）；显式 -e target=... 覆盖
     tgt: "{{ target | default('p0') }}"
-    # target==proxy 时落到 proxy.node；否则 target 即节点名
-    target_node: "{{ tgt if tgt != 'proxy' else cfg.get('proxy', {}).get('node', 'p0') }}"
-    # hosts 模式：mooncake→p0；proxy→proxy.node；其余→target 节点
+    # target==proxy 时落到 proxy 组首成员；否则 target 即节点名
+    target_node: "{{ tgt if tgt != 'proxy' else groups['proxy'][0] }}"
+    # hosts 模式：mooncake→p0；proxy→proxy 组首成员；其余→target 节点
     target_host: >-
       {%- if tgt == 'mooncake' -%}p0
-      {%- elif tgt == 'proxy' -%}{{ cfg.get('proxy', {}).get('node', 'p0') }}
+      {%- elif tgt == 'proxy' -%}{{ groups['proxy'][0] }}
       {%- else -%}{{ tgt }}
       {%- endif -%}
-    logs_dir: "{{ logs_cfg.get('dir', '') }}"   # 空回退 /root（对照 deploy.sh LOGS_DIR）
+    logs_dir: "{{ logs.dir | default('') }}"   # 空回退 /root（对照 deploy.sh LOGS_DIR）
     log_path: >-
-      {%- if tgt == 'mooncake' -%}{{ (logs_dir or '/root') }}/{{ logs_cfg.get('mooncake', 'mooncake.log') }}
-      {%- elif tgt == 'proxy' -%}{{ (logs_dir or '/root') }}/{{ logs_cfg.get('proxy', 'proxy.log') }}
-      {%- else -%}{{ (logs_dir or '/root') }}/{{ logs_cfg.get('vllm', 'vllm_{node}.log') | replace('{node}', target_node) }}
+      {%- if tgt == 'mooncake' -%}{{ (logs_dir or '/root') }}/{{ logs.mooncake | default('mooncake.log') }}
+      {%- elif tgt == 'proxy' -%}{{ (logs_dir or '/root') }}/{{ logs.proxy | default('proxy.log') }}
+      {%- else -%}{{ (logs_dir or '/root') }}/{{ logs.vllm | default('vllm_{node}.log') | replace('{node}', target_node) }}
       {%- endif -%}
   tasks:
     - name: 输出日志（tail）
-      shell: docker exec {{ cfg['container']['name'] }} tail -n {{ tail | default(100) }} {{ log_path }}
+      shell: docker exec {{ container.name }} tail -n {{ tail | default(100) }} {{ log_path }}
