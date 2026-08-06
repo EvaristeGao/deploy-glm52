@@ -58,3 +58,78 @@
         docker exec {{ container.name }} pkill -x mooncake_master 2>/dev/null || true
         docker exec -d {{ container.name }} bash -c 'mooncake_master -port {{ mooncake.port }} -eviction_high_watermark_ratio {{ mooncake.evict }} >> {{ mooncake_log }} 2>&1'
         sleep 2 && docker exec {{ container.name }} pgrep -x mooncake_master >/dev/null
+
+    # ==================== 第二阶段：引擎（任务 6，对照 deploy.sh start_engines） ====================
+    # 核心：Jinja2 模板的 local_ip 用节点命令 register（节点命令替换，非静态值），
+    #       启动参数用 resolve filter（resolve_node 大写 KEY → 小写模板变量）。
+    # 安全点：只渲染模板 + 起引擎，不实机跑（syntax-check 只验语法）。
+
+    - name: 读取 config 全量 dict（供 resolve filter；include_vars 只拆了顶层字段）
+      set_fact:
+        cfg: "{{ lookup('file', playbook_dir + '/../../config.yaml') | from_yaml }}"
+
+    - name: resolve_node 计算本节点启动参数（大写 KEY）
+      set_fact:
+        node_cfg: "{{ cfg | resolve_node(inventory_hostname) }}"
+
+    - name: 组装模板变量（filter 大写 KEY → 小写模板变量，+ 跨角色 dp/tp + mooncake 路径）
+      set_fact:
+        node_role: "{{ node_cfg['ROLE'] }}"
+        nic: "{{ node_cfg['NIC'] }}"
+        model_path: "{{ node_cfg['MODEL_PATH'] }}"
+        served_model_name: "{{ node_cfg['SERVED_MODEL_NAME'] }}"
+        max_model_len: "{{ node_cfg['MAX_MODEL_LEN'] }}"
+        kv_port: "{{ node_cfg['KV_PORT'] }}"
+        start_port: "{{ node_cfg['VLLM_START_PORT'] }}"
+        dp_size: "{{ node_cfg['DP_SIZE'] }}"
+        dp_size_local: "{{ node_cfg['DP_SIZE_LOCAL'] }}"
+        dp_rank: "{{ node_cfg['DP_RANK_START'] }}"
+        dp_address: "{{ node_cfg['DP_ADDRESS'] }}"
+        rpc_port: "{{ node_cfg['DP_RPC_PORT'] }}"
+        tp_size: "{{ node_cfg['TP_SIZE'] }}"
+        cluster_type: "{{ node_cfg['CLUSTER_TYPE'] }}"
+        prefill_dp: "{{ cfg['pd_cluster']['prefill']['dp_size'] }}"
+        prefill_tp: "{{ cfg['pd_cluster']['prefill']['tp_size'] }}"
+        decode_dp: "{{ cfg['pd_cluster']['decode']['dp_size'] }}"
+        decode_tp: "{{ cfg['pd_cluster']['decode']['tp_size'] }}"
+        mooncake_config_path: "/root/pd/mooncake.json"
+
+    - name: 计算 vllm 日志路径（logs.dir 为空回退 /root，{node} 按节点替换，对照 deploy.sh vllm_log）
+      set_fact:
+        vllm_log: "{{ (logs.dir | default('')) or '/root' }}/{{ logs.vllm | default('vllm_{node}.log') | replace('{node}', inventory_hostname) }}"
+
+    - name: 本机 IP（节点命令替换核心，register 供模板 local_ip.stdout）
+      shell: ip -4 addr show {{ nic }} | grep -oP 'inet \K[0-9.]+' | head -1
+      register: local_ip
+
+    - name: 渲染 run_dp_template.sh（每节点，dest 为节点 /tmp，模板用本机 local_ip）
+      template:
+        src: "../templates/run_dp_{{ node_role }}_template.sh.j2"
+        dest: "/tmp/run_dp_template_{{ inventory_hostname }}.sh"
+
+    - name: docker cp 模板进容器 /root/pd/run_dp_template.sh（对照 deploy.sh start_node）
+      shell: docker cp /tmp/run_dp_template_{{ inventory_hostname }}.sh {{ container.name }}:/root/pd/run_dp_template.sh
+
+    - name: 启动引擎（对照 deploy.sh start_engines，docker exec -d 后台）
+      shell: |
+        docker exec {{ container.name }} mkdir -p {{ vllm_log | dirname }} 2>/dev/null || true
+        docker exec -d {{ container.name }} bash -c 'cd /root/pd && python3 launch_online_dp.py \
+          --dp-size {{ dp_size }} --tp-size {{ tp_size }} --dp-size-local {{ dp_size_local }} \
+          --dp-rank-start {{ dp_rank }} --dp-address {{ dp_address }} \
+          --dp-rpc-port {{ rpc_port }} --vllm-start-port {{ start_port }} >> {{ vllm_log }} 2>&1'
+
+    # ==================== wait_ready（对照 deploy.sh cmd_start 的 wait_ready 段） ====================
+    # 实例清单经 run_once 在控制端生成（resolve_instances 返回 role ip port，跳过 proxy）；
+    # retries 由 runtime.ready_timeout 折算（2400s / 15s = 160）
+    - name: 等待全部实例就绪（uri + until，遍历 resolve_instances）
+      run_once: true
+      uri:
+        url: "http://{{ item[1] }}:{{ item[2] }}/health"
+        status_code: 200
+        timeout: 5
+      register: result
+      until: result.status == 200
+      retries: "{{ (runtime.ready_timeout | default(2400)) | int // 15 }}"
+      delay: 15
+      loop: "{{ cfg | resolve_instances }}"
+      when: item[0] != 'proxy'
