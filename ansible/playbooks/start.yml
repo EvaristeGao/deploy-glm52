@@ -1,0 +1,60 @@
+---
+# deploy-glm52 — 第一阶段 start playbook（起容器 + 分发启动文件 + mooncake_master）
+# 对照 deploy.sh: start_node() + start_mooncake_master()
+# 连接参数统一在 group_vars/all.yml（来源：config.yaml 的 ssh 段）
+#
+# 安全点：容器 --pid=host，容器内 pkill/pgrep 会看到 host 全部进程。
+#   必须用 -x 精确匹配进程名（mooncake_master），不能用 -f——
+#   否则会匹配 Ansible 的 ssh 会话（其命令行含这些字符串）而误杀/误判连接。
+- name: deploy-glm52 一键部署（第一阶段：起容器 + 分发 + mooncake）
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: 加载 config 变量（顶层字段 image/model/container 等变为同名变量）
+      include_vars: "../../config.yaml"
+
+    - name: 删除旧容器（幂等，对照 deploy.sh 的 docker rm -f $CONTAINER_NAME）
+      shell: docker rm -f {{ container.name }} 2>/dev/null || true
+
+    - name: 起容器（对照 deploy.sh start_node 的 docker run，无遗漏）
+      shell: |
+        docker run -itd --name {{ container.name }} \
+        --net=host --pid=host --privileged --shm-size={{ container.shm_size }} \
+        {% for i in range(pd_cluster.num_cards) %}--device /dev/davinci{{ i }} {% endfor %}\
+        --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        {% for m in model.mounts %}-v {{ m }} {% endfor %}\
+        {% if model.dir_host %}-v {{ model.dir_host }}:/root/.cache {% endif %}\
+        {{ image }} bash
+
+    - name: 分发启动文件到各节点 /tmp（对照 deploy.sh 的 scpn）
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+      loop:
+        - { src: "../../launch_online_dp.py", dest: "/tmp/launch_online_dp.py" }
+        - { src: "../../generated/mooncake.json", dest: "/tmp/mooncake.json" }
+
+    - name: docker cp 启动文件进容器 /root/pd/（对照 deploy.sh start_node）
+      shell: docker exec {{ container.name }} mkdir -p /root/pd && docker cp /tmp/{{ item }} {{ container.name }}:/root/pd/
+      loop:
+        - launch_online_dp.py
+        - mooncake.json
+
+    - name: 计算 mooncake 日志路径（logs.dir 为空回退 /root，对照 deploy.sh MOONCAKE_LOG）
+      set_fact:
+        mooncake_log: "{{ (logs.dir | default('')) or '/root' }}/{{ logs.mooncake | default('mooncake.log') }}"
+
+    - name: mooncake_master 起在 p0（对照 deploy.sh start_mooncake_master，pkill -x 精确匹配）
+      when: inventory_hostname == 'p0'
+      shell: |
+        docker exec {{ container.name }} mkdir -p {{ mooncake_log | dirname }} 2>/dev/null || true
+        docker exec {{ container.name }} pkill -x mooncake_master 2>/dev/null || true
+        docker exec -d {{ container.name }} bash -c 'mooncake_master -port {{ mooncake.port }} -eviction_high_watermark_ratio {{ mooncake.evict }} >> {{ mooncake_log }} 2>&1'
+        sleep 2 && docker exec {{ container.name }} pgrep -x mooncake_master >/dev/null
