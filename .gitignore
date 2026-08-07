@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 uv.lock
 .claude/settings.local.json*
+tmp.tar.gz
