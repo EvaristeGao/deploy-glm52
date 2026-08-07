@@ -148,8 +148,8 @@ ansible-playbook -i inventories/a2/inventory.yaml playbooks/start.yml --check
 - `tests/test_template_render.py`（10 用例）：Jinja2 模板渲染（含 decode 位置参数保留）
 
 ### 6.2 实机验证
-- **历史（N 系列，config.yaml 旧版）**：8 节点容器生命周期（不占卡）通过；完整端到端（占卡）8 节点 failed=0、wait_ready 13/13、内建冒烟通过、proxy healthcheck `{"status":"ok","prefill_instances":4,"decode_instances":8}`、端到端请求 HTTP 200 fingerprint `vllm-0.23.0-tp4-dp8`。
-- **原生化版本**：完整端到端实机验证（N9）**延期**，**待实机**——本 README 对应的原生化版本（group_vars 直载 + Jinja2 派生）尚未跑完整占卡链路，需在实机复核。
+- **原生化版本（本套件）**：完整端到端实机验证**通过**——全节点 failed=0，wait_ready **13/13 就绪**（4 prefill + 8 decode + proxy），proxy healthcheck `{"status":"ok","prefill_instances":4,"decode_instances":8}`，内建冒烟通过（首次 POST 因 KV 预热重试后成功），端到端请求 HTTP 200、`fingerprint vllm-0.23.0-tp4-dp8`（decode 参与，P/D 分离链路真实工作），预热后单请求约 2s。
+- **历史（N 系列，config.yaml 旧版）**：8 节点容器生命周期（不占卡）通过；完整端到端（占卡）同 13/13 + 冒烟 + 端到端 200，与原生化结果一致。
 
 ---
 
