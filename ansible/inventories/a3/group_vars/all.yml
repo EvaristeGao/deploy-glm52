@@ -19,7 +19,7 @@ model:
   path: /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8
   served_model_name: glm-52
   dir_host: "/root/.cache"        # 非空则挂载 -v <dir_host>:/root/.cache（A3 用）
-  mounts: []                      # 审查决定留空（注：config-a3.yaml 的 model.mounts 有共享目录挂载，本次按指示留空）
+  mounts: ["/mnt/share_space/:/mnt/share_space/"]   # 共享目录挂载（配合 logs.dir 日志持久化，同 config-a3）
 
 pd_cluster:
   max_model_len: 200000
