@@ -11,8 +11,10 @@
 
     - name: docker 可用
       shell: docker info >/dev/null 2>&1 && echo docker-ok || { echo docker-fail; exit 1; }
+      changed_when: false   # 只读探测，不改变状态
 
     - name: 镜像检查
       shell: >-
         docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}"
         | grep -Fq "{{ image }}" && echo image-present || { echo image-missing; exit 1; }
+      changed_when: false   # 只读探测：present→ok, missing→failed(返回码1)
