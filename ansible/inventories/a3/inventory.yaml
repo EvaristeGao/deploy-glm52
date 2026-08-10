@@ -1,18 +1,18 @@
 # =============================================================================
 # A3 inventory — 4xA3 2P+2D
 # 拓扑：Prefill dp4tp8（每节点 2 引擎），Decode dp8tp4（每节点 4 引擎）
-# IP: 10.246.64.45-48（p0/p1=45/46, d0/d1=47/48），nic: enp162s0f0
+# IP: 10.246.63.49/51/52/55（p0/p1/d0/d1），nic: enp162s0f0
 # proxy / mooncake 落在 p0
 # =============================================================================
 all:
   children:
     prefill:
       hosts:
-        p0: { ansible_host: "10.246.64.45", nic: enp162s0f0, idx: 0 }
-        p1: { ansible_host: "10.246.64.46", nic: enp162s0f0, idx: 1 }
+        p0: { ansible_host: "10.246.63.49", nic: enp162s0f0, idx: 0 }
+        p1: { ansible_host: "10.246.63.51", nic: enp162s0f0, idx: 1 }
     decode:
       hosts:
-        d0: { ansible_host: "10.246.64.47", nic: enp162s0f0, idx: 0 }
-        d1: { ansible_host: "10.246.64.48", nic: enp162s0f0, idx: 1 }
+        d0: { ansible_host: "10.246.63.52", nic: enp162s0f0, idx: 0 }
+        d1: { ansible_host: "10.246.63.55", nic: enp162s0f0, idx: 1 }
     proxy:  { hosts: { p0: {} } }
     mooncake: { hosts: { p0: {} } }
