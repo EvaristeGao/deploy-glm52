@@ -14,8 +14,8 @@
       shell: docker info >/dev/null 2>&1 && echo docker-ok || echo docker-fail
       register: docker_status
 
-    - name: npu 卡数（节点命令替换核心验证）
-      shell: npu-smi info | grep -cE "^\| *[0-9]+"
+    - name: npu 卡数（节点命令替换核心验证；只数带 OK 的状态行，A3 每卡一行 OK=16）
+      shell: npu-smi info | grep -cE "^\| *[0-9]+.*OK"
       register: npu_count
 
     - name: 本机 IP（HCCL_IF_IP 常用，按节点 nic 取）
