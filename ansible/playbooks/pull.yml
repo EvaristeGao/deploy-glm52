@@ -1,10 +1,18 @@
 ---
-# deploy-glm52 拉取镜像 playbook（每节点 docker pull {{ image }}）
-# 会实际拉取镜像、可能占网络/磁盘，故任务 4 只做 syntax-check，不实跑。
+# deploy-glm52 拉取/加载镜像 playbook
+# 两种模式（group_vars 的 image_tar 决定）：
+#   image_tar 非空 → 每节点 docker load -i <image_tar>（tar 需节点可见，如共享目录挂载）
+#   image_tar 留空  → 每节点 docker pull {{ image }}
+# 会实际拉取/加载镜像、可能占网络/磁盘。
 # 连接参数统一在 inventories/<集群>/group_vars/all.yml（inventory 自动加载）
-- name: 拉取镜像
+- name: 拉取/加载镜像
   hosts: all
   gather_facts: no
   tasks:
-    - name: docker pull
-      shell: docker pull {{ image }}
+    - name: 加载或拉取镜像
+      shell: |
+        {% if image_tar | default('') != '' %}
+        docker load -i {{ image_tar }}
+        {% else %}
+        docker pull {{ image }}
+        {% endif %}

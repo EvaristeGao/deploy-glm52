@@ -12,6 +12,7 @@ ansible_ssh_retries: 3                          # UNREACHABLE 自动重试（实
 # --- 集群参数（值抄自 config.yaml，平铺、无 nodes/cluster 段）---
 cluster_type: a2
 image: quay.io/ascend/vllm-ascend:v0.23.0rc1
+image_tar: ""                 # 非空则 pull.yml 改从该 tar docker load（需节点可见路径，如共享目录）；留空则 docker pull image
 model_path: /mnt/share_space/models/GLM-5.2-w4a8c8
 model_name: glm-52
 model:
