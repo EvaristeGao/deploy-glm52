@@ -9,10 +9,15 @@
   hosts: all
   gather_facts: no
   tasks:
-    - name: 加载或拉取镜像
+    - name: 加载或拉取镜像（已存在则跳过）
       shell: |
+        if docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}" | grep -Fq "{{ image }}"; then
+          echo image-already-present
         {% if image_tar | default('') != '' %}
-        docker load -i {{ image_tar }}
+        else
+          docker load -i {{ image_tar }}
         {% else %}
-        docker pull {{ image }}
+        else
+          docker pull {{ image }}
         {% endif %}
+        fi
