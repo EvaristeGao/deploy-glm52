@@ -11,7 +11,7 @@
   tasks:
     - name: 加载或拉取镜像（已存在则跳过）
       shell: |
-        if docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}" | grep -Fq "{{ image }}"; then
+        if docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}" | grep -Fxq "{{ image }}"; then
           echo image-already-present
         {% if image_tar | default('') != '' %}
         else

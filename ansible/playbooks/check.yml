@@ -16,5 +16,5 @@
     - name: 镜像检查
       shell: >-
         docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}"
-        | grep -Fq "{{ image }}" && echo image-present || { echo image-missing; exit 1; }
+        | grep -Fxq "{{ image }}" && echo image-present || { echo image-missing; exit 1; }
       changed_when: false   # 只读探测：present→ok, missing→failed(返回码1)
