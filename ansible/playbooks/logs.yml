@@ -34,3 +34,9 @@
   tasks:
     - name: 输出日志（tail）
       shell: docker exec {{ container.name }} tail -n {{ tail | default(100) }} {{ log_path }}
+      register: log_output
+      changed_when: false   # 只读
+
+    - name: 显示日志内容
+      debug:
+        msg: "{{ log_output.stdout }}"
