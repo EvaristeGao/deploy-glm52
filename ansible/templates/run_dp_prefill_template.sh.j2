@@ -15,18 +15,24 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
+export OMP_NUM_THREADS={% if cluster_type == "a3" %}1{% else %}10{% endif %}
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export HCCL_BUFFSIZE=256
+{% if cluster_type != "a3" %}export VLLM_ASCEND_ENABLE_MLAPO=1
+{% endif %}export HCCL_BUFFSIZE={% if cluster_type == "a3" %}400{% else %}256{% endif %}
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
-export ASCEND_RT_VISIBLE_DEVICES=$1
-export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:/usr/local/lib:$LD_LIBRARY_PATH
-export ASCEND_AGGREGATE_ENABLE=1
+{% if cluster_type != "a3" %}export VLLM_USE_V1=1
+{% endif %}export ASCEND_RT_VISIBLE_DEVICES=$1
+export LD_LIBRARY_PATH={% if cluster_type == "a3" %}$LD_LIBRARY_PATH:/usr/local/lib{% else %}/usr/local/python3.11.10/lib:/usr/local/lib:$LD_LIBRARY_PATH{% endif %}
+{% if cluster_type != "a3" %}export ASCEND_AGGREGATE_ENABLE=1
 export ASCEND_TRANSPORT_PRINT=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+{% endif %}export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+{% if cluster_type == "a3" %}export ASCEND_A3_ENABLE=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+export HCCL_TRANSFER_TIMEOUT=600
+export HCCL_EXEC_TIMEOUT=3600
+export HCCL_CONNECT_TIMEOUT=3600
+{% endif %}
 
 export PYTHONHASHSEED=0
 export MOONCAKE_CONFIG_PATH="{{ mooncake_config_path }}"
@@ -45,16 +51,16 @@ vllm serve {{ model_path }} \
     --enable-expert-parallel \
     --enable-prefix-caching \
     --seed 1024 \
-    --enable-chunked-prefill \
-    --served-model-name {{ served_model_name }} \
+    {% if cluster_type != "a3" %}--enable-chunked-prefill \
     --async-scheduling \
+    {% endif %}--served-model-name {{ served_model_name }} \
     --max-model-len {{ max_model_len }} \
     --max-num-batched-tokens 8192 \
     --trust-remote-code \
-    --max-num-seqs 256 \
-    --gpu-memory-utilization 0.95 \
-    --safetensors-load-strategy prefetch \
-    --quantization ascend \
+    --max-num-seqs {% if cluster_type == "a3" %}64{% else %}256{% endif %} \
+    --gpu-memory-utilization {% if cluster_type == "a3" %}0.92{% else %}0.95{% endif %} \
+    {% if cluster_type != "a3" %}--safetensors-load-strategy prefetch \
+    {% endif %}--quantization ascend \
     --enforce-eager \
     --enable-auto-tool-choice \
     --tool-call-parser glm47 \
@@ -86,5 +92,5 @@ vllm serve {{ model_path }} \
         ]
     }
     }' \
-    --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' \
+    --additional-config {% if cluster_type == "a3" %}'{"enable_dsa_cp":true, "enable_sparse_li_c8": true}'{% else %}'{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}'{% endif %} \
     --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager":true}'
