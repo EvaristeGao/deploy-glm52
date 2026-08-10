@@ -21,3 +21,5 @@
           docker pull {{ image }}
         {% endif %}
         fi
+      register: pull_result
+      changed_when: "'image-already-present' not in pull_result.stdout"   # 已存在(跳过)→ok; 实际 load/pull→changed
