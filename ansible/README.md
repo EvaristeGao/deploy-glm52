@@ -85,7 +85,7 @@ source .venv/bin/activate
 # 预检（只读）
 ansible-playbook -i inventories/a2/inventory.yaml playbooks/check.yml
 
-# 拉镜像（并行）
+# 拉取/加载镜像（并行；group_vars 的 image_tar 非空则 docker load tar, 否则 docker pull）
 ansible-playbook -i inventories/a2/inventory.yaml playbooks/pull.yml
 
 # 一键部署（起容器 + mooncake + 引擎 + 全就绪 + proxy + 冒烟）
