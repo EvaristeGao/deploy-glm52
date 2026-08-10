@@ -39,4 +39,4 @@
 
     - name: 显示日志内容
       debug:
-        msg: "{{ log_output.stdout }}"
+        var: log_output.stdout_lines   # 行列表，每日志行一项，避免 \n 转义
