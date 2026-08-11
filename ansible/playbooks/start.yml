@@ -232,7 +232,7 @@
       delay: 15
       tags: proxy
 
-    - name: 冒烟测试（control 端 POST /v1/completions，对照 deploy.sh smoke_test）
+    - name: 冒烟测试（control 端 POST /v1/chat/completions，对照 deploy.sh smoke_test）
       when: inventory_hostname == 'p0'
       delegate_to: localhost
       uri:
