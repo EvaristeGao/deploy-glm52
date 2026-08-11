@@ -13,6 +13,6 @@ all:
     decode:
       hosts:
         d0: { ansible_host: "10.246.63.52", nic: enp162s0f0, idx: 0 }
-        d1: { ansible_host: "10.246.63.39", nic: enp162s0f0, idx: 1 }
+        d1: { ansible_host: "10.246.63.55", nic: enp162s0f0, idx: 1 }
     proxy:  { hosts: { p0: {} } }
     mooncake: { hosts: { p0: {} } }

@@ -236,7 +236,7 @@
       when: inventory_hostname == 'p0'
       delegate_to: localhost
       uri:
-        url: "http://{{ proxy_host }}:{{ proxy_port }}/v1/completions"
+        url: "http://{{ proxy_host }}:{{ proxy_port }}/v1/chat/completions"
         method: POST
         body:
           model: "{{ served_model_name }}"

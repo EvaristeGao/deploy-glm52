@@ -19,16 +19,16 @@ image_tar: "/mnt/share_space/lh/repo/vllm-ascend.v0.23.0rc1-a3.tar"             
 model_path: /mnt/weight/GLM-5.2-w4a8c8
 model_name: glm-52
 model:
-  path: /mnt/weight/GLM-5.2-w4a8c8   # 同事 A3 实机权重路径
+  path: /mnt/weight/GLM-5.2-w4a8c8   # A3 实机权重路径
   served_model_name: glm-52
-  dir_host: "/root/.cache"        # 非空则挂载 -v <dir_host>:/root/.cache（A3 用）
-  mounts: ["/mnt/share_space/:/mnt/share_space/", "/mnt/weight:/mnt/weight"]   # 共享目录 + 模型权重挂载（同事 A3 用 /mnt/weight）
+  dir_host: ""        # 非空则挂载 -v <dir_host>:/root/.cache（A3 用）
+  mounts: ["/mnt/share_space/:/mnt/share_space/", "/mnt/weight:/mnt/weight"]   # 共享目录 + 模型权重挂载（A3 用 /mnt/weight）
 
 pd_cluster:
   max_model_len: 200000
   num_cards: 16
   prefill: { dp_size: 4, tp_size: 8, dp_size_local: 2, base_port: 9081, kv_port: 30000, rpc_port: 16591 }
-  decode:  { dp_size: 32, tp_size: 1, dp_size_local: 16, base_port: 9900, kv_port: 30100, rpc_port: 16600 }   # 同事 1.log 实机: dp32 tp1, 每节点 16 引擎
+  decode:  { dp_size: 32, tp_size: 1, dp_size_local: 16, base_port: 9900, kv_port: 30100, rpc_port: 16600 }   # A3 实机: dp32 tp1, 每节点 16 引擎
   enable_prefix_caching: true
 
 proxy: { port: 8000 }

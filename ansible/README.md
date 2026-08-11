@@ -155,7 +155,7 @@ ansible-playbook -i inventories/a2/inventory.yaml playbooks/start.yml --check
 
 ## 7. 已知事项
 
-- **A3 已按同事实机配置对齐**：inventory 已填 IP（10.246.64.45-48，nic `enp162s0f0`）、`model.path /mnt/weight/GLM-5.2-w4a8c8` + `/mnt/weight` 挂载、decode 拓扑 `dp32 tp1 dp_size_local 16`（同事 1.log 实机）、A3 特有环境变量（`ASCEND_A3_ENABLE`/`FUSED_MC2`/`HCCL_*_TIMEOUT`）与推理参数（模板 `cluster_type=='a3'` 条件）。**A3 仍未实机部署验证**（当前控制机连不上 10.246.64.x，需在能连 A3 的环境跑通）
+- **A3 已按实机配置对齐**：inventory 已填 IP（10.246.64.45-48，nic `enp162s0f0`）、`model.path /mnt/weight/GLM-5.2-w4a8c8` + `/mnt/weight` 挂载、decode 拓扑 `dp32 tp1 dp_size_local 16`、A3 特有环境变量（`ASCEND_A3_ENABLE`/`FUSED_MC2`/`HCCL_*_TIMEOUT`）与推理参数（模板 `cluster_type=='a3'` 条件）。**A3 仍未实机部署验证**（当前控制机连不上 10.246.64.x，需在能连 A3 的环境跑通）
 - **运行需在 `ansible/` 目录内**（`ansible.cfg` 在 `ansible/`，让 Ansible 加载配置）
 - 完整 `--check` 是干跑近似，不等价 `--dry-run` 的完整模拟
 - `--tags engine` 等分段重跑依赖前置阶段（如 smoke 需 proxy 已起）
