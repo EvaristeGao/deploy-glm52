@@ -1,6 +1,6 @@
-# haproxy.cfg — LB etcd 3 节点（对齐 ha_script/gen_haproxy_etcd.sh）
-# 前端: bind {{ haproxy.port }}; 后端: 3 个 etcd 节点 (ssl verify none, client.pem, sni, alpn h2)
-# mooncake_master 的 -etcd_endpoints 指向本 haproxy（统一入口，LB 到 3 个 etcd）
+# haproxy.cfg — ETCD 代理（对齐 ha_script/gen_haproxy_etcd.sh）
+# 前端: bind *:{{ haproxy.listen_start_port }}; 后端: roundrobin 到 3 个 etcd (ssl verify none, client.pem, sni, alpn h2)
+# mooncake_master 的 -etcd_endpoints 指向本 haproxy:127.0.0.1:{{ haproxy.listen_start_port }}
 global
     log         127.0.0.1 local0
     maxconn     4096
@@ -17,7 +17,7 @@ defaults
     timeout tunnel          1h
 
 frontend etcd_front
-    bind *:{{ haproxy.port }}
+    bind *:{{ haproxy.listen_start_port }}
     mode tcp
     option tcplog
     default_backend etcd_backend

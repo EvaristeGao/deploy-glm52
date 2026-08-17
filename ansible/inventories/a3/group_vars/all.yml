@@ -46,6 +46,8 @@ mooncake:
     rpc_port: 52050
     metrics_port: 52052
     health_check_port: 52054
+    eviction_ratio: 0.2
+    log_dir: /var/log/mooncake_master
 
 # etcd（3 节点，mooncake_master HA 选主后端）
 etcd:
@@ -56,9 +58,9 @@ etcd:
   client_port: 2379
   peer_port: 2380
 
-# haproxy（LB mooncake_master，跑在 mooncake 容器内，3 节点都跑）
+# haproxy（etcd 代理，跑在 mooncake 容器内，3 节点都跑；对齐 ha_script/gen_haproxy_etcd.sh：单端口 roundrobin 3 etcd）
 haproxy:
-  port: 50089                # LB 统一入口（引擎 mooncake.json master_server_address 指它）
+  listen_start_port: 12379   # HAP_LISTEN_START_PORT：haproxy 本地监听端口（mooncake_master -etcd_endpoints 指 127.0.0.1:此端口）
 
 container: { name: vllm-ascend-gwh-glm52, shm_size: 1024g }
 runtime: { ready_timeout: 2400, proxy_ready_timeout: 600 }

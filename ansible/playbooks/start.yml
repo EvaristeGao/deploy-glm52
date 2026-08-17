@@ -111,19 +111,24 @@
           {{ mooncake.image }} bash
       tags: mooncake
 
-    - name: 容器内起 mooncake_master（3 节点，HA，etcd 选主）
+    - name: 容器内起 mooncake_master（3 节点，HA，etcd 选主；etcd_endpoints 指本机 haproxy，对齐 etcd.md）
       when: inventory_hostname in mooncake.ha.nodes
       shell: |
         docker exec mooncake-{{ inventory_hostname }} mkdir -p {{ mooncake_log | dirname }} 2>/dev/null || true
         docker exec mooncake-{{ inventory_hostname }} pkill -x mooncake_master 2>/dev/null || true
         docker exec -d mooncake-{{ inventory_hostname }} bash -c \
-          'mooncake_master --enable_ha={{ mooncake.ha.enable_ha }} \
-            -etcd_endpoints {{ etcd_endpoints }} \
+          'mooncake_master -enable_ha=true \
+            -etcd_endpoints 127.0.0.1:{{ haproxy.listen_start_port }} \
             --rpc-address {{ hostvars[inventory_hostname].ansible_host }} \
-            --rpc_port {{ mooncake.ha.rpc_port }} \
-            -metrics_port {{ mooncake.ha.metrics_port }} \
-            -health_check_port {{ mooncake.ha.health_check_port }} \
-            -eviction_high_watermark_ratio {{ mooncake.evict }} >> {{ mooncake_log }} 2>&1'
+            -rpc_port={{ mooncake.ha.rpc_port }} \
+            -metrics_port={{ mooncake.ha.metrics_port }} \
+            -health_check_port={{ mooncake.ha.health_check_port }} \
+            -eviction_high_watermark_ratio={{ mooncake.evict }} \
+            -eviction_ratio={{ mooncake.ha.eviction_ratio }} \
+            -default_kv_lease_ttl={{ mooncake.default_kv_lease_ttl }} \
+            -log_dir={{ mooncake.ha.log_dir }} \
+            -max_log_size=1800 -stderrthreshold=4 -stop_logging_if_full_disk=true \
+            >> {{ mooncake_log }} 2>&1'
         sleep 2 && docker exec mooncake-{{ inventory_hostname }} pgrep -x mooncake_master >/dev/null
       tags: mooncake
 
