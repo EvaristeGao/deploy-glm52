@@ -76,11 +76,11 @@
 
     # ==================== mooncake_master HA：etcd 3 节点 + 3 master + haproxy（同 mooncake 容器） ====================
 
-    - name: 计算 etcd 集群参数（endpoints / initial-cluster，run_once）
+    - name: 计算 etcd 集群参数（initial-cluster 供 etcd 互连；etcd_endpoints 供 mooncake_master 经 haproxy 连 etcd）
       run_once: true
       delegate_to: localhost
       set_fact:
-        etcd_endpoints: "{% for n in etcd.nodes %}https://{{ hostvars[n].ansible_host }}:{{ etcd.client_port }}{% if not loop.last %},{% endif %}{% endfor %}"
+        etcd_endpoints: "https://{{ hostvars[mooncake.ha.nodes[0]].ansible_host }}:{{ haproxy.port }}"   # mooncake_master → haproxy(etcd LB)
         etcd_initial_cluster: "{% for n in etcd.nodes %}s{{ loop.index }}=https://{{ hostvars[n].ansible_host }}:{{ etcd.peer_port }}{% if not loop.last %},{% endif %}{% endfor %}"
       tags: etcd
 
@@ -107,6 +107,7 @@
         docker rm -f mooncake-{{ inventory_hostname }} 2>/dev/null || true
         docker run -itd --name mooncake-{{ inventory_hostname }} --network host \
           -v /mnt/share_space/:/mnt/share_space/ \
+          -v {{ etcd.certs_dir }}:/etc/pki/etcd/certs \
           {{ mooncake.image }} bash
       tags: mooncake
 
@@ -126,19 +127,21 @@
         sleep 2 && docker exec mooncake-{{ inventory_hostname }} pgrep -x mooncake_master >/dev/null
       tags: mooncake
 
-    - name: 渲染 haproxy.cfg（每节点，后端 3 master，LB {{ haproxy.port }}）
+    - name: 渲染 haproxy.cfg（每节点，LB etcd 3 节点，对齐 ha_script/gen_haproxy_etcd.sh）
       template:
         src: haproxy.cfg.j2
         dest: /tmp/haproxy.cfg
       when: inventory_hostname in mooncake.ha.nodes
       tags: haproxy
 
-    - name: 分发并启动 haproxy（3 节点 mooncake 容器）
+    - name: 分发并启动 haproxy（对齐 start_ha.sh：haproxy -c 校验 + 幂等 + nc 等就绪）
       when: inventory_hostname in mooncake.ha.nodes
       shell: |
-        docker cp /tmp/haproxy.cfg mooncake-{{ inventory_hostname }}:/etc/haproxy/haproxy.cfg
-        docker exec mooncake-{{ inventory_hostname }} pkill -f '^haproxy' 2>/dev/null || true
-        docker exec mooncake-{{ inventory_hostname }} haproxy -f /etc/haproxy/haproxy.cfg -D
+        docker exec mooncake-{{ inventory_hostname }} mkdir -p /usr/local/etc/haproxy
+        docker cp /tmp/haproxy.cfg mooncake-{{ inventory_hostname }}:/usr/local/etc/haproxy/haproxy.cfg
+        docker exec mooncake-{{ inventory_hostname }} bash -c \
+          'haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg && \
+           (pgrep -x haproxy >/dev/null || haproxy -f /usr/local/etc/haproxy/haproxy.cfg)'
       tags: haproxy
 
     # ==================== 第二阶段：引擎（任务 6，对照 deploy.sh start_engines） ====================

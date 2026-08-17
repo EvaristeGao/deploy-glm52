@@ -1,18 +1,31 @@
-# haproxy.cfg — LB mooncake_master（3 节点 HA，etcd 选主）
-# 引擎 mooncake.json 的 master_server_address 指向本 haproxy:{{ haproxy.port }}
-# 后端 = 3 个 mooncake_master 的 rpc_port（{{ mooncake.ha.rpc_port }}）
+# haproxy.cfg — LB etcd 3 节点（对齐 ha_script/gen_haproxy_etcd.sh）
+# 前端: bind {{ haproxy.port }}; 后端: 3 个 etcd 节点 (ssl verify none, client.pem, sni, alpn h2)
+# mooncake_master 的 -etcd_endpoints 指向本 haproxy（统一入口，LB 到 3 个 etcd）
 global
-  daemon
+    log         127.0.0.1 local0
+    maxconn     4096
+    daemon
+
 defaults
-  mode tcp
-  timeout connect 5s
-  timeout client 30s
-  timeout server 30s
-frontend mooncake_in
-  bind *:{{ haproxy.port }}
-  default_backend mooncake_masters
-backend mooncake_masters
-  balance roundrobin
-{% for n in mooncake.ha.nodes %}
-  server s{{ loop.index }} {{ hostvars[n].ansible_host }}:{{ mooncake.ha.rpc_port }} check
+    log                     global
+    mode                    tcp
+    option                  tcplog
+    timeout connect         10s
+    timeout client          30s
+    timeout server          30s
+    timeout check           10s
+    timeout tunnel          1h
+
+frontend etcd_front
+    bind *:{{ haproxy.port }}
+    mode tcp
+    option tcplog
+    default_backend etcd_backend
+
+backend etcd_backend
+    mode tcp
+    balance roundrobin
+{% for n in etcd.nodes %}
+    # etcd 节点 {{ loop.index }}
+    server etcd-{{ loop.index }} {{ hostvars[n].ansible_host }}:{{ etcd.client_port }} ssl verify none crt {{ etcd.client_cert | default('/etc/pki/etcd/certs/client.pem') }} sni str({{ hostvars[n].ansible_host }}) alpn h2 check
 {% endfor %}
