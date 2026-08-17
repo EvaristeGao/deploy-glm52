@@ -41,10 +41,10 @@
       loop: "{{ groups['all'] | sort }}"
 
     # 对照 deploy.sh render_mooncake_json()：HA 后引擎经 mooncake.json master_server_address 连 mooncake_master
-    #   （3 个 master HA，指向第一个 mooncake.ha.nodes 的 KV 服务端口 mooncake.port；master 之间 etcd 选主协调）
+    #   （3 个 master HA，指向第一个 mooncake.ha.nodes 的 rpc 服务地址 IP:rpc_port，参考 etcd.md 2.1.3）
     # mooncake 的 global_segment_size/default_kv_lease_ttl 已固定在 group_vars/all.yml（a2/a3: 80GB / 11000），
     #   这里直接使用、不再默认兜底（group_vars 缺字段时渲染直接报错提醒）。
-    - name: 渲染 mooncake.json（Jinja2 直接渲染，master 指向第一个 mooncake master）
+    - name: 渲染 mooncake.json（Jinja2 直接渲染，master 指向第一个 mooncake master 的 rpc 端口）
       vars:
         master_ip: "{{ hostvars[mooncake.ha.nodes[0]].ansible_host }}"
       copy:
@@ -54,7 +54,7 @@
             "metadata_server": "P2PHANDSHAKE",
             "protocol": "ascend",
             "device_name": "",
-            "master_server_address": "{{ master_ip }}:{{ mooncake.port }}",
+            "master_server_address": "{{ master_ip }}:{{ mooncake.ha.rpc_port }}",
             "global_segment_size": "{{ mooncake.global_segment_size }}",
             "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }}
           }
