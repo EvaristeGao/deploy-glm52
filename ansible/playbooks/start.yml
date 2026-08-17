@@ -133,27 +133,27 @@
         sleep 2 && docker exec mooncake-{{ inventory_hostname }} pgrep -x mooncake_master >/dev/null
       tags: mooncake
 
-    - name: 分发 haproxy 脚本进节点 /tmp（gen_haproxy_etcd.sh + start_ha.sh）
+    - name: 分发 haproxy 脚本进节点 /tmp（gen_haproxy_etcd.sh + start-ha.sh，原版）
       copy:
         src: "{{ item }}"
         dest: "/tmp/{{ item | basename }}"
       loop:
         - ../ha/gen_haproxy_etcd.sh
-        - ../ha/start_ha.sh
+        - ../ha/start-ha.sh
       when: inventory_hostname in mooncake.ha.nodes
       tags: haproxy
 
-    - name: docker cp 脚本进容器并生成/启动 haproxy（3 frontend 直连 3 etcd）
+    - name: docker cp 脚本进容器并生成/启动 haproxy（原版脚本，单端口 roundrobin 3 etcd）
       when: inventory_hostname in mooncake.ha.nodes
       shell: |
         docker exec mooncake-{{ inventory_hostname }} mkdir -p /home/ma-user/haproxy
         docker cp /tmp/gen_haproxy_etcd.sh mooncake-{{ inventory_hostname }}:/home/ma-user/haproxy/
-        docker cp /tmp/start_ha.sh mooncake-{{ inventory_hostname }}:/home/ma-user/haproxy/
+        docker cp /tmp/start-ha.sh mooncake-{{ inventory_hostname }}:/home/ma-user/haproxy/
         docker exec mooncake-{{ inventory_hostname }} bash -c \
           'export HAP_LISTEN_START_PORT={{ haproxy.listen_start_port }}; \
            export ETCD_SERVER_LIST="{{ etcd_server_list }}"; \
            sh /home/ma-user/haproxy/gen_haproxy_etcd.sh && \
-           sh /home/ma-user/haproxy/start_ha.sh'
+           sh /home/ma-user/haproxy/start-ha.sh'
       tags: haproxy
 
     # ==================== 第二阶段：引擎（任务 6，对照 deploy.sh start_engines） ====================

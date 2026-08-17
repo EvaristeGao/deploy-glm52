@@ -45,13 +45,14 @@ done
 # ====== 创建输出目录 ======
 mkdir -p "$(dirname "${HAP_CFG}")"
 
-# ====== 生成配置（覆盖写入）：每个 etcd 一个 frontend，HAP_LISTEN_START_PORT 起递增端口，直连该 etcd ======
+# ====== 生成配置（覆盖写入） ======
 cat > "${HAP_CFG}" <<'EOF'
 global
     log         127.0.0.1 local0
     maxconn     4096
     daemon
 
+# ==================== 默认配置 ====================
 defaults
     log                     global
     mode                    tcp
@@ -62,36 +63,39 @@ defaults
     timeout check           10s
     timeout tunnel          1h
 
+# ==================== 前端：接收客户端请求 ====================
+frontend etcd_front
+    bind *:PORT_PLACEHOLDER
+    mode tcp
+    option tcplog
+    default_backend etcd_backend
+
+# ==================== 后端：etcd节点 ====================
+backend etcd_backend
+    mode tcp
+    balance roundrobin
 EOF
 
+# 替换监听端口
+sed -i "s/PORT_PLACEHOLDER/${HAP_LISTEN_START_PORT}/" "${HAP_CFG}"
+
+# 追加每个 server 行
 seq=1
 for node in "${NODES[@]}"; do
     node="$(echo "$node" | xargs)"
     [[ -z "$node" ]] && continue
     ip="${node%%:*}"
-    etcd_port="${node##*:}"
-    hap_port=$((HAP_LISTEN_START_PORT + seq - 1))
-    cat >> "${HAP_CFG}" <<EOF
-# etcd 节点 ${seq} 直连（端口 ${hap_port} -> ${ip}:${etcd_port}）
-frontend etcd_front_${seq}
-    bind *:${hap_port}
-    mode tcp
-    option tcplog
-    default_backend etcd_backend_${seq}
-
-backend etcd_backend_${seq}
-    mode tcp
-    server etcd-${seq} ${ip}:${etcd_port} ssl verify none crt /etc/pki/etcd/certs/client.pem sni str(${ip}) alpn h2 check
-
-EOF
+    port="${node##*:}"
+    echo "    # etcd 节点 ${seq}" >> "${HAP_CFG}"
+    echo "    server etcd-${seq} ${ip}:${port} ssl verify none crt /etc/pki/etcd/certs/client.pem sni str(${ip}) alpn h2 check" >> "${HAP_CFG}"
     ((seq++))
 done
 
 # ====== 成功提示 ======
-last_port=$((HAP_LISTEN_START_PORT + seq - 2))
 echo -e "\033[32m=============================================\033[0m"
 echo -e "\033[32m✅ HAProxy ETCD 代理配置生成完成\033[0m"
 echo -e "配置文件路径：\033[1m${HAP_CFG}\033[0m"
-echo -e "监听端口范围：${HAP_LISTEN_START_PORT} ~ ${last_port}（$((seq - 1)) 个 frontend，各直连一个 etcd）"
+echo -e "监听端口：${HAP_LISTEN_START_PORT}"
 echo -e "后端节点数：$((seq - 1))"
 echo -e "\033[32m=============================================\033[0m"
+
