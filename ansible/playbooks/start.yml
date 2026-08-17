@@ -76,11 +76,11 @@
 
     # ==================== mooncake_master HA：etcd 3 节点 + 3 master + haproxy（同 mooncake 容器） ====================
 
-    - name: 计算 etcd 集群参数（initial-cluster 供 etcd 互连；etcd_endpoints 供 mooncake_master 经 haproxy 连 etcd）
+    - name: 计算 etcd 集群参数（initial-cluster 供 etcd 互连；etcd_endpoints 供 mooncake_master 直连 3 个 etcd）
       run_once: true
       delegate_to: localhost
       set_fact:
-        etcd_endpoints: "https://{{ hostvars[mooncake.ha.nodes[0]].ansible_host }}:{{ haproxy.port }}"   # mooncake_master → haproxy(etcd LB)
+        etcd_endpoints: "{% for n in etcd.nodes %}https://{{ hostvars[n].ansible_host }}:{{ etcd.client_port }}{% if not loop.last %},{% endif %}{% endfor %}"
         etcd_initial_cluster: "{% for n in etcd.nodes %}s{{ loop.index }}=https://{{ hostvars[n].ansible_host }}:{{ etcd.peer_port }}{% if not loop.last %},{% endif %}{% endfor %}"
       tags: etcd
 
