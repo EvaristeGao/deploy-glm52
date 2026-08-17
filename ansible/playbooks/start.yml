@@ -76,12 +76,13 @@
 
     # ==================== mooncake_master HA：etcd 3 节点 + 3 master + haproxy（同 mooncake 容器） ====================
 
-    - name: 计算 etcd 集群参数（initial-cluster 供 etcd 互连；etcd_endpoints 供 mooncake_master 直连 3 个 etcd）
+    - name: 计算 etcd 集群参数（initial-cluster 供 etcd 互连；etcd_server_list 供 gen_haproxy_etcd.sh；etcd_endpoints 供 mooncake_master 直连）
       run_once: true
       delegate_to: localhost
       set_fact:
         etcd_endpoints: "{% for n in etcd.nodes %}https://{{ hostvars[n].ansible_host }}:{{ etcd.client_port }}{% if not loop.last %},{% endif %}{% endfor %}"
         etcd_initial_cluster: "{% for n in etcd.nodes %}s{{ loop.index }}=https://{{ hostvars[n].ansible_host }}:{{ etcd.peer_port }}{% if not loop.last %},{% endif %}{% endfor %}"
+        etcd_server_list: "{% for n in etcd.nodes %}{{ hostvars[n].ansible_host }}:{{ etcd.client_port }}{% if not loop.last %};{% endif %}{% endfor %}"
       tags: etcd
 
     - name: 起 etcd 容器（3 节点，证书挂载，双向证书认证）
@@ -132,21 +133,27 @@
         sleep 2 && docker exec mooncake-{{ inventory_hostname }} pgrep -x mooncake_master >/dev/null
       tags: mooncake
 
-    - name: 渲染 haproxy.cfg（每节点，LB etcd 3 节点，对齐 ha_script/gen_haproxy_etcd.sh）
-      template:
-        src: haproxy.cfg.j2
-        dest: /tmp/haproxy.cfg
+    - name: 分发 haproxy 脚本进节点 /tmp（gen_haproxy_etcd.sh + start_ha.sh）
+      copy:
+        src: "{{ item }}"
+        dest: "/tmp/{{ item | basename }}"
+      loop:
+        - ../ha/gen_haproxy_etcd.sh
+        - ../ha/start_ha.sh
       when: inventory_hostname in mooncake.ha.nodes
       tags: haproxy
 
-    - name: 分发并启动 haproxy（对齐 start_ha.sh：haproxy -c 校验 + 幂等 + nc 等就绪）
+    - name: docker cp 脚本进容器并生成/启动 haproxy（3 frontend 直连 3 etcd）
       when: inventory_hostname in mooncake.ha.nodes
       shell: |
-        docker exec mooncake-{{ inventory_hostname }} mkdir -p /usr/local/etc/haproxy
-        docker cp /tmp/haproxy.cfg mooncake-{{ inventory_hostname }}:/usr/local/etc/haproxy/haproxy.cfg
+        docker exec mooncake-{{ inventory_hostname }} mkdir -p /home/ma-user/haproxy
+        docker cp /tmp/gen_haproxy_etcd.sh mooncake-{{ inventory_hostname }}:/home/ma-user/haproxy/
+        docker cp /tmp/start_ha.sh mooncake-{{ inventory_hostname }}:/home/ma-user/haproxy/
         docker exec mooncake-{{ inventory_hostname }} bash -c \
-          'haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg && \
-           (pgrep -x haproxy >/dev/null || haproxy -f /usr/local/etc/haproxy/haproxy.cfg)'
+          'export HAP_LISTEN_START_PORT={{ haproxy.listen_start_port }}; \
+           export ETCD_SERVER_LIST="{{ etcd_server_list }}"; \
+           sh /home/ma-user/haproxy/gen_haproxy_etcd.sh && \
+           sh /home/ma-user/haproxy/start_ha.sh'
       tags: haproxy
 
     # ==================== 第二阶段：引擎（任务 6，对照 deploy.sh start_engines） ====================
