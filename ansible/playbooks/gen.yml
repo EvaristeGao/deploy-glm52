@@ -40,13 +40,13 @@
         dest: "{{ gen_dir }}/run_dp_template_{{ item }}.sh"
       loop: "{{ groups['all'] | sort }}"
 
-    # 对照 deploy.sh render_mooncake_json()：master 地址 = prefill 首节点 IP + mooncake.port。
-    # 用 group_vars 平铺变量直接渲染（不再调 render_mooncake.py）。
+    # 对照 deploy.sh render_mooncake_json()：HA 后 master_server_address = haproxy LB 入口
+    #   （haproxy 跑在 mooncake.ha.nodes 的容器内，监听 {{ haproxy.port }}，LB 到 3 个 mooncake_master）。
     # mooncake 的 global_segment_size/default_kv_lease_ttl 已固定在 group_vars/all.yml（a2/a3: 80GB / 11000），
     #   这里直接使用、不再默认兜底（group_vars 缺字段时渲染直接报错提醒）。
-    - name: 渲染 mooncake.json（Jinja2 直接渲染）
+    - name: 渲染 mooncake.json（Jinja2 直接渲染，master 指向 haproxy）
       vars:
-        master_ip: "{{ hostvars[groups['prefill'][0]].ansible_host }}"
+        master_ip: "{{ hostvars[mooncake.ha.nodes[0]].ansible_host }}"
       copy:
         dest: "{{ gen_dir }}/mooncake.json"
         content: |
@@ -54,7 +54,7 @@
             "metadata_server": "P2PHANDSHAKE",
             "protocol": "ascend",
             "device_name": "",
-            "master_server_address": "{{ master_ip }}:{{ mooncake.port }}",
+            "master_server_address": "{{ master_ip }}:{{ haproxy.port }}",
             "global_segment_size": "{{ mooncake.global_segment_size }}",
             "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }}
           }

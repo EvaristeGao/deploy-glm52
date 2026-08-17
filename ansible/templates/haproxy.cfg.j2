@@ -1,0 +1,18 @@
+# haproxy.cfg — LB mooncake_master（3 节点 HA，etcd 选主）
+# 引擎 mooncake.json 的 master_server_address 指向本 haproxy:{{ haproxy.port }}
+# 后端 = 3 个 mooncake_master 的 rpc_port（{{ mooncake.ha.rpc_port }}）
+global
+  daemon
+defaults
+  mode tcp
+  timeout connect 5s
+  timeout client 30s
+  timeout server 30s
+frontend mooncake_in
+  bind *:{{ haproxy.port }}
+  default_backend mooncake_masters
+backend mooncake_masters
+  balance roundrobin
+{% for n in mooncake.ha.nodes %}
+  server s{{ loop.index }} {{ hostvars[n].ansible_host }}:{{ mooncake.ha.rpc_port }} check
+{% endfor %}

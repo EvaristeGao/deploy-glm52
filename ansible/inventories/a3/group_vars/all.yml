@@ -32,7 +32,32 @@ pd_cluster:
   enable_prefix_caching: true
 
 proxy: { port: 8000 }
-mooncake: { port: 50088, evict: 0.9, global_segment_size: 40GB, default_kv_lease_ttl: 11000 }
+
+# mooncake_master HA（etcd 选主 + haproxy LB，3 节点）
+mooncake:
+  port: 50088                # kv 服务端口（引擎经 haproxy 连入）
+  evict: 0.9
+  global_segment_size: 40GB
+  default_kv_lease_ttl: 11000
+  image: quay.io/ascend/vllm-ascend:v0.23.0rc1-a3-mooncake   # TODO: mooncake 容器镜像（含 mooncake_master+haproxy+nc），用户填
+  ha:
+    nodes: [p0, p1, d0]      # TODO: A3 3 个 mooncake_master 节点（4 节点里选 3）
+    enable_ha: true
+    rpc_port: 52050
+    metrics_port: 52052
+    health_check_port: 52054
+
+# etcd（3 节点，mooncake_master HA 选主后端）
+etcd:
+  image: quay.io/coreos/etcd:v3.5.16
+  nodes: [p0, p1, d0]        # TODO: A3 3 个 etcd 节点（同 mooncake master）
+  certs_dir: /mnt/share_space/certs   # TODO: 证书目录（假设已有 ca.crt/server.crt/server.key）
+  client_port: 2379
+  peer_port: 2380
+
+# haproxy（LB mooncake_master，跑在 mooncake 容器内，3 节点都跑）
+haproxy:
+  port: 50089                # LB 统一入口（引擎 mooncake.json master_server_address 指它）
 
 container: { name: vllm-ascend-gwh-glm52, shm_size: 1024g }
 runtime: { ready_timeout: 2400, proxy_ready_timeout: 600 }
