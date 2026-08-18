@@ -58,9 +58,10 @@ etcd:
   client_port: 2379
   peer_port: 2380
 
-# haproxy（etcd 代理，跑在 mooncake 容器内，3 节点都跑；对齐 ha_script/gen_haproxy_etcd.sh：单端口 roundrobin 3 etcd）
+# haproxy（etcd 代理，部署在每个实例容器内；对齐 ETCD.md v1.1：每实例 1 个 haproxy 监听 1 端口）
 haproxy:
-  listen_start_port: 12379   # HAP_LISTEN_START_PORT：haproxy 本地监听端口（mooncake_master -etcd_endpoints 指 127.0.0.1:此端口）
+  cache_master_port: 12379   # mooncake 容器内 haproxy 监听端口（mooncake_master -etcd_endpoints 指 127.0.0.1:此端口）
+  pd_port: 12489             # P/D 引擎容器内 haproxy 监听端口
 
 container: { name: vllm-ascend-gwh-glm52, shm_size: 1024g }
 runtime: { ready_timeout: 2400, proxy_ready_timeout: 600 }
