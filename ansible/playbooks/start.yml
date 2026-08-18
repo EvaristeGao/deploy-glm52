@@ -85,24 +85,22 @@
         etcd_server_list: "{% for n in etcd.nodes %}{{ hostvars[n].ansible_host }}:{{ etcd.client_port }}{% if not loop.last %};{% endif %}{% endfor %}"
       tags: etcd
 
-    - name: 起 etcd 容器（3 节点，证书挂载，双向证书认证；日志重定向 logs.dir）
+    - name: 起 etcd 容器（3 节点，证书挂载，双向证书认证；日志经 docker json-file 驱动写 logs.dir）
       when: inventory_hostname in etcd.nodes
       shell: |
-        docker rm -f etcd-{{ inventory_hostname }} 2>/dev/null || true
+        {% if logs.dir | default('') %}mkdir -p {{ logs.dir }} 2>/dev/null || true; {% endif %}docker rm -f etcd-{{ inventory_hostname }} 2>/dev/null || true
         docker run -d --name etcd-{{ inventory_hostname }} --network host \
           -v {{ etcd.certs_dir }}:/certs \
-          {% if logs.dir | default('') %}-v {{ logs.dir }}:{{ logs.dir }} {% endif %}\
-          --entrypoint sh \
+          {% if logs.dir | default('') %}--log-driver json-file --log-opt path={{ logs.dir }}/etcd-{{ inventory_hostname }}.log{% endif %} \
           {{ etcd.image }} \
-          -c 'exec etcd --name s{{ etcd.nodes.index(inventory_hostname) + 1 }} --data-dir /etcd-data \
+          etcd --name s{{ etcd.nodes.index(inventory_hostname) + 1 }} --data-dir /etcd-data \
           --listen-client-urls https://0.0.0.0:{{ etcd.client_port }} \
           --advertise-client-urls https://{{ hostvars[inventory_hostname].ansible_host }}:{{ etcd.client_port }} \
           --listen-peer-urls https://0.0.0.0:{{ etcd.peer_port }} \
           --initial-advertise-peer-urls https://{{ hostvars[inventory_hostname].ansible_host }}:{{ etcd.peer_port }} \
           --initial-cluster {{ etcd_initial_cluster }} \
           --client-cert-auth --trusted-ca-file=/certs/ca.crt --cert-file=/certs/server.crt --key-file=/certs/server.key \
-          --peer-client-cert-auth --peer-trusted-ca-file=/certs/ca.crt --peer-cert-file=/certs/server.crt --peer-key-file=/certs/server.key \
-          >> {{ (logs.dir | default('')) or '/root' }}/etcd-{{ inventory_hostname }}.log 2>&1'
+          --peer-client-cert-auth --peer-trusted-ca-file=/certs/ca.crt --peer-cert-file=/certs/server.crt --peer-key-file=/certs/server.key
       tags: etcd
 
     - name: 起 mooncake 容器（3 节点，独立于 vllm-ascend，含 mooncake_master+haproxy+nc）
