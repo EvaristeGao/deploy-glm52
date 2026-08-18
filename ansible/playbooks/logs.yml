@@ -26,8 +26,9 @@
       {%- else -%}{{ tgt }}
       {%- endif -%}
     logs_dir: "{{ logs.dir | default('') }}"   # 空回退 /root（对照 deploy.sh LOGS_DIR）
+    # {node} 占位按节点替换：vllm 日志按节点区分；mooncake 日志 mooncake_{node}.log 按 target_host（mooncake→p0）替换
     log_path: >-
-      {%- if tgt == 'mooncake' -%}{{ (logs_dir or '/root') }}/{{ logs.mooncake | default('mooncake.log') }}
+      {%- if tgt == 'mooncake' -%}{{ (logs_dir or '/root') }}/{{ logs.mooncake | default('mooncake.log') | replace('{node}', target_host) }}
       {%- elif tgt == 'proxy' -%}{{ (logs_dir or '/root') }}/{{ logs.proxy | default('proxy.log') }}
       {%- else -%}{{ (logs_dir or '/root') }}/{{ logs.vllm | default('vllm_{node}.log') | replace('{node}', target_node) }}
       {%- endif -%}

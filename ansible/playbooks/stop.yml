@@ -17,11 +17,22 @@
       when: inventory_hostname == groups['proxy'][0]
       shell: docker exec {{ container.name }} pkill -f '^python3 .*load_balance_proxy_server_example' 2>/dev/null || true
 
-    # 对照 deploy.sh cmd_stop(): p0 上停 mooncake_master（pkill -x 精确进程名）
-    - name: 停 mooncake（p0；pkill -x 精确进程名）
-      when: inventory_hostname == 'p0'
-      shell: docker exec {{ container.name }} pkill -x mooncake_master 2>/dev/null || true
+    # 对照 deploy.sh cmd_stop(): 停 mooncake_master（pkill -x 精确进程名）。
+    # HA 后 mooncake_master 跑在 mooncake.ha.nodes 各节点的 mooncake-<node> 容器内，
+    #   不是引擎容器（container.name），也不能只停 p0。
+    - name: 停 mooncake_master（mooncake.ha.nodes 各节点；容器 mooncake-<node>，pkill -x 精确进程名）
+      when: inventory_hostname in mooncake.ha.nodes
+      shell: docker exec mooncake-{{ inventory_hostname }} pkill -x mooncake_master 2>/dev/null || true
 
     # 对照 deploy.sh cmd_stop(): 全部节点 docker rm -f
-    - name: 删容器（全部节点，幂等）
+    - name: 删引擎容器（全部节点，幂等）
       shell: docker rm -f {{ container.name }} 2>/dev/null || true
+
+    # HA 新增：etcd / mooncake 容器一并清理（stop.yml 语义为完整停止清理，不留残留）
+    - name: 删 etcd 容器（etcd.nodes，幂等）
+      when: inventory_hostname in etcd.nodes
+      shell: docker rm -f etcd-{{ inventory_hostname }} 2>/dev/null || true
+
+    - name: 删 mooncake 容器（mooncake.ha.nodes，幂等）
+      when: inventory_hostname in mooncake.ha.nodes
+      shell: docker rm -f mooncake-{{ inventory_hostname }} 2>/dev/null || true
