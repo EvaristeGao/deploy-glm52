@@ -8,12 +8,12 @@ all:
   children:
     prefill:
       hosts:
-        p0: { ansible_host: "10.246.63.49", nic: enp162s0f0, idx: 0 }
-        p1: { ansible_host: "10.246.63.51", nic: enp162s0f0, idx: 1 }
+        p0: { ansible_host: "7.150.11.146", nic: enp23s0f3, idx: 0 }
+        p1: { ansible_host: "7.150.11.213", nic: enp23s0f3, idx: 1 }
     decode:
       hosts:
-        d0: { ansible_host: "10.246.63.52", nic: enp162s0f0, idx: 0 }
-        d1: { ansible_host: "10.246.63.55", nic: enp162s0f0, idx: 1 }
+        d0: { ansible_host: "7.150.12.179", nic: enp23s0f3, idx: 0 }
+        d1: { ansible_host: "7.150.12.191", nic: enp23s0f3, idx: 1 }
     proxy:  { hosts: { p0: {} } }
     # mooncake_master 3 节点（与 group_vars mooncake.ha.nodes 对齐；group 不参与 start.yml 部署判断，仅供调试）
     mooncake: { hosts: { p0: {}, p1: {}, d0: {} } }

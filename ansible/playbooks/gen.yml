@@ -50,7 +50,8 @@
             "metadata_server": "P2PHANDSHAKE",
             "protocol": "ascend",
             "device_name": "",
-            "master_server_address": "127.0.0.1:{{ haproxy.pd_port }}",
+            "metadata_server": "etcd://127.0.0.1:{{ haproxy.pd_port }}",
+            "master_server_address": "etcd://127.0.0.1:{{ haproxy.pd_port }}",
             "global_segment_size": "{{ mooncake.global_segment_size }}",
             "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }}
           }

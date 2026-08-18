@@ -14,15 +14,15 @@ ansible_python_interpreter: /usr/bin/python3
 
 # --- 集群参数（值抄自 config-a3.yaml，平铺、无 nodes/cluster 段）---
 cluster_type: a3
-image: quay.io/ascend/vllm-ascend:v0.23.0rc1-a3
-image_tar: "/mnt/share_space/lh/repo/vllm-ascend.v0.23.0rc1-a3.tar"                 # 非空则 pull.yml 改从该 tar docker load（需节点可见路径，如共享目录）；留空则 docker pull image
-model_path: /mnt/weight/GLM-5.2-w4a8c8
+image: vllm-ascend-ha-gwh-test:v2.0 
+image_tar: ""                 # 非空则 pull.yml 改从该 tar docker load（需节点可见路径，如共享目录）；留空则 docker pull image
+model_path: /ce-efs-hd2-01/models/lh/GLM-5.2-w4a8c8
 model_name: glm-52
 model:
-  path: /mnt/weight/GLM-5.2-w4a8c8   # A3 实机权重路径
+  path: /ce-efs-hd2-01/models/lh/GLM-5.2-w4a8c8   # A3 实机权重路径
   served_model_name: glm-52
   dir_host: ""        # 非空则挂载 -v <dir_host>:/root/.cache（A3 用）
-  mounts: ["/mnt/share_space/:/mnt/share_space/", "/mnt/weight:/mnt/weight"]   # 共享目录 + 模型权重挂载（A3 用 /mnt/weight）
+  mounts: ["/ce-efs-hd2-01:/ce-efs-hd2-01"]   # 共享目录 + 模型权重挂载（A3 用 /mnt/weight）
 
 pd_cluster:
   max_model_len: 200000
@@ -39,7 +39,7 @@ mooncake:
   evict: 0.9
   global_segment_size: 40GB
   default_kv_lease_ttl: 11000
-  image: quay.io/ascend/vllm-ascend:v0.23.0rc1-a3-mooncake   # TODO: mooncake 容器镜像（含 mooncake_master+haproxy+nc），用户填
+  image: vllm-ascend-ha-gwh-test:v2.0   # TODO: mooncake 容器镜像（含 mooncake_master+haproxy+nc），用户填
   ha:
     nodes: [p0, p1, d0]      # TODO: A3 3 个 mooncake_master 节点（4 节点里选 3）
     enable_ha: true
@@ -51,9 +51,9 @@ mooncake:
 
 # etcd（3 节点，mooncake_master HA 选主后端）
 etcd:
-  image: quay.io/coreos/etcd:v3.5.16
+  image: quay.io/coreos/etcd:v3.5.9-arm64
   nodes: [p0, p1, d0]        # TODO: A3 3 个 etcd 节点（同 mooncake master）
-  certs_dir: /mnt/share_space/certs   # TODO: 证书目录（假设已有 ca.crt/server.crt/server.key/client.pem）
+  certs_dir: /ce-efs-hd2-01/g00832294/certs   # TODO: 证书目录（假设已有 ca.crt/server.crt/server.key/client.pem）
   client_cert: /etc/pki/etcd/certs/client.pem   # haproxy 连 etcd 的客户端证书（容器内路径，挂载自 certs_dir）
   client_port: 2379
   peer_port: 2380
@@ -67,7 +67,7 @@ container: { name: vllm-ascend-gwh-glm52, shm_size: 1024g }
 runtime: { ready_timeout: 2400, proxy_ready_timeout: 600 }
 
 logs:
-  dir: /mnt/share_space/g00832294/deploy-glm52/logs   # 共享目录（容器内可见，容器销毁后日志仍在）
+  dir: /ce-efs-hd2-01/g00832294/deploy_logs   # 共享目录（容器内可见，容器销毁后日志仍在）
   vllm: vllm_{node}.log     # {node} 按节点替换（p0/p1/d0..），避免节点互相覆盖
   mooncake: mooncake_{node}.log   # {node} 按节点替换（3 个 mooncake master 各写各的，避免共享目录互相覆盖）
   proxy: proxy.log

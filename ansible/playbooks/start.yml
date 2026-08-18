@@ -22,7 +22,7 @@
     - name: 起容器（对照 deploy.sh start_node 的 docker run，无遗漏）
       shell: |
         docker run -itd --name {{ container.name }} \
-        --net=host --pid=host --privileged --shm-size={{ container.shm_size }} \
+        --net=host --privileged --shm-size={{ container.shm_size }} \
         {% for i in range(pd_cluster.num_cards) %}--device /dev/davinci{{ i }} {% endfor %}\
         --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
         -v /usr/local/dcmi:/usr/local/dcmi \
@@ -106,10 +106,22 @@
       when: inventory_hostname in mooncake.ha.nodes
       shell: |
         docker rm -f mooncake-{{ inventory_hostname }} 2>/dev/null || true
-        docker run -itd --name mooncake-{{ inventory_hostname }} --network host \
+        docker run -itd --name mooncake-{{ inventory_hostname }} --shm-size=500g --network host \
+          --device=/dev/davinci_manager \
+          --device=/dev/hisi_hdc \
+          --device=/dev/devmm_svm \
+          --entrypoint=bash \
+          -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+          -v /usr/local/dcmi:/usr/local/dcmi \
+          -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+          -v /etc/ascend_install.info:/etc/ascend_install.info \
+          -v /usr/local/sbin:/usr/local/sbin \
+          -v /etc/hccn.conf:/etc/hccn.conf \
+          -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
+          -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
           -v {{ etcd.certs_dir }}:/etc/pki/etcd/certs \
           {% if logs.dir | default('') %}-v {{ logs.dir }}:{{ logs.dir }} {% endif %}\
-          {{ mooncake.image }} bash
+          {{ mooncake.image }}
       tags: mooncake
 
     - name: 分发 haproxy 脚本进节点 /tmp（gen_haproxy_etcd.sh + start-ha.sh，原版）
@@ -131,8 +143,8 @@
         docker exec mooncake-{{ inventory_hostname }} bash -c \
           'export HAP_LISTEN_START_PORT={{ haproxy.cache_master_port }}; \
            export ETCD_SERVER_LIST="{{ etcd_server_list }}"; \
-           sh /home/ma-user/haproxy/gen_haproxy_etcd.sh && \
-           sh /home/ma-user/haproxy/start-ha.sh'
+           bash /home/ma-user/haproxy/gen_haproxy_etcd.sh && \
+           bash /home/ma-user/haproxy/start-ha.sh'
       tags: haproxy
 
     # P/D 引擎容器内 haproxy（{{ haproxy.pd_port }}）
@@ -144,8 +156,8 @@
         docker exec {{ container.name }} bash -c \
           'export HAP_LISTEN_START_PORT={{ haproxy.pd_port }}; \
            export ETCD_SERVER_LIST="{{ etcd_server_list }}"; \
-           sh /home/ma-user/haproxy/gen_haproxy_etcd.sh && \
-           sh /home/ma-user/haproxy/start-ha.sh'
+           bash /home/ma-user/haproxy/gen_haproxy_etcd.sh && \
+           bash /home/ma-user/haproxy/start-ha.sh'
       tags: haproxy
 
     # mooncake_master 在 haproxy 起完之后再启动（对齐 ETCD.md 2.1.2 先 haproxy → 2.1.3 再 master；
@@ -157,11 +169,11 @@
         docker exec mooncake-{{ inventory_hostname }} pkill -x mooncake_master 2>/dev/null || true
         docker exec -d mooncake-{{ inventory_hostname }} bash -c \
           'mooncake_master -enable_ha=true \
+            --cluster_id=mooncake \
             -etcd_endpoints 127.0.0.1:{{ haproxy.cache_master_port }} \
             --rpc-address {{ hostvars[inventory_hostname].ansible_host }} \
             -rpc_port={{ mooncake.ha.rpc_port }} \
             -metrics_port={{ mooncake.ha.metrics_port }} \
-            -health_check_port={{ mooncake.ha.health_check_port }} \
             -eviction_high_watermark_ratio={{ mooncake.evict }} \
             -eviction_ratio={{ mooncake.ha.eviction_ratio }} \
             -default_kv_lease_ttl={{ mooncake.default_kv_lease_ttl }} \
