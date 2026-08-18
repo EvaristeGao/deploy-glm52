@@ -18,3 +18,18 @@
         docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}"
         | grep -Fxq "{{ image }}" && echo image-present || { echo image-missing; exit 1; }
       changed_when: false   # 只读探测：present→ok, missing→failed(返回码1)
+
+    # HA 新增：etcd / mooncake 镜像预检（mooncake.image 未配置则跳过）
+    - name: etcd 镜像检查（etcd.nodes）
+      when: inventory_hostname in etcd.nodes
+      shell: >-
+        docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}"
+        | grep -Fxq "{{ etcd.image }}" && echo image-present || { echo image-missing; exit 1; }
+      changed_when: false
+
+    - name: mooncake 镜像检查（mooncake.ha.nodes；mooncake.image 未配置则跳过）
+      when: inventory_hostname in mooncake.ha.nodes and (mooncake.image | default('')) != ''
+      shell: >-
+        docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}"
+        | grep -Fxq "{{ mooncake.image }}" && echo image-present || { echo image-missing; exit 1; }
+      changed_when: false

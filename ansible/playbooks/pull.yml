@@ -23,3 +23,27 @@
         fi
       register: pull_result
       changed_when: "'image-already-present' not in pull_result.stdout"   # 已存在(跳过)→ok; 实际 load/pull→changed
+
+    # HA 新增：etcd / mooncake 镜像按节点条件拉取（etcd.nodes / mooncake.ha.nodes），
+    #   与引擎镜像同款「已存在则跳过」逻辑；mooncake.image 未配置（TODO）则跳过。
+    - name: 拉取 etcd 镜像（etcd.nodes；已有则跳过）
+      when: inventory_hostname in etcd.nodes
+      shell: |
+        if docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}" | grep -Fxq "{{ etcd.image }}"; then
+          echo image-already-present
+        else
+          docker pull {{ etcd.image }}
+        fi
+      register: etcd_pull
+      changed_when: "'image-already-present' not in etcd_pull.stdout"
+
+    - name: 拉取 mooncake 镜像（mooncake.ha.nodes；mooncake.image 未配置则跳过）
+      when: inventory_hostname in mooncake.ha.nodes and (mooncake.image | default('')) != ''
+      shell: |
+        if docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}" | grep -Fxq "{{ mooncake.image }}"; then
+          echo image-already-present
+        else
+          docker pull {{ mooncake.image }}
+        fi
+      register: mooncake_pull
+      changed_when: "'image-already-present' not in mooncake_pull.stdout"
