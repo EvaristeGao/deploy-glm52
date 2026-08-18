@@ -70,9 +70,9 @@
         - mooncake.json
       tags: container
 
-    - name: 计算 mooncake 日志路径（logs.dir 为空回退 /root，对照 deploy.sh MOONCAKE_LOG）
+    - name: 计算 mooncake 日志路径（logs.dir 为空回退 /root，{node} 按节点替换，对照 deploy.sh MOONCAKE_LOG）
       set_fact:
-        mooncake_log: "{{ (logs.dir | default('')) or '/root' }}/{{ logs.mooncake | default('mooncake.log') }}"
+        mooncake_log: "{{ (logs.dir | default('')) or '/root' }}/{{ logs.mooncake | default('mooncake.log') | replace('{node}', inventory_hostname) }}"
       tags: mooncake
 
     # ==================== mooncake_master HA：etcd 3 节点 + 3 master + haproxy（同 mooncake 容器） ====================

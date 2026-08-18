@@ -69,5 +69,5 @@ runtime: { ready_timeout: 2400, proxy_ready_timeout: 600 }
 logs:
   dir: /mnt/share_space/g00832294/deploy-glm52/logs   # 共享目录（容器内可见，容器销毁后日志仍在）
   vllm: vllm_{node}.log     # {node} 按节点替换（p0/p1/d0..），避免节点互相覆盖
-  mooncake: mooncake.log
+  mooncake: mooncake_{node}.log   # {node} 按节点替换（3 个 mooncake master 各写各的，避免共享目录互相覆盖）
   proxy: proxy.log

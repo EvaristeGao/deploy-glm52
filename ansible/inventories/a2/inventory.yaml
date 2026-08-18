@@ -1,7 +1,7 @@
 # =============================================================================
 # A2 inventory — 8xA2 4P+4D（IP/nic 取自 config.yaml nodes 段）
 # Prefill dp4tp8（每节点 1 引擎 :9081），Decode dp8tp4（每节点 2 引擎 :9900 :9901）
-# proxy / mooncake 落在 p0
+# proxy 落在 p0；mooncake_master 3 节点（p0/p1/p2）
 # =============================================================================
 all:
   children:
@@ -18,4 +18,5 @@ all:
         d2: { ansible_host: 192.168.0.154, nic: enp67s0f5, idx: 2 }
         d3: { ansible_host: 192.168.0.140, nic: enp67s0f5, idx: 3 }
     proxy:  { hosts: { p0: {} } }
-    mooncake: { hosts: { p0: {} } }
+    # mooncake_master 3 节点（与 group_vars mooncake.ha.nodes 对齐；group 不参与 start.yml 部署判断，仅供调试）
+    mooncake: { hosts: { p0: {}, p1: {}, p2: {} } }
