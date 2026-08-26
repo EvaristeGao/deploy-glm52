@@ -246,7 +246,7 @@
         dp_size_local: "{{ pd_cluster[node_role].dp_size_local }}"
         tp_size: "{{ pd_cluster[node_role].tp_size }}"
         dp_rank: "{{ node_idx * pd_cluster[node_role].dp_size_local }}"
-        dp_address: "{{ hostvars[groups[node_role][0]].ansible_host }}"
+        dp_address: "{{ hostvars[groups[node_role][0]].ip }}"
         rpc_port: "{{ pd_cluster[node_role].rpc_port }}"
         start_port: "{{ pd_cluster[node_role].base_port }}"
         kv_port: "{{ pd_cluster[node_role].kv_port }}"
@@ -293,10 +293,10 @@
           {% set il = [] -%}
           {% for role in ['prefill', 'decode'] -%}
           {% for h, r in groups[role] | product(range(pd_cluster[role].dp_size_local)) -%}
-          {% set _ = il.append([role, hostvars[h].ansible_host, pd_cluster[role].base_port + r]) -%}
+          {% set _ = il.append([role, hostvars[h].ip, pd_cluster[role].base_port + r]) -%}
           {% endfor -%}
           {% endfor -%}
-          {% set _ = il.append(['proxy', hostvars[groups['proxy'][0]].ansible_host, proxy.port]) -%}
+          {% set _ = il.append(['proxy', hostvars[groups['proxy'][0]].ip, proxy.port]) -%}
           {{ il }}
       tags: wait
 
@@ -326,11 +326,11 @@
       delegate_to: p0
       delegate_facts: yes
       set_fact:
-        proxy_host: "{{ hostvars[groups['proxy'][0]].ansible_host }}"
+        proxy_host: "{{ hostvars[groups['proxy'][0]].ip }}"
         proxy_port: "{{ proxy.port | string }}"
-        prefiller_hosts: "{% set out = [] -%}{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ansible_host) -%}{% endfor -%}{{ out | join(' ') }}"
+        prefiller_hosts: "{% set out = [] -%}{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ip) -%}{% endfor -%}{{ out | join(' ') }}"
         prefiller_ports: "{% set out = [] -%}{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}{% set _ = out.append((pd_cluster.prefill.base_port + r) | string) -%}{% endfor -%}{{ out | join(' ') }}"
-        decoder_hosts: "{% set out = [] -%}{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ansible_host) -%}{% endfor -%}{{ out | join(' ') }}"
+        decoder_hosts: "{% set out = [] -%}{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ip) -%}{% endfor -%}{{ out | join(' ') }}"
         decoder_ports: "{% set out = [] -%}{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}{% set _ = out.append((pd_cluster.decode.base_port + r) | string) -%}{% endfor -%}{{ out | join(' ') }}"
       tags: proxy
 

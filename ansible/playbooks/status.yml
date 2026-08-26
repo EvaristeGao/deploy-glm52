@@ -34,7 +34,7 @@
 
     - name: 引擎健康（uri /health；集群停止时非 200 由 ignore_errors 兜底）
       uri:
-        url: "http://{{ ansible_host }}:{{ start_port }}/health"
+        url: "http://{{ ip }}:{{ start_port }}/health"
         status_code: 200
         timeout: 5
       ignore_errors: yes
@@ -45,7 +45,7 @@
     - name: proxy 健康（proxy 节点 /healthcheck）
       when: inventory_hostname == groups['proxy'][0]
       uri:
-        url: "http://{{ ansible_host }}:{{ proxy.port }}/healthcheck"
+        url: "http://{{ ip }}:{{ proxy.port }}/healthcheck"
         status_code: 200
         timeout: 5
       ignore_errors: yes

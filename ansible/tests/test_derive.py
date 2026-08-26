@@ -53,7 +53,7 @@ DERIVED = {
     "dp_size_local": "{{ pd_cluster[node_role].dp_size_local }}",
     "tp_size": "{{ pd_cluster[node_role].tp_size }}",
     "dp_rank": "{{ node_idx * pd_cluster[node_role].dp_size_local }}",
-    "dp_address": "{{ hostvars[groups[node_role][0]].ansible_host }}",
+    "dp_address": "{{ hostvars[groups[node_role][0]].ip }}",
     "rpc_port": "{{ pd_cluster[node_role].rpc_port }}",
     "start_port": "{{ pd_cluster[node_role].base_port }}",
     "kv_port": "{{ pd_cluster[node_role].kv_port }}",
@@ -75,10 +75,10 @@ INSTANCE_LIST_TPL = """{#
 #}{% set il = [] -%}
 {% for role in ['prefill', 'decode'] -%}
 {% for h, r in groups[role] | product(range(pd_cluster[role].dp_size_local)) -%}
-{% set _ = il.append([role, hostvars[h].ansible_host, pd_cluster[role].base_port + r]) -%}
+{% set _ = il.append([role, hostvars[h].ip, pd_cluster[role].base_port + r]) -%}
 {% endfor -%}
 {% endfor -%}
-{% set _ = il.append(['proxy', hostvars[groups['proxy'][0]].ansible_host, proxy.port]) -%}
+{% set _ = il.append(['proxy', hostvars[groups['proxy'][0]].ip, proxy.port]) -%}
 {{ il }}"""
 
 # proxy 端点：load_balance_proxy 启动用（hosts = 各节点 IP 重复 dp_size_local 次，
@@ -87,7 +87,7 @@ PROXY_ENDPOINTS = {
     "prefiller_hosts": (
         "{% set out = [] -%}"
         "{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}"
-        "{% set _ = out.append(hostvars[h].ansible_host) -%}"
+        "{% set _ = out.append(hostvars[h].ip) -%}"
         "{% endfor -%}"
         "{{ out }}"
     ),
@@ -101,7 +101,7 @@ PROXY_ENDPOINTS = {
     "decoder_hosts": (
         "{% set out = [] -%}"
         "{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}"
-        "{% set _ = out.append(hostvars[h].ansible_host) -%}"
+        "{% set _ = out.append(hostvars[h].ip) -%}"
         "{% endfor -%}"
         "{{ out }}"
     ),
@@ -113,7 +113,7 @@ PROXY_ENDPOINTS = {
         "{{ out }}"
     ),
     # proxy 端点：proxy 节点（groups['proxy'][0]，A2 为 p0）IP + proxy.port
-    "proxy_host": "{{ hostvars[groups['proxy'][0]].ansible_host }}",
+    "proxy_host": "{{ hostvars[groups['proxy'][0]].ip }}",
     "proxy_port": "{{ proxy.port }}",
 }
 
@@ -126,14 +126,14 @@ GROUPS = {
     "proxy": ["p0"],
 }
 HOSTVARS = {
-    "p0": {"ansible_host": "192.168.0.245"},
-    "p1": {"ansible_host": "192.168.0.15"},
-    "p2": {"ansible_host": "192.168.0.160"},
-    "p3": {"ansible_host": "192.168.0.91"},
-    "d0": {"ansible_host": "192.168.0.127"},
-    "d1": {"ansible_host": "192.168.0.161"},
-    "d2": {"ansible_host": "192.168.0.154"},
-    "d3": {"ansible_host": "192.168.0.140"},
+    "p0": {"ip": "192.168.0.245"},
+    "p1": {"ip": "192.168.0.15"},
+    "p2": {"ip": "192.168.0.160"},
+    "p3": {"ip": "192.168.0.91"},
+    "d0": {"ip": "192.168.0.127"},
+    "d1": {"ip": "192.168.0.161"},
+    "d2": {"ip": "192.168.0.154"},
+    "d3": {"ip": "192.168.0.140"},
 }
 
 
