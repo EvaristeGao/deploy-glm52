@@ -33,11 +33,12 @@ def _env():
     return Environment(loader=FileSystemLoader(TPL_DIR), undefined=StrictUndefined, trim_blocks=True)
 
 
-def _ctx(role, cluster_type=None):
+def _ctx(role, cluster_type=None, mooncake_enabled=None):
     """直接用 A2 group_vars 平铺变量构造模板 ctx（小写变量，直接渲染）。
     role ∈ {prefill, decode}；运行时参数（$1..$7）不进 ctx——它们由
     launch_online_dp.py 按每引擎位置传入，模板只保留部署期确定的变量。
-    cluster_type 可覆盖 group_vars 值（测 RoCE 开关）。"""
+    cluster_type 可覆盖 group_vars 值（测 RoCE 开关）；
+    mooncake_enabled 可覆盖 group_vars 的 kvpool 开关（测直连 MooncakeConnectorV1 分支）。"""
     gv = yaml.safe_load(open(GV_FILE))
     pd = gv["pd_cluster"]
     return {
@@ -50,26 +51,27 @@ def _ctx(role, cluster_type=None):
         "max_model_len": pd["max_model_len"],
         "kv_port": pd[role]["kv_port"],          # prefill=30000 / decode=30100
         "cluster_type": cluster_type or gv["cluster_type"],
-        # 跨角色 dp/tp（kv-transfer 配置）+ mooncake 路径
+        # 跨角色 dp/tp（kv-transfer 配置）+ mooncake 路径 + kvpool 开关
         "prefill_dp": pd["prefill"]["dp_size"],
         "prefill_tp": pd["prefill"]["tp_size"],
         "decode_dp": pd["decode"]["dp_size"],
         "decode_tp": pd["decode"]["tp_size"],
         "mooncake_config_path": "/root/pd/mooncake.json",
+        "mooncake": {"enabled": gv["mooncake"]["enabled"] if mooncake_enabled is None else mooncake_enabled},
     }
 
 
-def _render(role, cluster_type=None):
+def _render(role, cluster_type=None, mooncake_enabled=None):
     tpl = _env().get_template(f"run_dp_{role}_template.sh.j2")
-    return tpl.render(**{**_ctx(role, cluster_type)})
+    return tpl.render(**{**_ctx(role, cluster_type, mooncake_enabled)})
 
 
-def _render_prefill(cluster_type=None):
-    return _render("prefill", cluster_type)
+def _render_prefill(cluster_type=None, mooncake_enabled=None):
+    return _render("prefill", cluster_type, mooncake_enabled)
 
 
-def _render_decode(cluster_type=None):
-    return _render("decode", cluster_type)
+def _render_decode(cluster_type=None, mooncake_enabled=None):
+    return _render("decode", cluster_type, mooncake_enabled)
 
 
 def test_prefill_uses_register_local_ip():
@@ -225,3 +227,45 @@ def test_rendered_output_clean_newlines():
             assert not (lines[i] == "" and lines[i + 1] == ""), f"发现连续空行 @{i}"
         for i, ln in enumerate(lines):
             assert not (ln and not ln.strip()), f"发现纯空白行 @{i}"
+
+
+# ==================== 部署模式：kvpool 开关（mooncake.enabled） ====================
+
+
+def test_kvpool_on_keeps_mooncake_config_path():
+    """kvpool 开启（默认）：导出 MOONCAKE_CONFIG_PATH 且走 MultiConnector。"""
+    out = _render_prefill()
+    assert 'export MOONCAKE_CONFIG_PATH="/root/pd/mooncake.json"' in out
+    assert '"kv_connector": "MultiConnector"' in out
+
+
+def test_kvpool_off_prefill_direct_mooncake():
+    """kvpool 关闭：prefill 用直连 MooncakeConnectorV1（engine_id=0 + use_ascend_direct），
+    无 MultiConnector / AscendStoreConnector / MOONCAKE_CONFIG_PATH。"""
+    out = _render_prefill(mooncake_enabled=False)
+    assert '"kv_connector": "MooncakeConnectorV1"' in out
+    assert '"kv_role": "kv_producer"' in out
+    assert '"engine_id": "0"' in out
+    assert '"use_ascend_direct": true' in out
+    assert '"kv_connector": "MultiConnector"' not in out
+    assert "AscendStoreConnector" not in out
+    assert "MOONCAKE_CONFIG_PATH" not in out
+    # 直连仍保留 kv_port + P/D 并行度
+    assert '"kv_port": "30000"' in out
+    assert '"prefill": { "dp_size": 4, "tp_size": 8 }' in out
+    assert '"decode": { "dp_size": 8, "tp_size": 4 }' in out
+
+
+def test_kvpool_off_decode_direct_mooncake():
+    """kvpool 关闭：decode 用直连 MooncakeConnectorV1（engine_id=2），仍 kv_consumer。"""
+    out = _render_decode(mooncake_enabled=False)
+    assert '"kv_connector": "MooncakeConnectorV1"' in out
+    assert '"kv_role": "kv_consumer"' in out
+    assert '"engine_id": "2"' in out
+    assert '"use_ascend_direct": true' in out
+    assert '"kv_connector": "MultiConnector"' not in out
+    assert "AscendStoreConnector" not in out
+    assert "MOONCAKE_CONFIG_PATH" not in out
+    assert '"kv_port": "30100"' in out
+    # decode 专属 flag 不受 kvpool 开关影响
+    assert "--compilation-config" in out

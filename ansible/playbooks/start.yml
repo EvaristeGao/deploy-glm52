@@ -14,7 +14,18 @@
 - name: deploy-glm52 一键部署（第一阶段：起容器 + 分发 + mooncake）
   hosts: all
   gather_facts: no
+  vars:
+    # mooncake_master 落点：HA → mooncake.ha.nodes；单主 → proxy 节点（p0）
+    mooncake_master_nodes: "{{ mooncake.ha.nodes if mooncake.ha.enable_ha else [groups['proxy'][0]] }}"
   tasks:
+    - name: 校验部署模式组合（ha+etcd 依赖 kvpool）
+      run_once: true
+      assert:
+        that:
+          - not mooncake.ha.enable_ha or mooncake.enabled
+        fail_msg: "mooncake.ha.enable_ha=true 要求 mooncake.enabled=true（etcd/haproxy 为 mooncake_master 选主服务，离开 kvpool 无意义）。请设 mooncake.enabled=true，或关闭 mooncake.ha.enable_ha。"
+      tags: always
+
     - name: 删除旧容器（幂等，对照 deploy.sh 的 docker rm -f $CONTAINER_NAME）
       shell: docker rm -f {{ container.name }} 2>/dev/null || true
       tags: container
@@ -32,7 +43,7 @@
         -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /etc/hccn.conf:/etc/hccn.conf \
-        -v {{ etcd.certs_dir }}:/etc/pki/etcd/certs \
+        {% if mooncake.enabled and mooncake.ha.enable_ha %}-v {{ etcd.certs_dir }}:/etc/pki/etcd/certs {% endif %}\
         {% for m in model.mounts %}-v {{ m }} {% endfor %}\
         {% if model.dir_host %}-v {{ model.dir_host }}:/root/.cache {% endif %}\
         {{ image }} bash
@@ -44,6 +55,7 @@
       stat:
         path: "{{ playbook_dir }}/../generated/mooncake.json"
       register: mooncake_json_stat
+      when: mooncake.enabled
       tags: container
 
     - name: generated/mooncake.json 缺失——请先跑 gen.yml 生成
@@ -51,23 +63,25 @@
       run_once: true
       fail:
         msg: "缺少 {{ playbook_dir }}/../generated/mooncake.json。generated/ 在 .gitignore（不随仓库交付），首次部署需先在 ansible/ 下运行 gen 生成后再跑本 playbook：ansible-playbook -i inventories/<集群>/inventory.yaml playbooks/gen.yml"
-      when: not mooncake_json_stat.stat.exists
+      when: mooncake.enabled and not mooncake_json_stat.stat.exists
       tags: container
 
-    - name: 分发启动文件到各节点 /tmp（对照 deploy.sh 的 scpn）
+    - name: 分发启动文件到各节点 /tmp（对照 deploy.sh 的 scpn；mooncake.json 仅 kvpool）
       copy:
         src: "{{ item.src }}"
         dest: "{{ item.dest }}"
       loop:
-        - { src: "../launch_online_dp.py", dest: "/tmp/launch_online_dp.py" }
-        - { src: "../generated/mooncake.json", dest: "/tmp/mooncake.json" }
+        - { src: "../launch_online_dp.py", dest: "/tmp/launch_online_dp.py", only_kvpool: false }
+        - { src: "../generated/mooncake.json", dest: "/tmp/mooncake.json", only_kvpool: true }
+      when: not (item.only_kvpool | default(false)) or mooncake.enabled
       tags: container
 
-    - name: docker cp 启动文件进容器 /root/pd/（对照 deploy.sh start_node）
-      shell: docker exec {{ container.name }} mkdir -p /root/pd && docker cp /tmp/{{ item }} {{ container.name }}:/root/pd/
+    - name: docker cp 启动文件进容器 /root/pd/（对照 deploy.sh start_node；mooncake.json 仅 kvpool）
+      shell: docker exec {{ container.name }} mkdir -p /root/pd && docker cp /tmp/{{ item.name }} {{ container.name }}:/root/pd/
       loop:
-        - launch_online_dp.py
-        - mooncake.json
+        - { name: launch_online_dp.py, only_kvpool: false }
+        - { name: mooncake.json, only_kvpool: true }
+      when: not (item.only_kvpool | default(false)) or mooncake.enabled
       tags: container
 
     - name: 计算 mooncake 日志路径（logs.dir 为空回退 /root，{node} 按节点替换，对照 deploy.sh MOONCAKE_LOG）
@@ -83,10 +97,11 @@
       set_fact:
         etcd_initial_cluster: "{% for n in etcd.nodes %}s{{ loop.index }}=https://{{ hostvars[n].ansible_host }}:{{ etcd.peer_port }}{% if not loop.last %},{% endif %}{% endfor %}"
         etcd_server_list: "{% for n in etcd.nodes %}{{ hostvars[n].ansible_host }}:{{ etcd.client_port }}{% if not loop.last %};{% endif %}{% endfor %}"
+      when: mooncake.enabled and mooncake.ha.enable_ha
       tags: etcd
 
-    - name: 起 etcd 容器（3 节点，证书挂载，双向证书认证）
-      when: inventory_hostname in etcd.nodes
+    - name: 起 etcd 容器（3 节点，证书挂载，双向证书认证；仅 kvpool+HA）
+      when: mooncake.enabled and mooncake.ha.enable_ha and inventory_hostname in etcd.nodes
       shell: |
         docker rm -f etcd-{{ inventory_hostname }} 2>/dev/null || true
         docker run -d --name etcd-{{ inventory_hostname }} --network host \
@@ -102,8 +117,8 @@
           --peer-client-cert-auth --peer-trusted-ca-file=/certs/ca.crt --peer-cert-file=/certs/server.crt --peer-key-file=/certs/server.key
       tags: etcd
 
-    - name: 起 mooncake 容器（3 节点，独立于 vllm-ascend，含 mooncake_master+haproxy+nc）
-      when: inventory_hostname in mooncake.ha.nodes
+    - name: 起 mooncake 容器（HA：mooncake.ha.nodes；单主：proxy 节点；独立于 vllm-ascend，含 mooncake_master+haproxy+nc）
+      when: mooncake.enabled and inventory_hostname in mooncake_master_nodes
       shell: |
         docker rm -f mooncake-{{ inventory_hostname }} 2>/dev/null || true
         docker run -itd --name mooncake-{{ inventory_hostname }} --shm-size=500g --network host \
@@ -131,11 +146,12 @@
       loop:
         - ../ha/gen_haproxy_etcd.sh
         - ../ha/start-ha.sh
-      tags: haproxy   # 所有节点分发脚本（mooncake 容器 + P/D 引擎容器共用）
+      when: mooncake.enabled and mooncake.ha.enable_ha
+      tags: haproxy   # 仅 HA 分发脚本（mooncake 容器 + P/D 引擎容器共用）
 
     # mooncake 容器内 haproxy（CacheMaster，{{ haproxy.cache_master_port }}）
     - name: docker cp 脚本进 mooncake 容器并生成/启动 haproxy（CacheMaster {{ haproxy.cache_master_port }}）
-      when: inventory_hostname in mooncake.ha.nodes
+      when: mooncake.enabled and mooncake.ha.enable_ha and inventory_hostname in mooncake.ha.nodes
       shell: |
         docker exec mooncake-{{ inventory_hostname }} mkdir -p /home/ma-user/haproxy
         docker cp /tmp/gen_haproxy_etcd.sh mooncake-{{ inventory_hostname }}:/home/ma-user/haproxy/
@@ -149,6 +165,7 @@
 
     # P/D 引擎容器内 haproxy（{{ haproxy.pd_port }}）
     - name: docker cp 脚本进 vllm-ascend 容器并生成/启动 haproxy（P/D 引擎 {{ haproxy.pd_port }}）
+      when: mooncake.enabled and mooncake.ha.enable_ha
       shell: |
         docker exec {{ container.name }} mkdir -p /home/ma-user/haproxy
         docker cp /tmp/gen_haproxy_etcd.sh {{ container.name }}:/home/ma-user/haproxy/
@@ -160,18 +177,19 @@
            bash /home/ma-user/haproxy/start-ha.sh'
       tags: haproxy
 
-    # mooncake_master 在 haproxy 起完之后再启动（对齐 ETCD.md 2.1.2 先 haproxy → 2.1.3 再 master；
-    #   -etcd_endpoints 指本机 CacheMaster haproxy，先起 master 会因 haproxy 未就绪连不上 etcd）
-    - name: 容器内起 mooncake_master（3 节点，HA，etcd 选主；etcd_endpoints 指本机 haproxy）
-      when: inventory_hostname in mooncake.ha.nodes
+    # mooncake_master：kvpool 才需要。HA 时在 haproxy 起完后启动（先 haproxy → 再 master），
+    #   -enable_ha + -etcd_endpoints 指本机 CacheMaster haproxy（先起 master 会因 haproxy 未就绪连不上 etcd）；
+    #   单主时直接启动（无 -enable_ha / -etcd_endpoints，master 直连，待实机确认）。
+    - name: 容器内起 mooncake_master（HA：enable_ha+etcd 选主；单主：直连）
+      when: mooncake.enabled and inventory_hostname in mooncake_master_nodes
       shell: |
         docker exec mooncake-{{ inventory_hostname }} mkdir -p {{ mooncake_log | dirname }} 2>/dev/null || true
         docker exec mooncake-{{ inventory_hostname }} pkill -x mooncake_master 2>/dev/null || true
         docker exec -d mooncake-{{ inventory_hostname }} bash -c \
-          'mooncake_master -enable_ha=true \
-            --cluster_id=mooncake \
-            -etcd_endpoints 127.0.0.1:{{ haproxy.cache_master_port }} \
-            --rpc-address {{ hostvars[inventory_hostname].ansible_host }} \
+          'mooncake_master {% if mooncake.ha.enable_ha %}-enable_ha=true \
+            {% endif %}--cluster_id=mooncake \
+            {% if mooncake.ha.enable_ha %}-etcd_endpoints 127.0.0.1:{{ haproxy.cache_master_port }} \
+            {% endif %}--rpc-address {{ hostvars[inventory_hostname].ansible_host }} \
             -rpc_port={{ mooncake.ha.rpc_port }} \
             -metrics_port={{ mooncake.ha.metrics_port }} \
             -eviction_high_watermark_ratio={{ mooncake.evict }} \

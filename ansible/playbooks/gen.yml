@@ -40,9 +40,11 @@
         dest: "{{ gen_dir }}/run_dp_template_{{ item }}.sh"
       loop: "{{ groups['all'] | sort }}"
 
-    # 渲染 mooncake.json：P/D 引擎 master_server_address 指向本机 haproxy（127.0.0.1:pd_port），
-    #   对齐 ETCD.md v1.1（P/D 引擎连本机 haproxy，不是直连 master）
-    - name: 渲染 mooncake.json（Jinja2 直接渲染，master 指向本机 P/D haproxy）
+    # 渲染 mooncake.json（仅 kvpool 需要；按 enable_ha 三态二选一，不启用则不生成）：
+    #   HA  ：master_server_address 用 etcd://127.0.0.1:<pd_port>（引擎经本机 P/D haproxy 发现 master，对齐 ETCD.md v1.1）
+    #   单主：master_server_address 直连 p0 的 mooncake_master rpc 端口（无 etcd/haproxy，待实机确认）
+    - name: 渲染 mooncake.json（kvpool HA：master 经 etcd://haproxy 发现）
+      when: mooncake.enabled and mooncake.ha.enable_ha
       copy:
         dest: "{{ gen_dir }}/mooncake.json"
         content: |
@@ -52,6 +54,20 @@
             "device_name": "",
             "metadata_server": "etcd://127.0.0.1:{{ haproxy.pd_port }}",
             "master_server_address": "etcd://127.0.0.1:{{ haproxy.pd_port }}",
+            "global_segment_size": "{{ mooncake.global_segment_size }}",
+            "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }}
+          }
+
+    - name: 渲染 mooncake.json（kvpool 单主：master 直连 p0 rpc 端口，待实机确认）
+      when: mooncake.enabled and not mooncake.ha.enable_ha
+      copy:
+        dest: "{{ gen_dir }}/mooncake.json"
+        content: |
+          {
+            "metadata_server": "P2PHANDSHAKE",
+            "protocol": "ascend",
+            "device_name": "",
+            "master_server_address": "{{ hostvars[groups['proxy'][0]].ansible_host }}:{{ mooncake.ha.rpc_port }}",
             "global_segment_size": "{{ mooncake.global_segment_size }}",
             "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }}
           }

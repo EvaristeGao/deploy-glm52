@@ -32,16 +32,20 @@ pd_cluster:
 
 proxy: { port: 1999 }
 
-# mooncake_master HA（etcd 选主 + haproxy LB，3 节点）
+# mooncake / 部署模式（三态，详见 README「部署模式」）：
+#   enabled=true  + enable_ha=true  → kvpool HA（3 master + 3 etcd + haproxy），当前默认
+#   enabled=true  + enable_ha=false → kvpool 单 master（p0 直连，无 etcd/haproxy）
+#   enabled=false                   → 无 kvpool（直连 MooncakeConnectorV1，无 master/etcd/haproxy）
 mooncake:
+  enabled: true              # kvpool(Ascend Store KV 池)开关；false=直连 MooncakeConnectorV1（无池/无 master/无 etcd/haproxy）
   port: 50088                # kv 服务端口（引擎经 haproxy 连入）
   evict: 0.9
   global_segment_size: 80GB
   default_kv_lease_ttl: 11000
   image: quay.io/ascend/vllm-ascend:v0.23.0rc1-mooncake   # TODO: mooncake 容器镜像（含 mooncake_master+haproxy+nc），用户填
   ha:
-    nodes: [p0, p1, p2]      # 3 个 mooncake_master 节点
-    enable_ha: true
+    enable_ha: true          # ha+etcd 开关（前提 enabled: true）；false=单 master 直连 p0
+    nodes: [p0, p1, p2]      # 3 个 mooncake_master 节点（仅 enable_ha=true 生效）
     rpc_port: 52050
     metrics_port: 52052
     health_check_port: 52054

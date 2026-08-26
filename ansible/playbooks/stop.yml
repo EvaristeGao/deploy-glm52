@@ -10,6 +10,9 @@
 - name: deploy-glm52 停止清理
   hosts: all
   gather_facts: no
+  vars:
+    # mooncake_master 落点：HA → mooncake.ha.nodes；单主 → proxy 节点（p0）
+    mooncake_master_nodes: "{{ mooncake.ha.nodes if mooncake.ha.enable_ha else [groups['proxy'][0]] }}"
   tasks:
     # 对照 deploy.sh cmd_stop(): $pnode=$(...proxy.node) 上停 proxy
     # proxy 节点 = inventory 的 proxy 组首成员（group_vars 无 proxy.node 平铺字段）
@@ -20,8 +23,8 @@
     # 对照 deploy.sh cmd_stop(): 停 mooncake_master（pkill -x 精确进程名）。
     # HA 后 mooncake_master 跑在 mooncake.ha.nodes 各节点的 mooncake-<node> 容器内，
     #   不是引擎容器（container.name），也不能只停 p0。
-    - name: 停 mooncake_master（mooncake.ha.nodes 各节点；容器 mooncake-<node>，pkill -x 精确进程名）
-      when: inventory_hostname in mooncake.ha.nodes
+    - name: 停 mooncake_master（master 节点；容器 mooncake-<node>，pkill -x 精确进程名）
+      when: mooncake.enabled and inventory_hostname in mooncake_master_nodes
       shell: docker exec mooncake-{{ inventory_hostname }} pkill -x mooncake_master 2>/dev/null || true
 
     # 对照 deploy.sh cmd_stop(): 全部节点 docker rm -f
@@ -29,10 +32,10 @@
       shell: docker rm -f {{ container.name }} 2>/dev/null || true
 
     # HA 新增：etcd / mooncake 容器一并清理（stop.yml 语义为完整停止清理，不留残留）
-    - name: 删 etcd 容器（etcd.nodes，幂等）
-      when: inventory_hostname in etcd.nodes
+    - name: 删 etcd 容器（etcd.nodes，幂等；仅 kvpool+HA）
+      when: mooncake.enabled and mooncake.ha.enable_ha and inventory_hostname in etcd.nodes
       shell: docker rm -f etcd-{{ inventory_hostname }} 2>/dev/null || true
 
-    - name: 删 mooncake 容器（mooncake.ha.nodes，幂等）
-      when: inventory_hostname in mooncake.ha.nodes
+    - name: 删 mooncake 容器（master 节点，幂等）
+      when: mooncake.enabled and inventory_hostname in mooncake_master_nodes
       shell: docker rm -f mooncake-{{ inventory_hostname }} 2>/dev/null || true
