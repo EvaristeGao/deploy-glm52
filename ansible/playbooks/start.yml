@@ -97,6 +97,8 @@
       set_fact:
         etcd_initial_cluster: "{% for n in etcd.nodes %}s{{ loop.index }}=https://{{ hostvars[n].ansible_host }}:{{ etcd.peer_port }}{% if not loop.last %},{% endif %}{% endfor %}"
         etcd_server_list: "{% for n in etcd.nodes %}{{ hostvars[n].ansible_host }}:{{ etcd.client_port }}{% if not loop.last %};{% endif %}{% endfor %}"
+        # master 的 -etcd_endpoints：per_container → 本机 haproxy；standalone → 3 个独立 haproxy
+        master_etcd_endpoints: "{% if haproxy.mode == 'standalone' %}{% for n in haproxy.nodes %}{{ hostvars[n].ansible_host }}:{{ haproxy.port }}{% if not loop.last %},{% endif %}{% endfor %}{% else %}127.0.0.1:{{ haproxy.cache_master_port }}{% endif %}"
       when: mooncake.enabled and mooncake.ha.enable_ha
       tags: etcd
 
@@ -149,9 +151,33 @@
       when: mooncake.enabled and mooncake.ha.enable_ha
       tags: haproxy   # 仅 HA 分发脚本（mooncake 容器 + P/D 引擎容器共用）
 
+    # standalone：3 个独立 haproxy 容器（复用 mooncake.image，含 haproxy；组件经 3 节点 IP 访问 etcd）
+    - name: 起独立 haproxy 容器（standalone：haproxy.nodes 各 1 个）
+      when: mooncake.enabled and mooncake.ha.enable_ha and haproxy.mode == 'standalone' and inventory_hostname in haproxy.nodes
+      shell: |
+        docker rm -f haproxy-{{ inventory_hostname }} 2>/dev/null || true
+        docker run -itd --name haproxy-{{ inventory_hostname }} --network host \
+          --entrypoint=bash \
+          -v {{ etcd.certs_dir }}:/etc/pki/etcd/certs \
+          {{ mooncake.image }}
+      tags: haproxy
+
+    - name: docker cp 脚本进独立 haproxy 容器并生成/启动（standalone 端口 {{ haproxy.port }}）
+      when: mooncake.enabled and mooncake.ha.enable_ha and haproxy.mode == 'standalone' and inventory_hostname in haproxy.nodes
+      shell: |
+        docker exec haproxy-{{ inventory_hostname }} mkdir -p /home/ma-user/haproxy
+        docker cp /tmp/gen_haproxy_etcd.sh haproxy-{{ inventory_hostname }}:/home/ma-user/haproxy/
+        docker cp /tmp/start-ha.sh haproxy-{{ inventory_hostname }}:/home/ma-user/haproxy/
+        docker exec haproxy-{{ inventory_hostname }} bash -c \
+          'export HAP_LISTEN_START_PORT={{ haproxy.port }}; \
+           export ETCD_SERVER_LIST="{{ etcd_server_list }}"; \
+           bash /home/ma-user/haproxy/gen_haproxy_etcd.sh && \
+           bash /home/ma-user/haproxy/start-ha.sh'
+      tags: haproxy
+
     # mooncake 容器内 haproxy（CacheMaster，{{ haproxy.cache_master_port }}）
     - name: docker cp 脚本进 mooncake 容器并生成/启动 haproxy（CacheMaster {{ haproxy.cache_master_port }}）
-      when: mooncake.enabled and mooncake.ha.enable_ha and inventory_hostname in mooncake.ha.nodes
+      when: mooncake.enabled and mooncake.ha.enable_ha and haproxy.mode == 'per_container' and inventory_hostname in mooncake.ha.nodes
       shell: |
         docker exec mooncake-{{ inventory_hostname }} mkdir -p /home/ma-user/haproxy
         docker cp /tmp/gen_haproxy_etcd.sh mooncake-{{ inventory_hostname }}:/home/ma-user/haproxy/
@@ -165,7 +191,7 @@
 
     # P/D 引擎容器内 haproxy（{{ haproxy.pd_port }}）
     - name: docker cp 脚本进 vllm-ascend 容器并生成/启动 haproxy（P/D 引擎 {{ haproxy.pd_port }}）
-      when: mooncake.enabled and mooncake.ha.enable_ha
+      when: mooncake.enabled and mooncake.ha.enable_ha and haproxy.mode == 'per_container'
       shell: |
         docker exec {{ container.name }} mkdir -p /home/ma-user/haproxy
         docker cp /tmp/gen_haproxy_etcd.sh {{ container.name }}:/home/ma-user/haproxy/
@@ -188,7 +214,7 @@
         docker exec -d mooncake-{{ inventory_hostname }} bash -c \
           'mooncake_master {% if mooncake.ha.enable_ha %}-enable_ha=true \
             {% endif %}--cluster_id=mooncake \
-            {% if mooncake.ha.enable_ha %}-etcd_endpoints 127.0.0.1:{{ haproxy.cache_master_port }} \
+            {% if mooncake.ha.enable_ha %}-etcd_endpoints {{ master_etcd_endpoints }} \
             {% endif %}--rpc-address {{ hostvars[inventory_hostname].ansible_host }} \
             -rpc_port={{ mooncake.ha.rpc_port }} \
             -metrics_port={{ mooncake.ha.metrics_port }} \

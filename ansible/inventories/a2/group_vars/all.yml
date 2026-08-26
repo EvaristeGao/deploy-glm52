@@ -61,10 +61,15 @@ etcd:
   client_port: 2379
   peer_port: 2380
 
-# haproxy（etcd 代理，部署在每个实例容器内；对齐 ETCD.md v1.1：每实例 1 个 haproxy 监听 1 端口）
+# haproxy（etcd 代理，两种部署形态，见 README「部署模式」）：
+#   per_container（默认）：每实例容器内嵌 haproxy（master→cache_master_port, 引擎→pd_port）
+#   standalone：3 个独立 haproxy 容器（nodes），组件经 3 节点 IP:port 访问 etcd
 haproxy:
-  cache_master_port: 12379   # mooncake 容器内 haproxy 监听端口（mooncake_master -etcd_endpoints 指 127.0.0.1:此端口）
-  pd_port: 12489             # P/D 引擎容器内 haproxy 监听端口
+  mode: per_container         # per_container | standalone
+  cache_master_port: 12379   # per_container：mooncake 容器内 haproxy 端口（master -etcd_endpoints 指 127.0.0.1:此端口）
+  pd_port: 12489             # per_container：P/D 引擎容器内 haproxy 端口
+  nodes: [p0, p1, p2]        # standalone：3 个独立 haproxy 容器节点
+  port: 12379                # standalone：统一监听端口（master/引擎共用，经 3 节点 IP:此端口 访问 etcd）
 
 container: { name: glm52-ansible-test, shm_size: 1024g }
 runtime: { ready_timeout: 2400, proxy_ready_timeout: 600 }

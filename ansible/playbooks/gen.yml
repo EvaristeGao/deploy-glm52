@@ -13,6 +13,11 @@
   vars:
     # 输出到 ansible/generated/（playbook_dir = ansible/playbooks，../generated = ansible/generated）
     gen_dir: "{{ playbook_dir }}/../generated"
+    # 引擎 mooncake.json 访问 etcd 的地址：
+    #   per_container → etcd://127.0.0.1:<pd_port>（本机 P/D 容器内 haproxy）
+    #   standalone    → etcd://<hp0>:<port>,<hp1>:<port>,<hp2>:<port>（3 个独立 haproxy）
+    haproxy_server_addrs: "{% for n in haproxy.nodes %}{{ hostvars[n].ansible_host }}:{{ haproxy.port }}{% if not loop.last %},{% endif %}{% endfor %}"
+    mooncake_etcd_addr: "{{ 'etcd://' ~ haproxy_server_addrs if haproxy.mode == 'standalone' else 'etcd://127.0.0.1:' ~ haproxy.pd_port }}"
   tasks:
     - name: 确保 ansible/generated/ 目录存在（generated/ 在 .gitignore，首次运行需创建）
       file:
@@ -41,7 +46,7 @@
       loop: "{{ groups['all'] | sort }}"
 
     # 渲染 mooncake.json（仅 kvpool 需要；按 enable_ha 三态二选一，不启用则不生成）：
-    #   HA  ：master_server_address 用 etcd://127.0.0.1:<pd_port>（引擎经本机 P/D haproxy 发现 master，对齐 ETCD.md v1.1）
+    #   HA  ：master_server_address 用 {{ mooncake_etcd_addr }}（per_container→本机 P/D haproxy；standalone→3 个独立 haproxy）
     #   单主：master_server_address 直连 p0 的 mooncake_master rpc 端口（无 etcd/haproxy，待实机确认）
     - name: 渲染 mooncake.json（kvpool HA：master 经 etcd://haproxy 发现）
       when: mooncake.enabled and mooncake.ha.enable_ha
@@ -52,8 +57,8 @@
             "metadata_server": "P2PHANDSHAKE",
             "protocol": "ascend",
             "device_name": "",
-            "metadata_server": "etcd://127.0.0.1:{{ haproxy.pd_port }}",
-            "master_server_address": "etcd://127.0.0.1:{{ haproxy.pd_port }}",
+            "metadata_server": "{{ mooncake_etcd_addr }}",
+            "master_server_address": "{{ mooncake_etcd_addr }}",
             "global_segment_size": "{{ mooncake.global_segment_size }}",
             "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }}
           }

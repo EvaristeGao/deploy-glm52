@@ -30,8 +30,8 @@
         | grep -Fxq "{{ etcd.image }}" && echo image-present || { echo image-missing; exit 1; }
       changed_when: false
 
-    - name: mooncake 镜像检查（仅 kvpool 的 master 节点；mooncake.image 未配置则跳过）
-      when: mooncake.enabled and inventory_hostname in mooncake_master_nodes and (mooncake.image | default('')) != ''
+    - name: mooncake 镜像检查（master 节点 + standalone haproxy 节点；mooncake.image 未配置则跳过）
+      when: mooncake.enabled and (inventory_hostname in mooncake_master_nodes or (haproxy.mode == 'standalone' and inventory_hostname in haproxy.nodes)) and (mooncake.image | default('')) != ''
       shell: >-
         docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}"
         | grep -Fxq "{{ mooncake.image }}" && echo image-present || { echo image-missing; exit 1; }

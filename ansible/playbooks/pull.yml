@@ -40,8 +40,8 @@
       register: etcd_pull
       changed_when: "'image-already-present' not in etcd_pull.stdout"
 
-    - name: 拉取 mooncake 镜像（仅 kvpool 的 master 节点；mooncake.image 未配置则跳过）
-      when: mooncake.enabled and inventory_hostname in mooncake_master_nodes and (mooncake.image | default('')) != ''
+    - name: 拉取 mooncake 镜像（master 节点 + standalone haproxy 节点；mooncake.image 未配置则跳过）
+      when: mooncake.enabled and (inventory_hostname in mooncake_master_nodes or (haproxy.mode == 'standalone' and inventory_hostname in haproxy.nodes)) and (mooncake.image | default('')) != ''
       shell: |
         if docker images --format "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}" | grep -Fxq "{{ mooncake.image }}"; then
           echo image-already-present
