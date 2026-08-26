@@ -3,14 +3,14 @@
 # 由 Ansible template 模块渲染。部署期变量（Jinja2）：
 #   nic / model_path / served_model_name / max_model_len / kv_port / cluster_type /
 #   prefill_dp / prefill_tp / decode_dp / decode_tp   ← group_vars 平铺 / 集群配置
-#   local_ip.stdout                                     ← 节点执行命令 register（非静态值）
+#   ip                                                   ← inventory 节点静态字段（真实网卡 IP）
 # 运行时引擎差异（端口/rank/dp/tp 等）由 launch_online_dp.py 以位置参数 $1..$7 传入，
 #   与 deploy.sh 原模板 templates/run_dp_prefill_template.sh 一致（$1 可见卡、$2 端口、$3 dp_size、
 #   $4 dp_rank、$5 dp_address、$6 rpc_port、$7 tp_size）。
 {# 可读性约定：Jinja 块标签一律顶格独立成行（Ansible 模板 trim_blocks 会吃掉标签行换行，
    渲染结果无多余空行）；同一行内仅取值的分支用内联条件表达式（'A' if cond else 'B'）。 #}
 nic_name="{{ nic }}"
-local_ip="{{ local_ip.stdout }}"
+local_ip="{{ ip }}"
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name

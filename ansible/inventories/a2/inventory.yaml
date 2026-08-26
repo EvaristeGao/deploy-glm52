@@ -1,22 +1,29 @@
 # =============================================================================
-# A2 inventory — 8xA2 4P+4D（IP/nic 取自 config.yaml nodes 段）
+# A2 inventory — 8xA2 4P+4D
 # Prefill dp4tp8（每节点 1 引擎 :9081），Decode dp8tp4（每节点 2 引擎 :9900 :9901）
 # proxy 落在 p0；mooncake_master 3 节点（p0/p1/p2）
+#
+# 每节点字段：
+#   ansible_host : SSH 目标（控制机登录用，主机名/IP 均可）
+#   ip           : 节点网卡 IP（= ip addr show <nic> 的值），组件间互通统一用它（etcd/haproxy/mooncake/引擎）
+#   nic          : 网卡名（取 ip 的接口）
+#   idx          : 该角色内节点序号
+# ⚠ ip 字段为历史占位值（192.168.0.x），生产环境核对并改成真实网卡 IP。
 # =============================================================================
 all:
   children:
     prefill:
       hosts:
-        p0: { ansible_host: ott9-a20, nic: enp67s0f5, idx: 0 }
-        p1: { ansible_host: ott9-a21,  nic: enp67s0f5, idx: 1 }
-        p2: { ansible_host: ott9-a22, nic: enp67s0f5, idx: 2 }
-        p3: { ansible_host: ott9-a23,  nic: enp67s0f5, idx: 3 }
+        p0: { ansible_host: ott9-a20, ip: 192.168.0.245, nic: enp67s0f5, idx: 0 }
+        p1: { ansible_host: ott9-a21, ip: 192.168.0.15,  nic: enp67s0f5, idx: 1 }
+        p2: { ansible_host: ott9-a22, ip: 192.168.0.160, nic: enp67s0f5, idx: 2 }
+        p3: { ansible_host: ott9-a23, ip: 192.168.0.91,  nic: enp67s0f5, idx: 3 }
     decode:
       hosts:
-        d0: { ansible_host: ott9-a24, nic: enp67s0f5, idx: 0 }
-        d1: { ansible_host: ott9-a25, nic: enp67s0f5, idx: 1 }
-        d2: { ansible_host: ott9-a26, nic: enp67s0f5, idx: 2 }
-        d3: { ansible_host: ott9-a27, nic: enp67s0f5, idx: 3 }
+        d0: { ansible_host: ott9-a24, ip: 192.168.0.127, nic: enp67s0f5, idx: 0 }
+        d1: { ansible_host: ott9-a25, ip: 192.168.0.161, nic: enp67s0f5, idx: 1 }
+        d2: { ansible_host: ott9-a26, ip: 192.168.0.154, nic: enp67s0f5, idx: 2 }
+        d3: { ansible_host: ott9-a27, ip: 192.168.0.140, nic: enp67s0f5, idx: 3 }
     proxy:  { hosts: { p0: {} } }
     # mooncake_master 3 节点（与 group_vars mooncake.ha.nodes 对齐；group 不参与 start.yml 部署判断，仅供调试）
     mooncake: { hosts: { p0: {}, p1: {}, p2: {} } }

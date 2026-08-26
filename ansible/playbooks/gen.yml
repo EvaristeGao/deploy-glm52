@@ -16,7 +16,7 @@
     # 引擎 mooncake.json 访问 etcd 的地址：
     #   per_container → etcd://127.0.0.1:<pd_port>（本机 P/D 容器内 haproxy）
     #   standalone    → etcd://<hp0>:<port>,<hp1>:<port>,<hp2>:<port>（3 个独立 haproxy）
-    haproxy_server_addrs: "{% for n in haproxy.nodes %}{{ hostvars[n].ansible_host }}:{{ haproxy.port }}{% if not loop.last %},{% endif %}{% endfor %}"
+    haproxy_server_addrs: "{% for n in haproxy.nodes %}{{ hostvars[n].ip }}:{{ haproxy.port }}{% if not loop.last %},{% endif %}{% endfor %}"
     mooncake_etcd_addr: "{{ 'etcd://' ~ haproxy_server_addrs if haproxy.mode == 'standalone' else 'etcd://127.0.0.1:' ~ haproxy.pd_port }}"
   tasks:
     - name: 确保 ansible/generated/ 目录存在（generated/ 在 .gitignore，首次运行需创建）
@@ -32,9 +32,8 @@
         served_model_name: "{{ model.served_model_name | default(model_name) }}"
         max_model_len: "{{ pd_cluster.max_model_len }}"
         kv_port: "{{ pd_cluster[node_role].kv_port }}"
-        # gen 为控制端调试，local_ip 用 inventory 的静态 ansible_host（非节点 register，
-        #   语义同派生变量的静态 LOCAL_IP = 节点 IP）
-        local_ip: { stdout: "{{ hostvars[item].ansible_host }}" }
+        # gen 在控制端本地渲染，模板的 local_ip 用 inventory 的静态 ip 字段（真实网卡 IP）
+        ip: "{{ hostvars[item].ip }}"
         prefill_dp: "{{ pd_cluster.prefill.dp_size }}"
         prefill_tp: "{{ pd_cluster.prefill.tp_size }}"
         decode_dp: "{{ pd_cluster.decode.dp_size }}"
@@ -72,7 +71,7 @@
             "metadata_server": "P2PHANDSHAKE",
             "protocol": "ascend",
             "device_name": "",
-            "master_server_address": "{{ hostvars[groups['proxy'][0]].ansible_host }}:{{ mooncake.ha.rpc_port }}",
+            "master_server_address": "{{ hostvars[groups['proxy'][0]].ip }}:{{ mooncake.ha.rpc_port }}",
             "global_segment_size": "{{ mooncake.global_segment_size }}",
             "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }}
           }

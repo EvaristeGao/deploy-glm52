@@ -60,7 +60,7 @@ ansible/
 **没有 config.yaml**。所有参数都在 `ansible/inventories/` 内、按集群分目录：
 
 - `inventories/<a2|a3>/group_vars/all.yml`：集群级参数（SSH 连接、`pd_cluster` P/D 拓扑、`mooncake`、`proxy`、`container`、`logs` 等）
-- `inventories/<a2|a3>/inventory.yaml`：节点拓扑（每节点 `ansible_host` / `nic` / `idx`）
+- `inventories/<a2|a3>/inventory.yaml`：节点拓扑（每节点 `ansible_host` SSH 目标 / `ip` 网卡 IP / `nic` 网卡名 / `idx`）；`ip` 是组件间互通的规范地址（etcd/haproxy/mooncake/引擎都用它），生产环境填真实网卡 IP
 
 A2/A3 切换：`-i` 指不同 inventory 即可，互不影响。
 
@@ -175,5 +175,5 @@ ansible-playbook -i inventories/a2/inventory.yaml playbooks/start.yml --check
 - **运行需在 `ansible/` 目录内**（`ansible.cfg` 在 `ansible/`，让 Ansible 加载配置）
 - 完整 `--check` 是干跑近似，不等价 `--dry-run` 的完整模拟
 - `--tags engine` 等分段重跑依赖前置阶段（如 smoke 需 proxy 已起）
-- `gen.yml` 用 inventory 静态 `ansible_host` 渲染 local_ip（调试语义；start.yml 用节点 register）
+- 引擎模板的 `local_ip`（HCCL）与控制面（etcd/haproxy/mooncake）统一用 inventory 的静态 `ip`（网卡 IP）；`ansible_host` 仅用于 SSH。剩余 `dp_address`/健康检查/proxy 端点仍用 `ansible_host`（数据面，未一并切换）
 - 跑 `stop.yml` 会删 `container.name` 指定的容器（不影响其他运行容器）

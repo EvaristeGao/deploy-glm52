@@ -42,9 +42,9 @@ def _ctx(role, cluster_type=None, mooncake_enabled=None):
     gv = yaml.safe_load(open(GV_FILE))
     pd = gv["pd_cluster"]
     return {
-        # 节点级变量：nic 取自 A2 inventory 节点（host 级）；local_ip 为节点命令 register（非静态值）
+        # 节点级变量：nic 取自 A2 inventory 节点（host 级）；ip 取自 inventory 静态字段（真实网卡 IP）
         "nic": "enp67s0f5",
-        "local_ip": {"stdout": "192.168.0.245"},
+        "ip": "192.168.0.245",
         # 集群级平铺变量（来源：a2/group_vars/all.yml 的 model / model_path / pd_cluster）
         "model_path": gv["model_path"],
         "served_model_name": gv["model"]["served_model_name"],
@@ -74,8 +74,8 @@ def _render_decode(cluster_type=None, mooncake_enabled=None):
     return _render("decode", cluster_type, mooncake_enabled)
 
 
-def test_prefill_uses_register_local_ip():
-    """local_ip 必须来自节点命令 register 的 local_ip.stdout，而非静态值。"""
+def test_prefill_uses_inventory_ip():
+    """local_ip 必须来自 inventory 静态 ip 字段（真实网卡 IP），而非运行时 register。"""
     out = _render_prefill()
     assert 'local_ip="192.168.0.245"' in out
     # 禁止残留未替换占位符（__XX__ / {{ }}）
