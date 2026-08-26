@@ -7,16 +7,16 @@ all:
   children:
     prefill:
       hosts:
-        p0: { ansible_host: 192.168.0.245, nic: enp67s0f5, idx: 0 }
-        p1: { ansible_host: 192.168.0.15,  nic: enp67s0f5, idx: 1 }
-        p2: { ansible_host: 192.168.0.160, nic: enp67s0f5, idx: 2 }
-        p3: { ansible_host: 192.168.0.91,  nic: enp67s0f5, idx: 3 }
+        p0: { ansible_host: ott9-a20, nic: enp67s0f5, idx: 0 }
+        p1: { ansible_host: ott9-a21,  nic: enp67s0f5, idx: 1 }
+        p2: { ansible_host: ott9-a22, nic: enp67s0f5, idx: 2 }
+        p3: { ansible_host: ott9-a23,  nic: enp67s0f5, idx: 3 }
     decode:
       hosts:
-        d0: { ansible_host: 192.168.0.127, nic: enp67s0f5, idx: 0 }
-        d1: { ansible_host: 192.168.0.161, nic: enp67s0f5, idx: 1 }
-        d2: { ansible_host: 192.168.0.154, nic: enp67s0f5, idx: 2 }
-        d3: { ansible_host: 192.168.0.140, nic: enp67s0f5, idx: 3 }
+        d0: { ansible_host: ott9-a24, nic: enp67s0f5, idx: 0 }
+        d1: { ansible_host: ott9-a25, nic: enp67s0f5, idx: 1 }
+        d2: { ansible_host: ott9-a26, nic: enp67s0f5, idx: 2 }
+        d3: { ansible_host: ott9-a27, nic: enp67s0f5, idx: 3 }
     proxy:  { hosts: { p0: {} } }
     # mooncake_master 3 节点（与 group_vars mooncake.ha.nodes 对齐；group 不参与 start.yml 部署判断，仅供调试）
     mooncake: { hosts: { p0: {}, p1: {}, p2: {} } }

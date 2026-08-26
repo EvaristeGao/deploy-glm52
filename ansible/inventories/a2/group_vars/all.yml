@@ -5,14 +5,13 @@
 
 # --- SSH 连接参数（来源：config.yaml ssh 段，所有 playbook 共享）---
 ansible_user: root                              # config.yaml ssh.user
-ansible_ssh_private_key_file: /home/g00832294/.ssh/KeyPair-2956.pem  # config.yaml ssh.opts 的 -i
 ansible_ssh_common_args: "-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ConnectionAttempts=3 -o ServerAliveInterval=30 -o ServerAliveCountMax=3"  # config.yaml ssh.opts 的 -o 选项 + 重试/心跳（实机瞬时 reset 容错）
 ansible_ssh_retries: 3                          # UNREACHABLE 自动重试（实机验证: 节点容器起后 sshd 瞬时不稳会 reset）
 ansible_python_interpreter: /usr/bin/python3
 
 # --- 集群参数（值抄自 config.yaml，平铺、无 nodes/cluster 段）---
 cluster_type: a2
-image: quay.io/ascend/vllm-ascend:v0.23.0rc1
+image: quay.io/ascend/vllm-ascend:v0.23.0
 image_tar: ""                 # 非空则 pull.yml 改从该 tar docker load（需节点可见路径，如共享目录）；留空则 docker pull image
 model_path: /mnt/share_space/models/GLM-5.2-w4a8c8
 model_name: glm-52
