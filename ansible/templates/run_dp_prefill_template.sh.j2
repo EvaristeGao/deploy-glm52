@@ -7,6 +7,8 @@
 # 运行时引擎差异（端口/rank/dp/tp 等）由 launch_online_dp.py 以位置参数 $1..$7 传入，
 #   与 deploy.sh 原模板 templates/run_dp_prefill_template.sh 一致（$1 可见卡、$2 端口、$3 dp_size、
 #   $4 dp_rank、$5 dp_address、$6 rpc_port、$7 tp_size）。
+{# 可读性约定：Jinja 块标签一律顶格独立成行（Ansible 模板 trim_blocks 会吃掉标签行换行，
+   渲染结果无多余空行）；同一行内仅取值的分支用内联条件表达式（'A' if cond else 'B'）。 #}
 nic_name="{{ nic }}"
 local_ip="{{ local_ip.stdout }}"
 
@@ -15,22 +17,39 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
-{% if cluster_type == "a3" %}export OMP_NUM_THREADS=1
-{% else %}export OMP_NUM_THREADS=10
-{% endif %}export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-{% if cluster_type != "a3" %}export VLLM_ASCEND_ENABLE_MLAPO=1
-{% endif %}{% if cluster_type == "a3" %}export HCCL_BUFFSIZE=400
-{% else %}export HCCL_BUFFSIZE=256
-{% endif %}export TASK_QUEUE_ENABLE=1
+{# ---- 环境变量（a2/a3 每集群差异；a3 走灵衢 UB，a2 为常规昇腾栈） ---- #}
+{% if cluster_type == "a3" %}
+export OMP_NUM_THREADS=1
+{% else %}
+export OMP_NUM_THREADS=10
+{% endif %}
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+{% if cluster_type != "a3" %}
+export VLLM_ASCEND_ENABLE_MLAPO=1
+{% endif %}
+{% if cluster_type == "a3" %}
+export HCCL_BUFFSIZE=400
+{% else %}
+export HCCL_BUFFSIZE=256
+{% endif %}
+export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-{% if cluster_type != "a3" %}export VLLM_USE_V1=1
-{% endif %}export ASCEND_RT_VISIBLE_DEVICES=$1
-{% if cluster_type == "a3" %}export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-{% else %}export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:/usr/local/lib:$LD_LIBRARY_PATH
-{% endif %}{% if cluster_type != "a3" %}export ASCEND_AGGREGATE_ENABLE=1
+{% if cluster_type != "a3" %}
+export VLLM_USE_V1=1
+{% endif %}
+export ASCEND_RT_VISIBLE_DEVICES=$1
+{% if cluster_type == "a3" %}
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+{% else %}
+export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:/usr/local/lib:$LD_LIBRARY_PATH
+{% endif %}
+{% if cluster_type != "a3" %}
+export ASCEND_AGGREGATE_ENABLE=1
 export ASCEND_TRANSPORT_PRINT=1
-{% endif %}export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-{% if cluster_type == "a3" %}export ASCEND_A3_ENABLE=1
+{% endif %}
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+{% if cluster_type == "a3" %}
+export ASCEND_A3_ENABLE=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export HCCL_TRANSFER_TIMEOUT=600
 export HCCL_EXEC_TIMEOUT=3600
@@ -40,9 +59,17 @@ export HCCL_CONNECT_TIMEOUT=3600
 export PYTHONHASHSEED=0
 export MOONCAKE_CONFIG_PATH="{{ mooncake_config_path }}"
 # cluster_type = a2 时启用 RoCE；a3 走灵衢 UB，不启用
-{% if cluster_type == "a2" %}export HCCL_INTRA_ROCE_ENABLE=1
-{% endif %}export ACL_OP_INIT_MODE=1
+{% if cluster_type == "a2" %}
+export HCCL_INTRA_ROCE_ENABLE=1
+{% endif %}
+export ACL_OP_INIT_MODE=1
 
+{# ---- vllm serve 集群差异参数（a3 灵衢 UB 精简推理配置；a2 完整推理配置） ---- #}
+{% if cluster_type == "a3" %}
+{% set additional_config = '{"enable_dsa_cp":true, "enable_sparse_li_c8": true}' %}
+{% else %}
+{% set additional_config = '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}' %}
+{% endif %}
 vllm serve {{ model_path }} \
     --host 0.0.0.0 \
     --port $2 \
@@ -54,16 +81,20 @@ vllm serve {{ model_path }} \
     --enable-expert-parallel \
     --enable-prefix-caching \
     --seed 1024 \
-    {% if cluster_type != "a3" %}--enable-chunked-prefill \
+{% if cluster_type != "a3" %}
+    --enable-chunked-prefill \
     --async-scheduling \
-    {% endif %}--served-model-name {{ served_model_name }} \
+{% endif %}
+    --served-model-name {{ served_model_name }} \
     --max-model-len {{ max_model_len }} \
     --max-num-batched-tokens 8192 \
     --trust-remote-code \
-    --max-num-seqs {% if cluster_type == "a3" %}64{% else %}256{% endif %} \
-    --gpu-memory-utilization {% if cluster_type == "a3" %}0.92{% else %}0.95{% endif %} \
-    {% if cluster_type != "a3" %}--safetensors-load-strategy prefetch \
-    {% endif %}--quantization ascend \
+    --max-num-seqs {{ '64' if cluster_type == "a3" else '256' }} \
+    --gpu-memory-utilization {{ '0.92' if cluster_type == "a3" else '0.95' }} \
+{% if cluster_type != "a3" %}
+    --safetensors-load-strategy prefetch \
+{% endif %}
+    --quantization ascend \
     --enforce-eager \
     --enable-auto-tool-choice \
     --tool-call-parser glm47 \
@@ -95,5 +126,5 @@ vllm serve {{ model_path }} \
         ]
     }
     }' \
-    --additional-config {% if cluster_type == "a3" %}'{"enable_dsa_cp":true, "enable_sparse_li_c8": true}'{% else %}'{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false}'{% endif %} \
+    --additional-config '{{ additional_config }}' \
     --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager":true}'

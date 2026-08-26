@@ -26,8 +26,11 @@ TPL_DIR = os.path.join(ANSIBLE_DIR, "templates")
 
 
 def _env():
+    # 与 Ansible 模板渲染一致（ansible/_internal/_templating/_jinja_bits.py: trim_blocks=True）：
+    #   块标签独立成行时其尾部换行被吃掉，渲染输出无空行——否则本测试渲染出的空行是
+    #   实际 gen 不会产生的假象，测不出模板换行回归。
     # StrictUndefined：模板里引用了未提供的变量会直接抛错，杜绝静默漏替换
-    return Environment(loader=FileSystemLoader(TPL_DIR), undefined=StrictUndefined)
+    return Environment(loader=FileSystemLoader(TPL_DIR), undefined=StrictUndefined, trim_blocks=True)
 
 
 def _ctx(role, cluster_type=None):
@@ -195,3 +198,30 @@ def test_decode_speculative_and_kv():
     assert "export VLLM_HOST_IP=$local_ip" in out
     # decode 侧 enable_flashcomm1=false（prefill 侧 true）
     assert "enable_flashcomm1\": false" in out
+
+
+def test_a2_env_branch_not_leaked():
+    """a2/a3 环境变量分支互不泄漏：只保留本集群分支的导出。
+    用按行精确匹配（'export OMP_NUM_THREADS=1' 是 '...=10' 的子串，不能做 substring 断言）。"""
+    lines = _render_prefill().splitlines()
+    assert "export OMP_NUM_THREADS=10" in lines
+    assert "export OMP_NUM_THREADS=1" not in lines
+    assert "export HCCL_BUFFSIZE=256" in lines
+    assert "export HCCL_BUFFSIZE=400" not in lines
+    assert "export ASCEND_A3_ENABLE" not in lines
+    lines_a3 = _render_prefill(cluster_type="a3").splitlines()
+    assert "export OMP_NUM_THREADS=1" in lines_a3
+    assert "export OMP_NUM_THREADS=10" not in lines_a3
+    assert "export HCCL_BUFFSIZE=400" in lines_a3
+    assert "export ASCEND_A3_ENABLE=1" in lines_a3
+
+
+def test_rendered_output_clean_newlines():
+    """渲染结果换行干净（Ansible trim_blocks 吃掉块标签行换行）：
+    无连续空行、无纯空白行——保证独立成行的块标签不会污染输出。"""
+    for out in (_render_prefill(), _render_decode()):
+        lines = out.splitlines()
+        for i in range(len(lines) - 1):
+            assert not (lines[i] == "" and lines[i + 1] == ""), f"发现连续空行 @{i}"
+        for i, ln in enumerate(lines):
+            assert not (ln and not ln.strip()), f"发现纯空白行 @{i}"
