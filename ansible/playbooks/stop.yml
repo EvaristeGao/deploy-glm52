@@ -39,3 +39,7 @@
     - name: 删 mooncake 容器（master 节点，幂等）
       when: mooncake.enabled and inventory_hostname in mooncake_master_nodes
       shell: docker rm -f mooncake-{{ inventory_hostname }} 2>/dev/null || true
+
+    - name: 删独立 haproxy 容器（haproxy.nodes，幂等；仅 standalone）
+      when: mooncake.enabled and mooncake.ha.enable_ha and haproxy.mode == 'standalone' and inventory_hostname in haproxy.nodes
+      shell: docker rm -f haproxy-{{ inventory_hostname }} 2>/dev/null || true

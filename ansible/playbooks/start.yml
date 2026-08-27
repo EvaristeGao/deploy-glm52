@@ -159,7 +159,7 @@
         docker run -itd --name haproxy-{{ inventory_hostname }} --network host \
           --entrypoint=bash \
           -v {{ etcd.certs_dir }}:/etc/pki/etcd/certs \
-          {{ mooncake.image }}
+          {{ haproxy.image }}
       tags: haproxy
 
     - name: docker cp 脚本进独立 haproxy 容器并生成/启动（standalone 端口 {{ haproxy.port }}）

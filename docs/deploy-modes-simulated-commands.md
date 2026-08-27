@@ -3,6 +3,7 @@
 > 由 `ansible/simulate_modes.py` 生成：jinja2 复刻 Ansible 渲染（when 判定 / set_fact 派生 / shell·template·copy 渲染），每个 shell 命令跑 `bash -n`。
 > 基座：a2 inventory（8 节点，`ip` = 真实网卡 IP 116.204.x）。复现：`cd ansible && .venv/bin/python simulate_modes.py`
 > 四模式 shell 命令全部 bash 语法通过：内嵌 69 / 独立 64 / 单主 51 / 无 kvpool 41。
+> standalone 独立 haproxy 容器镜像 = `haproxy.image`（`haproxy-etcd:latest`，构建自 image_build/Dockerfile_ha）。
 
 ---
 
@@ -693,19 +694,19 @@
     | docker run -itd --name haproxy-p0 --network host \
     |   --entrypoint=bash \
     |   -v /mnt/share_space/certs:/etc/pki/etcd/certs \
-    |   quay.io/ascend/vllm-ascend:v0.23.0rc1-mooncake
+    |   haproxy-etcd:latest
   执行于 [p1]  bash-OK
     | docker rm -f haproxy-p1 2>/dev/null || true
     | docker run -itd --name haproxy-p1 --network host \
     |   --entrypoint=bash \
     |   -v /mnt/share_space/certs:/etc/pki/etcd/certs \
-    |   quay.io/ascend/vllm-ascend:v0.23.0rc1-mooncake
+    |   haproxy-etcd:latest
   执行于 [p2]  bash-OK
     | docker rm -f haproxy-p2 2>/dev/null || true
     | docker run -itd --name haproxy-p2 --network host \
     |   --entrypoint=bash \
     |   -v /mnt/share_space/certs:/etc/pki/etcd/certs \
-    |   quay.io/ascend/vllm-ascend:v0.23.0rc1-mooncake
+    |   haproxy-etcd:latest
 
 ### 任务 14. docker cp 脚本进独立 haproxy 容器并生成/启动（standalone 端口 12379）
   执行于 [p0]  bash-OK

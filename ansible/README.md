@@ -84,7 +84,7 @@ A2/A3 切换：`-i` 指不同 inventory 即可，互不影响。
 | 无 kvpool | false | — | — | 无 master/etcd/haproxy | 直连 MooncakeConnectorV1（`engine_id` prefill=0/decode=2、`use_ascend_direct: true`） |
 
 - **校验**：`enable_ha=true` 要求 `enabled=true`（etcd/haproxy 为 mooncake_master 选主服务），非法组合 `start.yml` 开头 `assert` 拦截。
-- **haproxy 形态**：`per_container`（默认）在每个 mooncake/引擎容器内嵌 haproxy（master→`cache_master_port`、引擎→`pd_port`）；`standalone` 在 `haproxy.nodes`（3 节点）各起一个独立 haproxy 容器监听统一 `haproxy.port`，组件经 3 节点 `IP:port` 访问。
+- **haproxy 形态**：`per_container`（默认）在每个 mooncake/引擎容器内嵌 haproxy（master→`cache_master_port`、引擎→`pd_port`）；`standalone` 在 `haproxy.nodes`（3 节点）各起一个独立 haproxy 容器（镜像 `haproxy.image`，构建自 `image_build/Dockerfile_ha`）监听统一 `haproxy.port`，组件经 3 节点 `IP:port` 访问。
 - **生效点**：`start.yml`（etcd/mooncake/haproxy 容器、mooncake_master 任务门控与命令分支）、`gen.yml`（mooncake.json 三态渲染，无 kvpool 不生成，HA 时 `etcd://` 地址按 haproxy 形态二选一）、引擎模板（kv-transfer-config 两套 JSON + MOONCAKE_CONFIG_PATH 门控）、`check/pull/stop`（etcd/mooncake 镜像与容器按开关）、`status/logs`（无 mooncake 引用，不受影响）。
 - ⚠️ **待实机确认**：`无 kvpool`（直连 PD 分离）在 w4a8c8 上官方标注有已知精度问题；`单主` 的 mooncake_master 调用与直连 `master_server_address`、`standalone` 下组件连 3 个 haproxy 的 `etcd://` 多地址形态，均需实机验证。
 

@@ -72,7 +72,7 @@
 ### 4.2 模式 B：kvpool HA · 独立 haproxy
 
 - **gen.yml**：`mooncake.json` → `master_server_address: etcd://116.204.91.141:12379,113.44.111.127:12379,121.37.88.17:12379`（3 个独立 haproxy）。
-- **独立 haproxy 容器**（haproxy-p0/p1/p2，复用 mooncake.image 含 haproxy，挂 etcd 证书）：
+- **独立 haproxy 容器**（haproxy-p0/p1/p2，镜像 `haproxy.image`=`haproxy-etcd:latest`（构建自 `image_build/Dockerfile_ha`），挂 etcd 证书）：
   ```bash
   docker run -itd --name haproxy-p0 --network host \
     --entrypoint=bash \

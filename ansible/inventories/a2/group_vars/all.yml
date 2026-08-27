@@ -66,6 +66,7 @@ etcd:
 #   standalone：3 个独立 haproxy 容器（nodes），组件经 3 节点 IP:port 访问 etcd
 haproxy:
   mode: per_container         # per_container | standalone
+  image: haproxy-etcd:latest  # standalone：独立 haproxy 容器镜像（构建自 image_build/Dockerfile_ha，改成本地镜像名）
   cache_master_port: 12379   # per_container：mooncake 容器内 haproxy 端口（master -etcd_endpoints 指 127.0.0.1:此端口）
   pd_port: 12489             # per_container：P/D 引擎容器内 haproxy 端口
   nodes: [p0, p1, p2]        # standalone：3 个独立 haproxy 容器节点
