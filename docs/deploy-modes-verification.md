@@ -2,6 +2,8 @@
 
 > 无实机、纯渲染模拟。基座：`a2` inventory（8 节点，`ip` = 真实网卡 IP `116.204.x`，`ansible_host` = SSH 目标）。
 > 基于当前代码（含 `599a1c6` 起的 ip 字段 / 部署模式 / standalone haproxy 改动）。
+>
+> 📄 **完整分步命令见 [deploy-modes-simulated-commands.md](deploy-modes-simulated-commands.md)**（4 模式 × start/gen 全部任务的完整渲染命令，含每个 shell 的 `bash -n` 结果）；本文是核对结论。
 
 ## 1. 方法
 

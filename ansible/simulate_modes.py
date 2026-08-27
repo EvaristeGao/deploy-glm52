@@ -184,6 +184,7 @@ def simulate_start(mode_cfg):
                 ctx["inventory_hostname"] = "localhost"
             tv = {k: (val(v, ctx) if isinstance(v, str) else v) for k, v in t.get("vars", {}).items()}
             ctx.update(tv)
+            rname = rt(name, ctx)   # 渲染任务名（含 {{ }}）
 
             if "set_fact" in t:
                 for k, v in t["set_fact"].items():
@@ -203,11 +204,11 @@ def simulate_start(mode_cfg):
                     if not item_when_ok(t, item, ictx):
                         continue
                     cmd = rt(t["shell"], ictx)
-                    results.append(("shell", h, name + f" [{item}]", cmd))
+                    results.append(("shell", h, rname + f" [{item}]", cmd))
                 continue
             if "shell" in t:
                 cmd = rt(t["shell"], ctx)
-                results.append(("shell", h, name, cmd))
+                results.append(("shell", h, rname, cmd))
             elif "copy" in t and "loop" in t:
                 for item in loop_items(t, ctx):
                     ictx = dict(ctx, item=item)
@@ -219,27 +220,27 @@ def simulate_start(mode_cfg):
                     else:
                         src = rt(item, ictx)
                         dest = "/tmp/" + os.path.basename(str(item))
-                    results.append(("copy", h, name + f" [{item}]",
+                    results.append(("copy", h, rname + f" [{item}]",
                                     f"copy {src} → {dest}"))
             elif "copy" in t:
-                results.append(("copy", h, name, rt(t["copy"].get("content", ""), ctx)))
+                results.append(("copy", h, rname, rt(t["copy"].get("content", ""), ctx)))
             elif "stat" in t and "register" in t:
                 shared[t["register"]] = {"stat": {"exists": True}}  # 假设已先跑 gen 生成
-                results.append(("note", h, name, "stat（假设 generated 已由 gen 生成，exists=true）"))
+                results.append(("note", h, rname, "stat（假设 generated 已由 gen 生成，exists=true）"))
             elif "assert" in t:
                 ok = all(ev(c, ctx) is True for c in t["assert"]["that"])
-                results.append(("note", h, name,
+                results.append(("note", h, rname,
                                 f"assert {t['assert']['that']} → {'通过 ✅' if ok else '失败 ❌'}"
                                 + (f" —— {t['assert'].get('fail_msg', '')}" if not ok else "")))
             elif "fail" in t:
-                results.append(("note", h, name, "fail（when 成立才会触发；正常流程应跳过）"))
+                results.append(("note", h, rname, "fail（when 成立才会触发；正常流程应跳过）"))
             elif "template" in t:
                 tsrc = rt(t["template"]["src"], ctx).replace("../templates/", "")
                 out = env.get_template(tsrc).render(**ctx)
                 markers = "\n".join("      | " + s for s in tpl_markers(out))
-                results.append(("template", h, name, f"[{tsrc}] {len(out)} 字符\n{markers}"))
+                results.append(("template", h, rname, f"[{tsrc}] {len(out)} 字符\n{markers}"))
             else:
-                results.append(("note", h, name, "(非命令任务：file/uri 等，跳过渲染)"))
+                results.append(("note", h, rname, "(非命令任务：file/uri 等，跳过渲染)"))
     return facts, results
 
 
@@ -273,53 +274,72 @@ def simulate_gen(mode_cfg):
     return results
 
 
-def fmt(mode_key, mode_cfg, mode_label):
+def report(mode_key, mode_cfg, mode_label):
+    from collections import OrderedDict
     print("\n" + "=" * 90)
     print(f"模式: {mode_key} — {mode_label}")
     print(f"   enabled={mode_cfg['enabled']}  enable_ha={mode_cfg['enable_ha']}  haproxy.mode={mode_cfg['haproxy_mode']}")
     print("=" * 90)
 
+    # ---------- gen.yml ----------
     gen = simulate_gen(mode_cfg)
-    print("\n-- gen.yml --")
+    print("\n## gen.yml")
+    gg = OrderedDict()
     for kind, host, name, cmd in gen:
+        gg.setdefault(name, []).append((kind, cmd))
+    for name, entries in gg.items():
+        kind = entries[0][0]
         if kind == "skip":
-            print(f"  [跳过] {name}")
-        elif kind == "template":
-            print(f"  [渲染模板] {name}")
-            for ln in cmd.splitlines():
-                print(f"      {ln}")
+            print(f"- [跳过] {name}")
+            continue
+        if kind == "template":
+            print(f"- {name}")
+            for k, cmd in entries:
+                first = cmd.splitlines()[0]
+                print(f"    {first}")
         elif kind == "copy":
-            print(f"  [渲染 mooncake.json]")
-            for ln in cmd.splitlines():
-                print(f"      | {ln}")
+            print(f"- {name}")
+            for k, cmd in entries:
+                for ln in cmd.splitlines():
+                    print(f"    | {ln}")
         else:
-            print(f"  [{kind}] {name} | {cmd}")
+            print(f"- {name}：{entries[0][1]}")
 
+    # ---------- start.yml ----------
     facts, start = simulate_start(mode_cfg)
-    print("\n-- start.yml 各节点任务 --")
-    shell_fail = []
+    print("\n## start.yml")
+    sg = OrderedDict()
     for kind, host, name, cmd in start:
-        if kind == "shell":
-            ok = bash_ok(cmd)
-            if not ok:
-                shell_fail.append((host, name))
-            tag = "bash-OK" if ok else "bash-FAIL"
-            print(f"  [shell] {host:10s} {name}")
-            print(f"      {tag}")
-            for ln in cmd.splitlines():
-                print(f"      | {ln}")
-        elif kind == "template":
-            print(f"  [tmpl ] {host:10s} {name}")
-            for ln in cmd.splitlines():
-                print(f"      {ln}")
-        elif kind == "copy":
-            print(f"  [copy ] {host:10s} {name} → {cmd}")
-        else:
-            print(f"  [{kind:<5}] {host:10s} {name}")
-            if cmd and not cmd.startswith("("):
-                print(f"      {cmd}")
+        sg.setdefault(name, []).append((kind, host, cmd))
+    shell_fail = []
+    for idx, (name, entries) in enumerate(sg.items(), 1):
+        kind = entries[0][0]
+        # 按 cmd 去重，列出 host
+        by_cmd = OrderedDict()
+        for k, h, c in entries:
+            by_cmd.setdefault(c, []).append(h)
+        print(f"\n### 任务 {idx}. {name}")
+        for cmd, hosts in by_cmd.items():
+            if kind == "shell":
+                ok = bash_ok(cmd)
+                if not ok:
+                    shell_fail.append((hosts, name))
+                tag = "bash-OK" if ok else "bash-FAIL"
+                print(f"  执行于 [{', '.join(hosts)}]  {tag}")
+                for ln in cmd.splitlines():
+                    print(f"    | {ln}")
+            elif kind == "template":
+                print(f"  ({cmd.splitlines()[0]})")
+                for ln in cmd.splitlines()[1:]:
+                    print(f"    {ln}")
+            elif kind == "copy":
+                print(f"  执行于 [{', '.join(hosts)}]")
+                for ln in cmd.splitlines():
+                    print(f"    | {ln}")
+            else:  # note
+                print(f"  [{', '.join(hosts)}] {cmd}")
     total_shell = sum(1 for k, *_ in start if k == "shell")
-    print(f"\n  —— 汇总：shell 命令 {total_shell} 条，语法失败 {len(shell_fail)} 条"
+    print(f"\n—— 汇总：shell 命令 {total_shell} 条，语法失败 {len(shell_fail)} 条"
           + (f"：{shell_fail}" if shell_fail else " ✅"))
 
 
@@ -328,7 +348,7 @@ def main():
     for mk, cfg, label in MODES:
         if key and key.lower() not in mk:
             continue
-        fmt(mk, cfg, label)
+        report(mk, cfg, label)
 
 
 if __name__ == "__main__":
