@@ -98,7 +98,7 @@
         etcd_initial_cluster: "{% for n in etcd.nodes %}s{{ loop.index }}=https://{{ hostvars[n].ip }}:{{ etcd.peer_port }}{% if not loop.last %},{% endif %}{% endfor %}"
         etcd_server_list: "{% for n in etcd.nodes %}{{ hostvars[n].ip }}:{{ etcd.client_port }}{% if not loop.last %};{% endif %}{% endfor %}"
         # master 的 -etcd_endpoints：per_container → 本机 haproxy；standalone → 3 个独立 haproxy
-        master_etcd_endpoints: "{% if haproxy.mode == 'standalone' %}{% for n in haproxy.nodes %}{{ hostvars[n].ip }}:{{ haproxy.port }}{% if not loop.last %},{% endif %}{% endfor %}{% else %}127.0.0.1:{{ haproxy.cache_master_port }}{% endif %}"
+        master_etcd_endpoints: "{% if haproxy.mode == 'standalone' %}{% for n in haproxy.nodes %}{{ hostvars[n].ip }}:{{ haproxy.port }}{% if not loop.last %};{% endif %}{% endfor %}{% else %}127.0.0.1:{{ haproxy.cache_master_port }}{% endif %}"
       when: mooncake.enabled and mooncake.ha.enable_ha
       tags: etcd
 
@@ -214,7 +214,7 @@
         docker exec -d mooncake-{{ inventory_hostname }} bash -c \
           'mooncake_master {% if mooncake.ha.enable_ha %}-enable_ha=true \
             {% endif %}--cluster_id=mooncake \
-            {% if mooncake.ha.enable_ha %}-etcd_endpoints {{ master_etcd_endpoints }} \
+            {% if mooncake.ha.enable_ha %}--etcd_endpoints="{{ master_etcd_endpoints }}" \
             {% endif %}--rpc-address {{ ip }} \
             -rpc_port={{ mooncake.ha.rpc_port }} \
             -metrics_port={{ mooncake.ha.metrics_port }} \

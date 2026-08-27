@@ -16,7 +16,7 @@
     # 引擎 mooncake.json 访问 etcd 的地址：
     #   per_container → etcd://127.0.0.1:<pd_port>（本机 P/D 容器内 haproxy）
     #   standalone    → etcd://<hp0>:<port>,<hp1>:<port>,<hp2>:<port>（3 个独立 haproxy）
-    haproxy_server_addrs: "{% for n in haproxy.nodes %}{{ hostvars[n].ip }}:{{ haproxy.port }}{% if not loop.last %},{% endif %}{% endfor %}"
+    haproxy_server_addrs: "{% for n in haproxy.nodes %}{{ hostvars[n].ip }}:{{ haproxy.port }}{% if not loop.last %};{% endif %}{% endfor %}"
     mooncake_etcd_addr: "{{ 'etcd://' ~ haproxy_server_addrs if haproxy.mode == 'standalone' else 'etcd://127.0.0.1:' ~ haproxy.pd_port }}"
   tasks:
     - name: 确保 ansible/generated/ 目录存在（generated/ 在 .gitignore，首次运行需创建）
@@ -56,7 +56,6 @@
             "metadata_server": "P2PHANDSHAKE",
             "protocol": "ascend",
             "device_name": "",
-            "metadata_server": "{{ mooncake_etcd_addr }}",
             "master_server_address": "{{ mooncake_etcd_addr }}",
             "global_segment_size": "{{ mooncake.global_segment_size }}",
             "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }}

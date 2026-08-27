@@ -128,8 +128,9 @@ def test_prefill_kv_transfer_config_multi_connector():
 
 def test_prefill_model_and_served_name():
     """模型路径与 served-model-name、max-model-len 正确替换，且核心参数无遗漏。"""
+    gv = yaml.safe_load(open(GV_FILE))   # 用 group_vars 当前 model_path，避免路径改动后硬编码失效
     out = _render_prefill()
-    assert "vllm serve /mnt/share_space/models/GLM-5.2-w4a8c8" in out
+    assert f"vllm serve {gv['model_path']}" in out
     assert "--served-model-name glm-52" in out
     assert "--max-model-len 200000" in out
     # 关键推理参数须保留（对照 generated/run_dp_template_p0.sh）
