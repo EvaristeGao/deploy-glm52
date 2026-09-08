@@ -321,17 +321,35 @@
     # 安全点：容器 --pid=host，pkill 锚定 '^python3 .*load_balance_proxy_server_example'，
     #   避免误杀控制机 ssh 会话（其 cmdline 以 ssh 开头，不匹配）。
 
-    - name: 生成 proxy 端点（Jinja2 生成；run_once 于 p0 并回收 facts）
+    - name: 校验 proxy 白名单节点名（proxy.prefill_nodes/decode_nodes 只能填对应组节点名，非法 fail-fast）
+      run_once: true
+      assert:
+        that:
+          - proxy.prefill_nodes | default([]) | difference(groups['prefill']) | length == 0
+          - proxy.decode_nodes | default([]) | difference(groups['decode']) | length == 0
+        fail_msg: >-
+          proxy.prefill_nodes/decode_nodes 含 inventory 中不存在的节点名：
+          {{ (proxy.prefill_nodes | default([])) | difference(groups['prefill']) | join(' ') }}
+          {{ (proxy.decode_nodes | default([])) | difference(groups['decode']) | join(' ') }}
+      tags: proxy
+
+    - name: 生成 proxy 端点（Jinja2 生成；run_once 于 p0 并回收 facts；白名单解析见 vars pn/dn）
       run_once: true
       delegate_to: p0
       delegate_facts: yes
+      vars:
+        # 接入白名单（group_vars proxy.prefill_nodes/decode_nodes）：undefined 或空列表都回退全量
+        # （default(x, true) 对 falsy 也生效）。放 vars: 而非 set_fact 键——同任务模板先整体
+        # 渲染再执行，键间不能引用；vars: 渲染期已入作用域。
+        pn: "{{ proxy.prefill_nodes | default(groups['prefill'], true) }}"
+        dn: "{{ proxy.decode_nodes | default(groups['decode'], true) }}"
       set_fact:
         proxy_host: "{{ hostvars[groups['proxy'][0]].ip }}"
         proxy_port: "{{ proxy.port | string }}"
-        prefiller_hosts: "{% set out = [] -%}{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ip) -%}{% endfor -%}{{ out | join(' ') }}"
-        prefiller_ports: "{% set out = [] -%}{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}{% set _ = out.append((pd_cluster.prefill.base_port + r) | string) -%}{% endfor -%}{{ out | join(' ') }}"
-        decoder_hosts: "{% set out = [] -%}{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ip) -%}{% endfor -%}{{ out | join(' ') }}"
-        decoder_ports: "{% set out = [] -%}{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}{% set _ = out.append((pd_cluster.decode.base_port + r) | string) -%}{% endfor -%}{{ out | join(' ') }}"
+        prefiller_hosts: "{% set out = [] -%}{% for h, r in pn | product(range(pd_cluster.prefill.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ip) -%}{% endfor -%}{{ out | join(' ') }}"
+        prefiller_ports: "{% set out = [] -%}{% for h, r in pn | product(range(pd_cluster.prefill.dp_size_local)) -%}{% set _ = out.append((pd_cluster.prefill.base_port + r) | string) -%}{% endfor -%}{{ out | join(' ') }}"
+        decoder_hosts: "{% set out = [] -%}{% for h, r in dn | product(range(pd_cluster.decode.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ip) -%}{% endfor -%}{{ out | join(' ') }}"
+        decoder_ports: "{% set out = [] -%}{% for h, r in dn | product(range(pd_cluster.decode.dp_size_local)) -%}{% set _ = out.append((pd_cluster.decode.base_port + r) | string) -%}{% endfor -%}{{ out | join(' ') }}"
       tags: proxy
 
     - name: 计算 proxy 日志路径（logs.dir 为空回退 /root，对照 deploy.sh PROXY_LOG）

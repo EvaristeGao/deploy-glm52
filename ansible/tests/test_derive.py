@@ -17,10 +17,17 @@ groups / hostvars / pd_cluster 派生，不依赖外部解析脚本。
 - proxy 端点：prefiller_hosts/ports、decoder_hosts/ports、proxy_host/port，
   供 load_balance_proxy 启动时注入。
 """
+import os
 from itertools import product as _itertools_product
 
-from jinja2 import StrictUndefined
+import yaml
+from jinja2 import Environment, StrictUndefined
 from jinja2.nativetypes import NativeEnvironment
+
+START_YML = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "playbooks", "start.yml",
+)
 
 
 # ---- 样例 A2 group_vars（内联，与 ansible/inventories/a2/group_vars/all.yml 一致）----
@@ -159,14 +166,20 @@ def _derive(inventory_hostname):
     return out
 
 
-def _new_env():
-    """返回与 Ansible 运行时一致的 NativeEnvironment。
+def _new_env(native=True):
+    """返回与 Ansible 运行时一致的 Jinja2 环境。
 
     Ansible 的 jinja2 环境额外提供 product 过滤（ansible.builtin），纯 jinja2 需
     手动注册，才能在本地等价模拟 playbook 里的 product 表达式。
+    native=False 用纯 Environment：NativeEnvironment 会把单节点输出字符串做
+    ast.literal_eval（如 "9081"→int），端点值实际是 shell 空格分隔字符串，纯
+    Environment 渲染更贴近实际。
     """
-    env = NativeEnvironment(undefined=StrictUndefined)
+    cls = NativeEnvironment if native else Environment
+    env = cls(undefined=StrictUndefined)
     env.filters["product"] = lambda *iterables: list(_itertools_product(*iterables))
+    # Ansible 内置集合过滤（proxy 白名单 assert 校验用）：difference = 差集
+    env.filters["difference"] = lambda a, b: [x for x in a if x not in b]
     return env
 
 
@@ -306,3 +319,86 @@ def test_cluster_level_vars():
         assert v["max_model_len"] == 200000
         assert v["cluster_type"] == "a2"
         assert v["model_path"] == "/mnt/share_space/models/GLM-5.2-w4a8c8"
+
+
+# ---- proxy 接入节点白名单（规格 docs/superpowers/specs/2026-09-08-proxy-nodes-whitelist-design.md）----
+# 直接渲染 playbooks/start.yml 里「生成 proxy 端点」「校验 proxy 白名单」任务的真实表达式，
+# 不在测试内复制镜像表达式（防两处漂移）。模拟 Ansible 语义：任务 vars:（pn/dn）先渲染注入
+# ctx，再渲染 set_fact / assert 各表达式（同任务键间不能引用，vars: 渲染期已入作用域）。
+
+
+def _playbook_task(name_prefix):
+    """从 start.yml 提取 name 以 name_prefix 开头的任务；找不到则断言失败。"""
+    with open(START_YML, encoding="utf-8") as f:
+        play = yaml.safe_load(f)
+    for t in play[0]["tasks"]:
+        if (t.get("name") or "").startswith(name_prefix):
+            return t
+    raise AssertionError(f"start.yml 未找到以 {name_prefix!r} 开头的任务")
+
+
+def _render_start_yml_endpoints(proxy=None):
+    """渲染 start.yml「生成 proxy 端点」任务的 vars: + set_fact 表达式。
+
+    双环境模拟真实 Ansible 语义：
+    - vars:（pn/dn 白名单）用 Native 渲染——Ansible 对纯 {{ }} 表达式保留原生类型，
+      列表必须原样进入循环（纯 Environment 会把列表字符串化成 "['p0']"，逐字符迭代）；
+    - set_fact 端点值用纯 Environment 渲染——模板含块标签，Ansible 结果是 shell 空格
+      分隔字符串（Native 会把单元素 join 结果 "9081" literal_eval 回 int）。
+
+    proxy 传 dict 覆盖 A2_GV['proxy'] 注入白名单配置（须含 port：StrictUndefined 下
+    proxy.port 缺失会渲染失败）。
+    """
+    t = _playbook_task("生成 proxy 端点")
+    native_env = _new_env(native=True)
+    str_env = _new_env(native=False)
+    ctx = dict(A2_GV, groups=GROUPS, hostvars=HOSTVARS)
+    if proxy is not None:
+        ctx["proxy"] = proxy
+    for name, tpl in (t.get("vars") or {}).items():
+        ctx[name] = native_env.from_string(tpl).render(**ctx)
+    return {k: str_env.from_string(v).render(**ctx) for k, v in (t.get("set_fact") or {}).items()}
+
+
+def test_start_yml_endpoints_decode_whitelist_d0():
+    """decode 白名单 [d0]：decoder 端点只含 d0 的 2 个实例，prefill 不受影响。"""
+    pe = _render_start_yml_endpoints(proxy={"port": 1999, "decode_nodes": ["d0"]})
+    assert pe["decoder_hosts"] == "192.168.0.127 192.168.0.127"
+    assert pe["decoder_ports"] == "9900 9901"
+    assert pe["prefiller_hosts"] == "192.168.0.245 192.168.0.15 192.168.0.160 192.168.0.91"
+    assert pe["prefiller_ports"] == "9081 9081 9081 9081"
+
+
+def test_start_yml_endpoints_prefill_whitelist_p0():
+    """prefill 白名单 [p0]：prefiller 端点只含 p0，decode 全量不受影响。"""
+    pe = _render_start_yml_endpoints(proxy={"port": 1999, "prefill_nodes": ["p0"]})
+    assert pe["prefiller_hosts"] == "192.168.0.245"
+    assert pe["prefiller_ports"] == "9081"
+    assert pe["decoder_hosts"] == (
+        "192.168.0.127 192.168.0.127 192.168.0.161 192.168.0.161 "
+        "192.168.0.154 192.168.0.154 192.168.0.140 192.168.0.140"
+    )
+    assert pe["decoder_ports"] == "9900 9901 9900 9901 9900 9901 9900 9901"
+
+
+def test_start_yml_endpoints_empty_whitelist_equals_full():
+    """白名单空列表 = 全量接入（与键缺省渲染结果逐项一致）。"""
+    pe_full = _render_start_yml_endpoints()
+    pe_empty = _render_start_yml_endpoints(
+        proxy={"port": 1999, "prefill_nodes": [], "decode_nodes": []}
+    )
+    assert pe_empty == pe_full
+
+
+def test_start_yml_whitelist_assert_rejects_unknown_node():
+    """start.yml assert：白名单含未知节点名 → 对应表达式判定 False（fail-fast）。"""
+    env = _new_env()
+    t = _playbook_task("校验 proxy 白名单")
+    ctx = dict(A2_GV, groups=GROUPS, hostvars=HOSTVARS)
+    ctx["proxy"] = {"port": 1999, "decode_nodes": ["d0", "dX"]}
+    results = [
+        # that: 是裸 Jinja2 表达式（Ansible 内部按表达式求值），本地模拟需包 {{ }}
+        env.from_string("{{ " + tpl.strip() + " }}").render(**ctx)
+        for tpl in t["assert"]["that"]
+    ]
+    assert results == [True, False]  # prefill 未配置→合法；decode 含 dX→非法
