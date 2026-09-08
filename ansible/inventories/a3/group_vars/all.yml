@@ -31,7 +31,11 @@ pd_cluster:
   decode:  { dp_size: 32, tp_size: 1, dp_size_local: 16, base_port: 9900, kv_port: 30100, rpc_port: 16600 }   # A3 实机: dp32 tp1, 每节点 16 引擎
   enable_prefix_caching: true
 
-proxy: { port: 8000 }
+proxy:
+  port: 8000
+  # 接入 proxy 的节点白名单（inventory 节点名）；空/未配置 = 全部接入
+  prefill_nodes: []          # 例: [p0]
+  decode_nodes: []           # 例: [d0] —— 模拟 decode 排队
 
 # mooncake / 部署模式（三态，详见 README「部署模式」）：
 #   enabled=true  + enable_ha=true  → kvpool HA（3 master + 3 etcd + haproxy），当前默认

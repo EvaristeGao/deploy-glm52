@@ -68,6 +68,7 @@ A2/A3 切换：`-i` 指不同 inventory 即可，互不影响。
 - `pd_cluster.prefill` / `pd_cluster.decode`：dp/tp/dp_size_local/base_port/kv_port/rpc_port
 - `model.path` / `model.served_model_name`：模型权重路径与 serve 名
 - `proxy.port`、`mooncake.port`：统一入口与 KV 池端口
+- `proxy.prefill_nodes` / `proxy.decode_nodes`：接入 proxy 的节点白名单（inventory 节点名，空/未配置 = 全量接入）；如 `decode_nodes: [d0]` 只让 d0 的实例接流量（模拟 decode 排队），改后重跑 `--tags proxy` 生效
 - `container.name` / `container.shm_size`：容器名与共享内存
 - `logs.dir` / `logs.vllm`：日志目录（建议共享目录，容器销毁后保留）+ 按节点 `vllm_{node}.log`
 - `ansible_*`：SSH 连接（user/私钥/重试/心跳）
@@ -159,9 +160,9 @@ ansible-playbook -i inventories/a2/inventory.yaml playbooks/start.yml --check
 ## 6. 测试报告
 
 ### 6.1 单元测试（不占卡）
-`cd ansible && .venv/bin/python -m pytest tests/ -q` → **21 passed**（0.37s）
-- `tests/test_derive.py`（11 用例）：节点参数派生、实例清单、proxy 端点生成
-- `tests/test_template_render.py`（10 用例）：Jinja2 模板渲染（含 decode 位置参数保留）
+`cd ansible && .venv/bin/python -m pytest tests/ -q` → **30 passed**（0.4s）
+- `tests/test_derive.py`（15 用例）：节点参数派生、实例清单、proxy 端点生成、proxy 接入节点白名单（直接渲染 start.yml 真实表达式）
+- `tests/test_template_render.py`（15 用例）：Jinja2 模板渲染（含 decode 位置参数保留）
 
 ### 6.2 实机验证
 - **原生化版本（本套件）**：完整端到端实机验证**通过**——全节点 failed=0，wait_ready **13/13 就绪**（4 prefill + 8 decode + proxy），proxy healthcheck `{"status":"ok","prefill_instances":4,"decode_instances":8}`，内建冒烟通过（首次 POST 因 KV 预热重试后成功），端到端请求 HTTP 200、`fingerprint vllm-0.23.0-tp4-dp8`（decode 参与，P/D 分离链路真实工作），预热后单请求约 2s。
