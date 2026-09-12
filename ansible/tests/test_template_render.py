@@ -16,8 +16,10 @@
 """
 import os
 
+import pytest
 import yaml
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from jinja2 import Environment, FileSystemLoader, StrictUndefined, Undefined
+from jinja2.nativetypes import NativeEnvironment
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ANSIBLE_DIR = os.path.join(PROJECT_ROOT, "ansible")
@@ -38,8 +40,11 @@ def _ctx(role, cluster_type=None, mooncake_enabled=None):
     role ∈ {prefill, decode}；运行时参数（$1..$7）不进 ctx——它们由
     launch_online_dp.py 按每引擎位置传入，模板只保留部署期确定的变量。
     cluster_type 可覆盖 group_vars 值（测 RoCE 开关）；
-    mooncake_enabled 可覆盖 group_vars 的 kvpool 开关（测直连 MooncakeConnectorV1 分支）。"""
-    gv = yaml.safe_load(open(GV_FILE))
+    mooncake_enabled 可覆盖 group_vars 的 kvpool 开关（测直连 MooncakeConnectorV1 分支）。
+    
+    group_vars 含有 Jinja 表达式（deploy_config→{_52,_53}→_active→pd_cluster 等），
+    用 _gv() 已展开为原生 Python 类型。"""
+    gv = _gv()
     pd = gv["pd_cluster"]
     return {
         # 节点级变量：nic 取自 A2 inventory 节点（host 级）；ip 取自 inventory 静态字段（真实网卡 IP）
@@ -58,6 +63,10 @@ def _ctx(role, cluster_type=None, mooncake_enabled=None):
         "decode_tp": pd["decode"]["tp_size"],
         "mooncake_config_path": "/root/pd/mooncake.json",
         "mooncake": {"enabled": gv["mooncake"]["enabled"] if mooncake_enabled is None else mooncake_enabled},
+        # GLM-5.3 1MB 新功能嵌套变量（模板引用 pd_cluster.*/runtime/profiler）
+        "pd_cluster": pd,
+        "runtime": gv.get("runtime", {}),
+        "profiler": gv.get("profiler", {}),
     }
 
 
@@ -115,30 +124,33 @@ def test_prefill_roce_enabled_for_a2():
 
 def test_prefill_kv_transfer_config_multi_connector():
     """kv-transfer-config 完整保留：MultiConnector + MooncakeConnectorV1 + AscendStoreConnector。"""
-    out = _render_prefill()
+    gv = _gv(); pd = gv["pd_cluster"]
+    out = _render_prefill(mooncake_enabled=True)
     assert '"kv_connector": "MultiConnector"' in out
     assert '"kv_role": "kv_producer"' in out
     assert '"kv_connector": "MooncakeConnectorV1"' in out
     assert '"kv_connector": "AscendStoreConnector"' in out
     assert '"kv_port": "30000"' in out
-    # 跨角色 dp/tp 正确填入
-    assert '"prefill": { "dp_size": 4, "tp_size": 8 }' in out
-    assert '"decode": { "dp_size": 8, "tp_size": 4 }' in out
+    # 跨角色 dp/tp 正确填入（从 group_vars 动态读取，不硬编码）
+    assert f'"prefill": {{ "dp_size": {pd["prefill"]["dp_size"]}, "tp_size": {pd["prefill"]["tp_size"]} }}' in out
+    assert f'"decode": {{ "dp_size": {pd["decode"]["dp_size"]}, "tp_size": {pd["decode"]["tp_size"]} }}' in out
 
 
 def test_prefill_model_and_served_name():
     """模型路径与 served-model-name、max-model-len 正确替换，且核心参数无遗漏。"""
-    gv = yaml.safe_load(open(GV_FILE))   # 用 group_vars 当前 model_path，避免路径改动后硬编码失效
+    gv = _gv()   # 用 group_vars 当前值，避免硬编码失效
     out = _render_prefill()
     assert f"vllm serve {gv['model_path']}" in out
-    assert "--served-model-name glm-52" in out
-    assert "--max-model-len 200000" in out
-    # 关键推理参数须保留（对照 generated/run_dp_template_p0.sh）
+    assert f"--served-model-name {gv['model']['served_model_name']}" in out
+    assert f"--max-model-len {gv['pd_cluster']['max_model_len']}" in out
+    pd = gv["pd_cluster"]
+    # 关键推理参数须保留（对照 generated/run_dp_template_p0.sh；gpu-mem 未配置时用模板默认 a2=0.95）
+    gpu_mem = pd["prefill"].get("gpu_memory_utilization", "0.95")
     for flag in (
         "--enable-expert-parallel",
         "--enable-prefix-caching",
         "--enable-chunked-prefill",
-        "--gpu-memory-utilization 0.95",
+        f"--gpu-memory-utilization {gpu_mem}",
         "--quantization ascend",
         "--tool-call-parser glm47",
         "--reasoning-parser glm45",
@@ -171,7 +183,7 @@ def test_decode_runtime_args_are_positional():
 
 def test_decode_is_kv_consumer_with_async_load():
     """decode 特有内容：kv_role=kv_consumer、AscendStore load_async: true。"""
-    out = _render_decode()
+    out = _render_decode(mooncake_enabled=True)
     assert '"kv_role": "kv_consumer"' in out
     assert '"load_async": true' in out
 
@@ -235,34 +247,38 @@ def test_rendered_output_clean_newlines():
 
 def test_kvpool_on_keeps_mooncake_config_path():
     """kvpool 开启（默认）：导出 MOONCAKE_CONFIG_PATH 且走 MultiConnector。"""
-    out = _render_prefill()
+    out = _render_prefill(mooncake_enabled=True)
     assert 'export MOONCAKE_CONFIG_PATH="/root/pd/mooncake.json"' in out
     assert '"kv_connector": "MultiConnector"' in out
 
 
 def test_kvpool_off_prefill_direct_mooncake():
-    """kvpool 关闭：prefill 用直连 MooncakeConnectorV1（engine_id=0 + use_ascend_direct），
+    """kvpool 关闭：prefill 用直连 MooncakeConnectorV1（engine_id 可配 + use_ascend_direct），
     无 MultiConnector / AscendStoreConnector / MOONCAKE_CONFIG_PATH。"""
+    gv = _gv(); pd = gv["pd_cluster"]
     out = _render_prefill(mooncake_enabled=False)
     assert '"kv_connector": "MooncakeConnectorV1"' in out
     assert '"kv_role": "kv_producer"' in out
-    assert '"engine_id": "0"' in out
+    # engine_id 未配置时模板默认 prefill=0
+    assert f'"engine_id": "{pd["prefill"].get("engine_id", "0")}"' in out
     assert '"use_ascend_direct": true' in out
     assert '"kv_connector": "MultiConnector"' not in out
     assert "AscendStoreConnector" not in out
     assert "MOONCAKE_CONFIG_PATH" not in out
-    # 直连仍保留 kv_port + P/D 并行度
+    # 直连仍保留 kv_port + P/D 并行度（从 group_vars 动态读取）
     assert '"kv_port": "30000"' in out
-    assert '"prefill": { "dp_size": 4, "tp_size": 8 }' in out
-    assert '"decode": { "dp_size": 8, "tp_size": 4 }' in out
+    assert f'"prefill": {{ "dp_size": {pd["prefill"]["dp_size"]}, "tp_size": {pd["prefill"]["tp_size"]} }}' in out
+    assert f'"decode": {{ "dp_size": {pd["decode"]["dp_size"]}, "tp_size": {pd["decode"]["tp_size"]} }}' in out
 
 
 def test_kvpool_off_decode_direct_mooncake():
-    """kvpool 关闭：decode 用直连 MooncakeConnectorV1（engine_id=2），仍 kv_consumer。"""
+    """kvpool 关闭：decode 用直连 MooncakeConnectorV1（engine_id 可配），仍 kv_consumer。"""
+    gv = _gv(); pd = gv["pd_cluster"]
     out = _render_decode(mooncake_enabled=False)
     assert '"kv_connector": "MooncakeConnectorV1"' in out
     assert '"kv_role": "kv_consumer"' in out
-    assert '"engine_id": "2"' in out
+    # engine_id 未配置时模板默认 decode=2
+    assert f'"engine_id": "{pd["decode"].get("engine_id", "2")}"' in out
     assert '"use_ascend_direct": true' in out
     assert '"kv_connector": "MultiConnector"' not in out
     assert "AscendStoreConnector" not in out
@@ -270,3 +286,111 @@ def test_kvpool_off_decode_direct_mooncake():
     assert '"kv_port": "30100"' in out
     # decode 专属 flag 不受 kvpool 开关影响
     assert "--compilation-config" in out
+
+
+# ==================== GLM-5.3 1MB CP 新功能（context_parallel_size / timeouts / profiler / capture_sizes） ====================
+# 这些功能是「可选」的：默认 GLM-5.2 配置不定义这些字段（模板不渲染）。
+# 测试用 skipif 判断字段是否配置——配置了才验证渲染正确性，没配置则跳过（向后兼容）。
+
+
+def _gv():
+    gv = yaml.safe_load(open(GV_FILE))
+    _ev = NativeEnvironment(undefined=Undefined)
+    for _ in range(3):
+        any_skipped = False
+        for k, v in gv.items():
+            if isinstance(v, str) and "{{" in v:
+                rendered = _ev.from_string(v).render(**gv)
+                if rendered != v:
+                    gv[k] = rendered
+                else:
+                    any_skipped = True
+            elif isinstance(v, dict):
+                for kk in list(v.keys()):
+                    vv = v[kk]
+                    if isinstance(vv, str) and "{{" in vv:
+                        rendered = _ev.from_string(vv).render(**gv)
+                        if rendered != vv:
+                            v[kk] = rendered
+                        else:
+                            any_skipped = True
+        if not any_skipped:
+            break
+    return gv
+
+
+def _gv_pd():
+    return _gv()["pd_cluster"]
+
+
+def _feature_config(feature):
+    """GLM-5.3 可选字段是否已配置。feature: cp / timeouts / capture / engine_id"""
+    pd = _gv_pd()
+    if feature == "cp":
+        return "context_parallel_size" in pd["prefill"] and "cp_kv_cache_interleave_size" in pd
+    if feature == "timeouts":
+        return "timeouts" in _gv().get("runtime", {})
+    if feature == "capture":
+        return "capture_sizes" in pd["decode"]
+    if feature == "engine_id":
+        return "engine_id" in pd["prefill"] and "engine_id" in pd["decode"]
+    return False
+
+
+def test_cp_flags_render_when_configured():
+    """配置 context_parallel_size 后，P/D 模板都渲染 CP 三件套。"""
+    if not _feature_config("cp"):
+        pytest.skip("GLM-5.3 CP 未配置（默认 GLM-5.2），跳过")
+    pd = _gv_pd()
+    for out in (_render_prefill(), _render_decode()):
+        assert f"--prefill-context-parallel-size {pd['prefill']['context_parallel_size']}" in out
+        assert f"--decode-context-parallel-size {pd['decode']['context_parallel_size']}" in out
+        assert f"--cp-kv-cache-interleave-size {pd['cp_kv_cache_interleave_size']}" in out
+
+
+def test_cp_flags_absent_when_unconfigured():
+    """未配置 context_parallel_size 时 CP 三件套不渲染（向后兼容）。"""
+    ctx = _ctx("prefill")
+    ctx["pd_cluster"] = {k: v for k, v in ctx["pd_cluster"].items() if k != "cp_kv_cache_interleave_size"}
+    ctx["pd_cluster"]["prefill"] = {k: v for k, v in ctx["pd_cluster"]["prefill"].items() if k != "context_parallel_size"}
+    ctx["pd_cluster"]["decode"] = {k: v for k, v in ctx["pd_cluster"]["decode"].items() if k != "context_parallel_size"}
+    out = _env().get_template("run_dp_prefill_template.sh.j2").render(**ctx)
+    assert "--prefill-context-parallel-size" not in out
+    assert "--decode-context-parallel-size" not in out
+    assert "--cp-kv-cache-interleave-size" not in out
+
+
+def test_runtime_timeouts_export():
+    """配置 runtime.timeouts 后模板 export 超时环境变量。"""
+    if not _feature_config("timeouts"):
+        pytest.skip("runtime.timeouts 未配置（默认 GLM-5.2），跳过")
+    rt = _gv()["runtime"]["timeouts"]
+    for out in (_render_prefill(), _render_decode()):
+        assert f"export VLLM_RPC_TIMEOUT={rt['vllm_rpc_timeout']}" in out
+        assert f"export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS={rt['execute_model_timeout_seconds']}" in out
+        assert f"export HCCL_EXEC_TIMEOUT={rt['hccl_exec_timeout']}" in out
+        assert f"export HCCL_CONNECT_TIMEOUT={rt['hccl_connect_timeout']}" in out
+
+
+def test_profiler_disabled_not_rendered():
+    """profiler 未启用（默认）时不渲染 --profiler-config。"""
+    for out in (_render_prefill(), _render_decode()):
+        assert "--profiler-config" not in out
+
+
+def test_capture_sizes_configurable():
+    """decode cudagraph capture sizes 从 pd_cluster.decode.capture_sizes 读。"""
+    if not _feature_config("capture"):
+        pytest.skip("decode.capture_sizes 未配置（默认长列表），跳过")
+    pd = _gv_pd()
+    out = _render_decode()
+    assert f'"cudagraph_capture_sizes": {pd["decode"]["capture_sizes"]}' in out
+
+
+def test_engine_id_from_config():
+    """无 kvpool 直连时 engine_id 从 pd_cluster 读（prefill=0，decode 可配）。"""
+    if not _feature_config("engine_id"):
+        pytest.skip("engine_id 未配置（默认 prefill=0/decode=2），跳过")
+    pd = _gv_pd()
+    assert f'"engine_id": "{pd["prefill"]["engine_id"]}"' in _render_prefill(mooncake_enabled=False)
+    assert f'"engine_id": "{pd["decode"]["engine_id"]}"' in _render_decode(mooncake_enabled=False)

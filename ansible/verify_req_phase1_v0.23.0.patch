@@ -1,0 +1,284 @@
+diff --git a/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py b/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py
+index 3af0061c0..e3c7acb69 100644
+--- a/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py
++++ b/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py
+@@ -81,6 +81,22 @@ if TYPE_CHECKING:
+ GET_META_MSG = b"get_meta_msg"
+ DONE_RECVING_MSG = b"done_recving_msg"
+ 
++VERIFY_REQ_MSG = b"verify_req_msg"
++VERIFY_RESP_MSG = b"verify_resp_msg"
++VERIFY_STATUS_VALID = b"VALID"
++VERIFY_STATUS_EXPIRED = b"EXPIRED"
++# Deadline floor granted by a successful VERIFY: the request's remaining
++# delayed-free lifetime is topped up to this many seconds (never shortened).
++VERIFY_GRACE_SECONDS = 10
++VERIFY_STATS_SUMMARY_INTERVAL_SECONDS = 60
++# Upper bound for the short-lived recently_force_freed bookkeeping (P side).
++MAX_RECENTLY_FORCE_FREED = 1024
++
++
++class KVCacheVerifyExpiredError(Exception):
++    """Raised on the D side when the P side reports (or verify cannot confirm)
++    that the remote KV blocks for a request are no longer held."""
++
+ 
+ # A busy peer can otherwise keep a global executor worker forever when the
+ # number of peers is larger than max_workers. Yield after a small FIFO batch so
+@@ -175,6 +191,10 @@ class KVCacheTaskTracker:
+         # be force-freed.
+         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
+         self.reqs_to_process: set[str] = set()
++        # Short-lived bookkeeping of force-freed request ids. A late
++        # DONE_RECVING for these is expected (the D side skipped the pull after
++        # a failed verify) and is logged at debug instead of warning.
++        self.recently_force_freed: OrderedDict[str, float] = OrderedDict()
+ 
+     def add_req_to_process(self, request_id: str):
+         self.reqs_to_process.add(request_id)
+@@ -191,13 +211,21 @@ class KVCacheTaskTracker:
+                 self.reqs_to_process.discard(request_id)
+                 self.delayed_free_requests.pop(request_id, None)
+             else:
+-                logger.warning(
+-                    "MooncakeConnector finish req not in reqs to process. "
+-                    "request_id=%s. "
+-                    "Possible cause: Request was already completed or not properly tracked. "
+-                    "Check: Verify request lifecycle and tracking logic.",
+-                    request_id,
+-                )
++                if self.recently_force_freed.pop(request_id, None) is not None:
++                    logger.debug(
++                        "MooncakeConnector received late DONE_RECVING after "
++                        "force-free (expected after a failed VERIFY). "
++                        "request_id=%s.",
++                        request_id,
++                    )
++                else:
++                    logger.warning(
++                        "MooncakeConnector finish req not in reqs to process. "
++                        "request_id=%s. "
++                        "Possible cause: Request was already completed or not properly tracked. "
++                        "Check: Verify request lifecycle and tracking logic.",
++                        request_id,
++                    )
+ 
+     def get_and_clear_finished_requests(self) -> set[str]:
+         """
+@@ -218,18 +246,40 @@ class KVCacheTaskTracker:
+             if request_id in self.reqs_to_process:
+                 self.delayed_free_requests[request_id] = delay_start_time
+ 
++    def check_and_extend(self, request_id: str) -> bool:
++        """Verify a request's blocks are still held and extend its deadline.
++
++        Returns False when the request has been released (force-freed or done),
++        True otherwise. Extension applies the VERIFY grace floor: the remaining
++        delayed-free lifetime is topped up to VERIFY_GRACE_SECONDS and never
++        shortened. Only entries already in delayed_free_requests are touched —
++        a request tracked but not yet delayed-freed cannot be force-freed.
++        """
++        with self.done_task_lock:
++            if request_id not in self.reqs_to_process:
++                return False
++            if request_id in self.delayed_free_requests:
++                deadline_floor = time.time() - (envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT - VERIFY_GRACE_SECONDS)
++                if deadline_floor > self.delayed_free_requests[request_id]:
++                    self.delayed_free_requests[request_id] = deadline_floor
++            return True
++
+     def _retrieve_expired_requests(self):
+         """Retrieve all expired delayed requests."""
+         expired_requests: set[str] = set()
+-        # Free delayed requests if they exceed the timeout
++        # Free delayed requests if they exceed the timeout. check_and_extend
++        # may push an entry's deadline past that of entries inserted after it,
++        # so insertion order no longer implies deadline order: scan the whole
++        # map instead of stopping at the first live entry.
+         current_time = time.time()
+-        while self.delayed_free_requests:
+-            request_id = next(iter(self.delayed_free_requests))
+-            delay_start_time = self.delayed_free_requests[request_id]
++        for request_id, delay_start_time in list(self.delayed_free_requests.items()):
+             if current_time - delay_start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
+-                self.delayed_free_requests.popitem(last=False)
++                self.delayed_free_requests.pop(request_id)
+                 self.reqs_to_process.discard(request_id)
+                 expired_requests.add(request_id)
++                self.recently_force_freed[request_id] = current_time
++                if len(self.recently_force_freed) > MAX_RECENTLY_FORCE_FREED:
++                    self.recently_force_freed.popitem(last=False)
+                 logger.error(
+                     "Force freed expired request: %s. "
+                     "Reason: Request exceeded timeout threshold (%s seconds). "
+@@ -237,8 +287,6 @@ class KVCacheTaskTracker:
+                     request_id,
+                     envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                 )
+-            else:
+-                break
+         return expired_requests
+ 
+ 
+@@ -384,6 +432,22 @@ class KVCacheSendingThread(threading.Thread):
+                             # If the socket is not ready, retry sending.
+                             logger.debug("Socket not ready, retrying to send ACK for request %s", msg[1])
+                             time.sleep(0.01)
++                elif msg[0] == VERIFY_REQ_MSG:
++                    # Passive handler: always answered regardless of the
++                    # D-side VLLM_ASCEND_VERIFY_KV_BEFORE_PULL switch. Keep
++                    # the critical section O(1) — all state access goes
++                    # through check_and_extend under done_task_lock.
++                    if len(msg) != 2 or not isinstance(msg[1], str):
++                        logger.error(
++                            "Invalid VERIFY_REQ_MSG payload. Expected: (VERIFY_REQ_MSG, str transfer_id). Actual: %s.",
++                            msg,
++                        )
++                    else:
++                        is_valid = self.task_tracker.check_and_extend(msg[1])
++                        resp_payload = encoder.encode(
++                            (VERIFY_RESP_MSG, VERIFY_STATUS_VALID if is_valid else VERIFY_STATUS_EXPIRED)
++                        )
++                        sock.send_multipart((identity, b"", resp_payload))
+                 else:
+                     logger.error(
+                         "Connection listener received unexpected message type. "
+@@ -504,6 +568,14 @@ class KVCacheRecvingThread(threading.Thread):
+         )
+         self.timeout = 1.0  # seconds
+ 
++        # VERIFY before pull (issue #15420). Read once at startup — the hot
++        # path must not hit the env lookup.
++        self.verify_before_pull_enabled = ascend_envs.VLLM_ASCEND_VERIFY_KV_BEFORE_PULL
++        self.verify_stats = {"valid": 0, "expired": 0, "timeout": 0}
++        self.verify_stats_lock = threading.Lock()
++        self._last_verify_summary_time = time.time()
++        self.verify_resp_decoder = msgspec.msgpack.Decoder(type=tuple)
++
+         assert vllm_config is not None
+         self.vllm_config: VllmConfig = vllm_config
+         self.model_config = self.vllm_config.model_config
+@@ -723,7 +795,11 @@ class KVCacheRecvingThread(threading.Thread):
+                 except Exception as e:
+                     transfer_failed = True
+                     self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+-                    logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
++                    # KVCacheVerifyExpiredError is an expected recovery path
++                    # (backlog after P-side timeout) — warn without a stack
++                    # instead of spamming ERROR+traceback per recompute.
++                    log = logger.warning if isinstance(e, KVCacheVerifyExpiredError) else logger.exception
++                    log("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
+         finally:
+             all_tasks_done = self._mark_request_task_done(request_id, all_task_done)
+             if all_tasks_done:
+@@ -789,6 +865,17 @@ class KVCacheRecvingThread(threading.Thread):
+         if num_local_blocks == 0 and not has_replicate_k_blocks:
+             return
+ 
++        # Verify the remote blocks are still held before the one-sided read
++        # (issue #15420). Zero-block (full prefix hit) requests never read and
++        # skip this. A failed verify raises and is converted to the existing
++        # failed-recv path by _handle_request's except clause.
++        if self.verify_before_pull_enabled and not self._verify_remote_blocks_held(req_meta):
++            raise KVCacheVerifyExpiredError(
++                f"Remote KV blocks expired on P side before pull. "
++                f"remote_request_id={remote_request_id}, "
++                f"source={remote_host}:{remote_handshake_port}"
++            )
++
+         # Check if we have the remote metadata cached.
+         with self.remote_metadata_lock:
+             has_remote_metadata = (
+@@ -1471,6 +1558,75 @@ class KVCacheRecvingThread(threading.Thread):
+         with self.remote_sockets_lock:
+             self.remote_sockets[remote_path].append(sock)
+ 
++    def _record_verify_stat(self, result: str) -> None:
++        with self.verify_stats_lock:
++            self.verify_stats[result] += 1
++            now = time.time()
++            elapsed = now - self._last_verify_summary_time
++            if elapsed >= VERIFY_STATS_SUMMARY_INTERVAL_SECONDS:
++                logger.info(
++                    "KV verify stats (last %.0fs): valid=%d, expired=%d, timeout=%d. "
++                    "timeout may indicate an older P version or network issues.",
++                    elapsed,
++                    self.verify_stats["valid"],
++                    self.verify_stats["expired"],
++                    self.verify_stats["timeout"],
++                )
++                self._last_verify_summary_time = now
++                for key in self.verify_stats:
++                    self.verify_stats[key] = 0
++
++    def _verify_remote_blocks_held(self, req_meta: dict[str, Any]) -> bool:
++        """Ask P whether the remote blocks for this request are still held.
++
++        Returns False on EXPIRED or on any failure (timeout/protocol error):
++        conservative — the pull is skipped and the request recomputes. A
++        well-formed exchange returns the pooled socket; a failed one closes it
++        (a timed-out REQ socket must never be reused, its late reply would
++        corrupt the next exchange).
++        """
++        remote_request_id = req_meta["remote_request_id"]
++        remote_host = req_meta["remote_host"]
++        remote_handshake_port = req_meta["remote_handshake_port"]
++        target = f"{remote_host}:{remote_handshake_port}"
++        sock: zmq.Socket | None = None
++        reusable = False
++        try:
++            sock = self._get_remote_socket(remote_host, remote_handshake_port)
++            payload = self.encoder.encode((VERIFY_REQ_MSG, remote_request_id))
++            ensure_zmq_send(sock, payload, target)
++            resp = ensure_zmq_recv(sock, target)
++            decoded = self.verify_resp_decoder.decode(resp)
++            reusable = True
++            if len(decoded) == 2 and decoded[0] == VERIFY_RESP_MSG and decoded[1] == VERIFY_STATUS_VALID:
++                self._record_verify_stat("valid")
++                logger.debug("KV verify passed for request %s at %s.", remote_request_id, target)
++                return True
++            self._record_verify_stat("expired")
++            logger.warning(
++                "Remote KV blocks expired on P side, skipping pull. remote_request_id=%s, source=%s.",
++                remote_request_id,
++                target,
++            )
++            return False
++        except Exception as e:
++            self._record_verify_stat("timeout")
++            logger.warning(
++                "KV verify failed, treating as expired and skipping pull. This may be "
++                "caused by an older P node version or a network issue. "
++                "remote_request_id=%s, source=%s, error=%s.",
++                remote_request_id,
++                target,
++                e,
++            )
++            return False
++        finally:
++            if sock is not None:
++                if reusable:
++                    self._return_remote_socket(sock, remote_host, remote_handshake_port)
++                else:
++                    sock.close()
++
+ 
+ class MooncakeConnectorMetadata(KVConnectorMetadata):
+     def __init__(self):
+diff --git a/vllm_ascend/envs.py b/vllm_ascend/envs.py
+index 3c8c319c6..682303310 100644
+--- a/vllm_ascend/envs.py
++++ b/vllm_ascend/envs.py
+@@ -110,6 +110,12 @@ env_variables: dict[str, Callable[[], Any]] = {
+     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
+     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
+     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
++    # Whether the decode (kv_consumer) node verifies with the prefill node via a
++    # ZMQ VERIFY_REQ message that the remote KV blocks are still held, before
++    # issuing the one-sided KV pull. Prevents dirty/stale KV reads when the
++    # prefill node force-freed timed-out blocks (vllm-ascend issue #15420).
++    # Default off. The P-side VERIFY_REQ handler is unconditional.
++    "VLLM_ASCEND_VERIFY_KV_BEFORE_PULL": lambda: bool(int(os.getenv("VLLM_ASCEND_VERIFY_KV_BEFORE_PULL", "0"))),
+ }
+ 
+ # end-env-vars-definition

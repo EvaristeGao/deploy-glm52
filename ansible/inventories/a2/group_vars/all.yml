@@ -1,86 +1,160 @@
 # =============================================================================
-# A2 group_vars/all.yml — 集群级变量（原生化：集群参数并入各 inventory 的 group_vars）
-# SSH 连接参数 + 集群参数（平铺，无 nodes/cluster 段；值抄自 config.yaml）
+# A2 group_vars/all.yml — 集群级变量
 # =============================================================================
 
-# --- SSH 连接参数（来源：config.yaml ssh 段，所有 playbook 共享）---
-ansible_user: root                              # config.yaml ssh.user
-ansible_ssh_common_args: "-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ConnectionAttempts=3 -o ServerAliveInterval=30 -o ServerAliveCountMax=3"  # config.yaml ssh.opts 的 -o 选项 + 重试/心跳（实机瞬时 reset 容错）
-ansible_ssh_retries: 3                          # UNREACHABLE 自动重试（实机验证: 节点容器起后 sshd 瞬时不稳会 reset）
+# --- SSH 连接参数 ---
+ansible_user: root
+ansible_ssh_common_args: "-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ConnectionAttempts=3 -o ServerAliveInterval=30 -o ServerAliveCountMax=3"
+ansible_ssh_retries: 3
 ansible_python_interpreter: /usr/bin/python3
 
-# --- 集群参数（值抄自 config.yaml，平铺、无 nodes/cluster 段）---
-cluster_type: a2
+# --- 部署配置选择器 ---
+#   取值：200k（默认，GLM-5.2 非对称 PD 4P+8D，200K ctx）
+#         1m（GLM-5.3 对称 PD 4P+4D，1M ctx + CP/timeouts/profiler）
+deploy_config: 1m
+
 image: quay.io/ascend/vllm-ascend:v0.23.0
-image_tar: ""                 # 非空则 pull.yml 改从该 tar docker load（需节点可见路径，如共享目录）；留空则 docker pull image
-model_path: /mnt/sfs_turbo/models/GLM-5.2-w4a8c8
-model_name: glm-52
+image_tar: ""
+cluster_type: a2
+
+# =============================================================================
+# 200K 配置（默认，GLM-5.2，非对称 PD 4P+8D）
+# =============================================================================
+_200k:
+  model_path: /mnt/sfs_turbo/models/GLM-5.2-w4a8c8
+  model_name: glm-52
+  pd_cluster:
+    max_model_len: 200000
+    num_cards: 8
+    prefill:
+      dp_size: 4
+      tp_size: 8
+      dp_size_local: 1
+      base_port: 9081
+      kv_port: 30000
+      rpc_port: 16591
+    decode:
+      dp_size: 8
+      tp_size: 4
+      dp_size_local: 2
+      base_port: 9900
+      kv_port: 30100
+      rpc_port: 16600
+    enable_prefix_caching: true
+  runtime:
+    ready_timeout: 2400
+    proxy_ready_timeout: 600
+  container_name: glm52-ansible-test
+
+# =============================================================================
+# 1MB 配置（GLM-5.3，对称 PD 4P+4D + CP + timeouts + profiler）
+# =============================================================================
+_1m:
+  model_path: /mnt/sfs_turbo/models/GLM-5.3-w4a8c8
+  model_name: glm-5
+  pd_cluster:
+    max_model_len: 1024000
+    num_cards: 8
+    cp_kv_cache_interleave_size: 128
+    prefill:
+      dp_size: 4
+      tp_size: 8
+      dp_size_local: 1
+      base_port: 9081
+      kv_port: 30000
+      rpc_port: 16591
+      context_parallel_size: 1
+      engine_id: 0
+      max_num_seqs: 16
+      gpu_memory_utilization: 0.92
+    decode:
+      dp_size: 4
+      tp_size: 8
+      dp_size_local: 1
+      base_port: 9900
+      kv_port: 30100
+      rpc_port: 16600
+      context_parallel_size: 8
+      engine_id: 1
+      capture_sizes: [4, 8, 16]
+      acl_op_init_mode: true
+      max_num_batched_tokens: 16
+      max_num_seqs: 16
+      gpu_memory_utilization: 0.9
+    enable_prefix_caching: true
+  runtime:
+    ready_timeout: 2400
+    proxy_ready_timeout: 600
+    timeouts:
+      vllm_rpc_timeout: 3600000
+      execute_model_timeout_seconds: 30000
+      hccl_exec_timeout: 204
+      hccl_connect_timeout: 120
+  profiler:
+    enabled: false
+    config: '{"profiler": "torch", "torch_profiler_dir": "/home/lh/prof", "torch_profiler_with_stack": false}'
+  container_name: gwh-decode-verify-test
+
+# =============================================================================
+# 激活的配置（由 deploy_config 选择）
+# =============================================================================
+_active: "{{ _1m if deploy_config == '1m' else _200k }}"
+
 model:
-  path: /mnt/sfs_turbo/models/GLM-5.2-w4a8c8
-  served_model_name: glm-52
-  dir_host: ""                    # 非空则挂载 -v <dir_host>:/root/.cache（A3 用）
-  mounts:                         # 原 EXTRA_MOUNTS 列表形式，每项一个 -v 参数
+  path: "{{ _active.model_path }}"
+  served_model_name: "{{ _active.model_name }}"
+  dir_host: ""
+  mounts:
     - "/mnt/sfs_turbo/:/mnt/sfs_turbo/"
-    # - "/data2:/data2"             # 实机挂载（solution-2 docker-run.sh 确认）
+model_path: "{{ _active.model_path }}"
+model_name: "{{ _active.model_name }}"
+pd_cluster: "{{ _active.pd_cluster }}"
+runtime: "{{ _active.runtime }}"
+profiler: "{{ _active.profiler | default({}) }}"
+container:
+  name: "{{ _active.container_name }}"
+  shm_size: 1024g
 
-pd_cluster:
-  max_model_len: 200000
-  num_cards: 8
-  prefill: { dp_size: 4, tp_size: 8, dp_size_local: 1, base_port: 9081, kv_port: 30000, rpc_port: 16591 }
-  decode:  { dp_size: 8, tp_size: 4, dp_size_local: 2, base_port: 9900, kv_port: 30100, rpc_port: 16600 }
-  enable_prefix_caching: true
-
+# --- 共享字段（与部署配置无关）---
 proxy:
   port: 1999
-  # 接入 proxy 的节点白名单（inventory 节点名）；空/未配置 = 全部接入
-  prefill_nodes: []          # 例: [p0, p1]
-  decode_nodes: []           # 例: [d0] —— 模拟 decode 排队
+  prefill_nodes: []
+  decode_nodes: []
 
-# mooncake / 部署模式（三态，详见 README「部署模式」）：
-#   enabled=true  + enable_ha=true  → kvpool HA（3 master + 3 etcd + haproxy），当前默认
-#   enabled=true  + enable_ha=false → kvpool 单 master（p0 直连，无 etcd/haproxy）
-#   enabled=false                   → 无 kvpool（直连 MooncakeConnectorV1，无 master/etcd/haproxy）
 mooncake:
-  enabled: false              # kvpool(Ascend Store KV 池)开关；false=直连 MooncakeConnectorV1（无池/无 master/无 etcd/haproxy）
-  port: 50088                # kv 服务端口（引擎经 haproxy 连入）
+  enabled: false
+  port: 50088
   evict: 0.9
   global_segment_size: 80GB
   default_kv_lease_ttl: 11000
-  image: quay.io/ascend/vllm-ascend:v0.23.0  # TODO: mooncake 容器镜像（含 mooncake_master+haproxy+nc），用户填
+  image: quay.io/ascend/vllm-ascend:v0.23.0
   ha:
-    enable_ha: false          # ha+etcd 开关（前提 enabled: true）；false=单 master 直连 p0
-    nodes: [p0, p1, p2]      # 3 个 mooncake_master 节点（仅 enable_ha=true 生效）
+    enable_ha: false
+    nodes: [p0, p1, p2]
     rpc_port: 52050
     metrics_port: 52052
     health_check_port: 52054
     eviction_ratio: 0.2
     log_dir: /var/log/mooncake_master
 
-# etcd（3 节点，mooncake_master HA 选主后端）
 etcd:
   image: quay.io/coreos/etcd:v3.7.1-arm64
-  nodes: [p0, p1, p2]        # 3 个 etcd 节点（同 mooncake master）
-  certs_dir: /mnt/sfs_turbo/g00832294/certs   # TODO: 证书目录（假设已有 ca.crt/server.crt/server.key/client.pem）
-  client_cert: /etc/pki/etcd/certs/client.pem   # haproxy 连 etcd 的客户端证书（容器内路径，挂载自 certs_dir）
+  nodes: [p0, p1, p2]
+  certs_dir: /mnt/sfs_turbo/g00832294/certs
+  client_cert: /etc/pki/etcd/certs/client.pem
   client_port: 2379
   peer_port: 2380
 
-# haproxy（etcd 代理，两种部署形态，见 README「部署模式」）：
-#   per_container（默认）：每实例容器内嵌 haproxy（master→cache_master_port, 引擎→pd_port）
-#   standalone：3 个独立 haproxy 容器（nodes），组件经 3 节点 IP:port 访问 etcd
 haproxy:
-  mode: standalone         # per_container | standalone
-  image: gwh-haproxy:v1.0  # standalone：独立 haproxy 容器镜像（构建自 image_build/Dockerfile_ha，改成本地镜像名）
-  cache_master_port: 12379   # per_container：mooncake 容器内 haproxy 端口（master -etcd_endpoints 指 127.0.0.1:此端口）
-  pd_port: 12489             # per_container：P/D 引擎容器内 haproxy 端口
-  nodes: [p0, p1, p2]        # standalone：3 个独立 haproxy 容器节点
-  port: 12379                # standalone：统一监听端口（master/引擎共用，经 3 节点 IP:此端口 访问 etcd）
-
-container: { name: gwh-decode-verify-test, shm_size: 1024g }
-runtime: { ready_timeout: 2400, proxy_ready_timeout: 600 }
+  mode: standalone
+  image: gwh-haproxy:v1.0
+  cache_master_port: 12379
+  pd_port: 12489
+  nodes: [p0, p1, p2]
+  port: 12379
 
 logs:
-  dir: /mnt/sfs_turbo/g00832294/deploy-glm52/logs   # 共享目录（容器内可见，容器销毁后日志仍在）
-  vllm: vllm_{node}.log     # {node} 按节点替换（p0/p1/d0..），避免节点互相覆盖
-  mooncake: mooncake_{node}.log   # {node} 按节点替换（3 个 mooncake master 各写各的，避免共享目录互相覆盖）
+  dir: /mnt/sfs_turbo/g00832294/deploy-glm52/logs
+  vllm: vllm_{node}.log
+  mooncake: mooncake_{node}.log
   proxy: proxy_{node}.log
