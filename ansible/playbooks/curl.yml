@@ -1,0 +1,56 @@
+---
+# deploy-glm52 — 第一阶段 start playbook（起容器 + 分发启动文件 + mooncake_master）
+# 对照 deploy.sh: start_node() + start_mooncake_master()
+# 连接参数统一在 inventories/<集群>/group_vars/all.yml（inventory 自动加载）
+#
+# 安全点：容器 --pid=host，容器内 pkill/pgrep 会看到 host 全部进程。
+#   必须用 -x 精确匹配进程名（mooncake_master），不能用 -f——
+#   否则会匹配 Ansible 的 ssh 会话（其命令行含这些字符串）而误杀/误判连接。
+#
+# 阶段 tags（对应 deploy.sh 子流程，便于分段重跑/排查）：
+#   container / mooncake / engine / wait / proxy / smoke
+#   `--tags engine` 等只跑对应阶段；变量来自 group_vars（inventory 自动加载）。
+#   --dry-run 近似：Ansible 无 dry-run 子命令，用 `--check` 试跑（渲染/命令任务只报告不执行）。
+- name: deploy-glm52 一键部署（第一阶段：起容器 + 分发 + mooncake）
+  hosts: all
+  gather_facts: no
+  vars:
+    # mooncake_master 落点：HA → mooncake.ha.nodes；单主 → proxy 节点（p0）
+    mooncake_master_nodes: "{{ mooncake.ha.nodes if mooncake.ha.enable_ha else [groups['proxy'][0]] }}"
+  tasks:
+
+    - name: 生成 proxy 端点（Jinja2 生成；run_once 于 p0 并回收 facts）
+      run_once: true
+      delegate_to: p0
+      delegate_facts: yes
+      set_fact:
+        proxy_host: "{{ hostvars[groups['proxy'][0]].ip }}"
+        proxy_port: "{{ proxy.port | string }}"
+        prefiller_hosts: "{% set out = [] -%}{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ip) -%}{% endfor -%}{{ out | join(' ') }}"
+        prefiller_ports: "{% set out = [] -%}{% for h, r in groups['prefill'] | product(range(pd_cluster.prefill.dp_size_local)) -%}{% set _ = out.append((pd_cluster.prefill.base_port + r) | string) -%}{% endfor -%}{{ out | join(' ') }}"
+        decoder_hosts: "{% set out = [] -%}{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}{% set _ = out.append(hostvars[h].ip) -%}{% endfor -%}{{ out | join(' ') }}"
+        decoder_ports: "{% set out = [] -%}{% for h, r in groups['decode'] | product(range(pd_cluster.decode.dp_size_local)) -%}{% set _ = out.append((pd_cluster.decode.base_port + r) | string) -%}{% endfor -%}{{ out | join(' ') }}"
+      tags: proxy
+
+    - name: 冒烟测试（control 端 POST /v1/chat/completions，对照 deploy.sh smoke_test）
+      when: inventory_hostname == 'p0'
+      ansible.builtin.uri:
+        url: "http://{{ proxy_host }}:{{ proxy_port }}/v1/chat/completions"
+        method: POST
+        headers:
+          Content-Type: "application/json"
+          # Authorization: "Bearer {{ api_key | default('EMPTY') }}"
+        body:
+          model: "{{ model_name }}"
+          messages:
+            - role: user
+              content: "你好，介绍一下你自己."
+          max_completion_tokens: 1024
+          temperature: 0.7
+        body_format: json
+        status_code: 200
+      register: smoke
+      until: smoke.status == 200
+      retries: 10
+      delay: 5
+      tags: smoke

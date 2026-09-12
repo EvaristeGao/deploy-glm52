@@ -274,6 +274,18 @@
       shell: docker cp /tmp/run_dp_template_{{ inventory_hostname }}.sh {{ container.name }}:/root/pd/run_dp_template.sh
       tags: engine
 
+    # - name: 分发 patch
+    #   copy:
+    #     src: "../verify_req_phase1_v0.23.0.patch"
+    #     dest: "/tmp/verify_req_phase1_v0.23.0.patch"
+    #   tags: engine
+
+    # - name: 打 patch
+    #   shell: |
+    #     docker cp /tmp/verify_req_phase1_v0.23.0.patch {{ container.name }}:/vllm-workspace/vllm-ascend/verify_req_phase1_v0.23.0.patch
+    #     docker exec {{ container.name }} bash -c 'cd /vllm-workspace/vllm-ascend/ && git apply verify_req_phase1_v0.23.0.patch'
+    #   tags: engine
+
     - name: 启动引擎（对照 deploy.sh start_engines，docker exec -d 后台）
       shell: |
         docker exec {{ container.name }} mkdir -p {{ vllm_log | dirname }} 2>/dev/null || true
@@ -391,15 +403,19 @@
 
     - name: 冒烟测试（control 端 POST /v1/chat/completions，对照 deploy.sh smoke_test）
       when: inventory_hostname == 'p0'
-      delegate_to: localhost
-      uri:
+      ansible.builtin.uri:
         url: "http://{{ proxy_host }}:{{ proxy_port }}/v1/chat/completions"
         method: POST
+        headers:
+          Content-Type: "application/json"
+          # Authorization: "Bearer {{ api_key | default('EMPTY') }}"
         body:
           model: "{{ served_model_name }}"
-          prompt: "The future of AI is"
-          max_completion_tokens: 20
-          temperature: 0
+          messages:
+            - role: user
+              content: "你好，介绍一下你自己."
+          max_completion_tokens: 1024
+          temperature: 0.7
         body_format: json
         status_code: 200
       register: smoke
