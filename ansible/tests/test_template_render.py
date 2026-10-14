@@ -24,6 +24,7 @@ from jinja2.nativetypes import NativeEnvironment
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ANSIBLE_DIR = os.path.join(PROJECT_ROOT, "ansible")
 GV_FILE = os.path.join(ANSIBLE_DIR, "inventories", "a2", "group_vars", "all.yml")
+GV_FILE_A3 = os.path.join(ANSIBLE_DIR, "inventories", "a3", "group_vars", "all.yml")
 TPL_DIR = os.path.join(ANSIBLE_DIR, "templates")
 
 
@@ -35,26 +36,27 @@ def _env():
     return Environment(loader=FileSystemLoader(TPL_DIR), undefined=StrictUndefined, trim_blocks=True)
 
 
-def _ctx(role, cluster_type=None, mooncake_enabled=None):
-    """直接用 A2 group_vars 平铺变量构造模板 ctx（小写变量，直接渲染）。
+def _ctx(role, cluster_type=None, mooncake_enabled=None, gv=None):
+    """直接用 group_vars 平铺变量构造模板 ctx（小写变量，直接渲染）。
     role ∈ {prefill, decode}；运行时参数（$1..$7）不进 ctx——它们由
     launch_online_dp.py 按每引擎位置传入，模板只保留部署期确定的变量。
     cluster_type 可覆盖 group_vars 值（测 RoCE 开关）；
-    mooncake_enabled 可覆盖 group_vars 的 kvpool 开关（测直连 MooncakeConnectorV1 分支）。
-    
-    group_vars 含有 Jinja 表达式（deploy_config→{_52,_53}→_active→pd_cluster 等），
+    mooncake_enabled 可覆盖 group_vars 的 kvpool 开关（测直连 MooncakeConnectorV1 分支）；
+    gv 可传入别的 inventory / 别的 deploy_config 档位（默认 A2 当前档）。
+
+    group_vars 含有 Jinja 表达式（deploy_config→{_200k,_1m}→_active→pd_cluster 等），
     用 _gv() 已展开为原生 Python 类型。"""
-    gv = _gv()
+    gv = gv if gv is not None else _gv()
     pd = gv["pd_cluster"]
     return {
-        # 节点级变量：nic 取自 A2 inventory 节点（host 级）；ip 取自 inventory 静态字段（真实网卡 IP）
+        # 节点级变量：nic 取自 inventory 节点（host 级）；ip 取自 inventory 静态字段（真实网卡 IP）
         "nic": "enp67s0f5",
         "ip": "192.168.0.245",
-        # 集群级平铺变量（来源：a2/group_vars/all.yml 的 model / model_path / pd_cluster）
+        # 集群级平铺变量（来源：group_vars 的 model / model_path / pd_cluster）
         "model_path": gv["model_path"],
         "served_model_name": gv["model"]["served_model_name"],
         "max_model_len": pd["max_model_len"],
-        "kv_port": pd[role]["kv_port"],          # prefill=30000 / decode=30100
+        "kv_port": pd[role]["kv_port"],          # prefill=30000 / decode=30100(A2)
         "cluster_type": cluster_type or gv["cluster_type"],
         # 跨角色 dp/tp（kv-transfer 配置）+ mooncake 路径 + kvpool 开关
         "prefill_dp": pd["prefill"]["dp_size"],
@@ -63,16 +65,16 @@ def _ctx(role, cluster_type=None, mooncake_enabled=None):
         "decode_tp": pd["decode"]["tp_size"],
         "mooncake_config_path": "/root/pd/mooncake.json",
         "mooncake": {"enabled": gv["mooncake"]["enabled"] if mooncake_enabled is None else mooncake_enabled},
-        # GLM-5.3 1MB 新功能嵌套变量（模板引用 pd_cluster.*/runtime/profiler）
+        # 1M 新功能嵌套变量（模板引用 pd_cluster.*/runtime/profiler）
         "pd_cluster": pd,
         "runtime": gv.get("runtime", {}),
         "profiler": gv.get("profiler", {}),
     }
 
 
-def _render(role, cluster_type=None, mooncake_enabled=None):
+def _render(role, cluster_type=None, mooncake_enabled=None, gv=None):
     tpl = _env().get_template(f"run_dp_{role}_template.sh.j2")
-    return tpl.render(**{**_ctx(role, cluster_type, mooncake_enabled)})
+    return tpl.render(**{**_ctx(role, cluster_type, mooncake_enabled, gv)})
 
 
 def _render_prefill(cluster_type=None, mooncake_enabled=None):
@@ -81,6 +83,12 @@ def _render_prefill(cluster_type=None, mooncake_enabled=None):
 
 def _render_decode(cluster_type=None, mooncake_enabled=None):
     return _render("decode", cluster_type, mooncake_enabled)
+
+
+def _render_a3(role, deploy_config=None, mooncake_enabled=None):
+    """按 A3 group_vars 的指定档位（200k / 1m）渲染 A3 模板。"""
+    gv = _gv(GV_FILE_A3, deploy_config)
+    return _render(role, cluster_type="a3", mooncake_enabled=mooncake_enabled, gv=gv)
 
 
 def test_prefill_uses_inventory_ip():
@@ -293,8 +301,12 @@ def test_kvpool_off_decode_direct_mooncake():
 # 测试用 skipif 判断字段是否配置——配置了才验证渲染正确性，没配置则跳过（向后兼容）。
 
 
-def _gv():
-    gv = yaml.safe_load(open(GV_FILE))
+def _gv(path=GV_FILE, deploy_config=None):
+    """加载 group_vars 并把里面的 Jinja 表达式多轮展开成原生 Python 类型。
+    deploy_config 非空时覆盖文件里的取值（用于测另一档：200k / 1m）。"""
+    gv = yaml.safe_load(open(path))
+    if deploy_config is not None:
+        gv["deploy_config"] = deploy_config
     _ev = NativeEnvironment(undefined=Undefined)
     for _ in range(3):
         any_skipped = False
@@ -394,3 +406,272 @@ def test_engine_id_from_config():
     pd = _gv_pd()
     assert f'"engine_id": "{pd["prefill"]["engine_id"]}"' in _render_prefill(mooncake_enabled=False)
     assert f'"engine_id": "{pd["decode"]["engine_id"]}"' in _render_decode(mooncake_enabled=False)
+
+
+def test_a2_prefill_cp_falls_back_to_decode_value():
+    """A2 prefill 未配置 decode_context_parallel_size → decode CP 回落到 decode 自身口径
+    （A2 两侧同值，行为与改造前一致）。"""
+    if not _feature_config("cp"):
+        pytest.skip("CP 未配置，跳过")
+    pd = _gv_pd()
+    assert "decode_context_parallel_size" not in pd["prefill"]
+    assert f"--decode-context-parallel-size {pd['decode']['context_parallel_size']}" in _render_prefill()
+
+
+# ==================== A3 部署配置选择器（deploy_config: 200k | 1m） ====================
+# 官方参考：https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html
+#   198K PD（§5.2.1）：prefill PP2 TP16 + decode DP8 TP4；1M PD（§5.2.2）：prefill DP2 TP16 + decode DP8 TP4
+#   本项目 launch_online_dp.py 是纯 DP 启动器，表达不了 PP，故 198K 档 prefill 取 DP2 TP16 近似
+#   （保留官方 TP16），decode 与官方一致；两档均关闭 enable_sparse_sfa_c8（c3b1d4d 精度策略）
+
+
+def test_a3_deploy_config_selects_matching_block():
+    """deploy_config 选中哪一档，pd_cluster 就解析成哪一块（不锁死具体默认值，防止手改后单测变红）。"""
+    gv = _gv(GV_FILE_A3)
+    cfg = gv["deploy_config"]
+    assert cfg in ("200k", "1m")
+    assert gv["pd_cluster"] == gv[f"_{cfg}"]["pd_cluster"]
+
+
+def test_a3_1m_topology():
+    """A3 1M 档：官方参考拓扑 + 1M 上下文 + 官方端口。"""
+    pd = _gv(GV_FILE_A3, "1m")["pd_cluster"]
+    assert pd["max_model_len"] == 1048576
+    assert (pd["prefill"]["dp_size"], pd["prefill"]["tp_size"], pd["prefill"]["dp_size_local"]) == (2, 16, 1)
+    assert (pd["decode"]["dp_size"], pd["decode"]["tp_size"], pd["decode"]["dp_size_local"]) == (8, 4, 4)
+    assert pd["prefill"]["rpc_port"] == 16600
+    assert pd["decode"]["rpc_port"] == 16600
+    assert pd["prefill"]["kv_port"] == 30000
+    assert pd["decode"]["kv_port"] == 30200
+    assert pd["prefill"]["base_port"] == 9081
+    assert pd["decode"]["base_port"] == 9900
+    assert pd["num_cards"] == 16
+    assert pd["cp_kv_cache_interleave_size"] == 128
+
+
+def test_a3_200k_topology():
+    """A3 200K 档：官方 198K PD 参考的 dp/tp（prefill 用 DP2 TP16 代替官方 PP2 TP16）。"""
+    pd = _gv(GV_FILE_A3, "200k")["pd_cluster"]
+    assert pd["max_model_len"] == 202752
+    assert (pd["prefill"]["dp_size"], pd["prefill"]["tp_size"], pd["prefill"]["dp_size_local"]) == (2, 16, 1)
+    assert (pd["decode"]["dp_size"], pd["decode"]["tp_size"], pd["decode"]["dp_size_local"]) == (8, 4, 4)
+    assert pd["prefill"]["rpc_port"] == 16591
+    assert pd["prefill"]["kv_port"] == 30000
+    assert pd["decode"]["kv_port"] == 30200
+    assert pd["num_cards"] == 16
+    # 200K 档不带 CP（官方 198K 参考也没有）
+    assert "context_parallel_size" not in pd["prefill"]
+    assert "cp_kv_cache_interleave_size" not in pd
+    out = _render_a3("prefill", "200k")
+    assert "--prefill-context-parallel-size" not in out
+    assert "--decode-context-parallel-size" not in out
+    assert "--cp-kv-cache-interleave-size" not in out
+    # 每节点卡数：prefill 1 引擎×16 卡、decode 4 引擎×4 卡 = 16
+    assert pd["prefill"]["dp_size_local"] * pd["prefill"]["tp_size"] == pd["num_cards"]
+    assert pd["decode"]["dp_size_local"] * pd["decode"]["tp_size"] == pd["num_cards"]
+    # A3 inventory 固定 2 prefill + 2 decode 节点，dp_size = 节点数 × 每节点引擎数
+    assert pd["prefill"]["dp_size"] == 2 * pd["prefill"]["dp_size_local"]
+    assert pd["decode"]["dp_size"] == 2 * pd["decode"]["dp_size_local"]
+
+
+def test_a3_1m_cp_flags_split_by_role():
+    """A3 1M：prefill 模板声明 decode CP=16，decode 模板声明 decode CP=4（官方口径不同）。"""
+    out_p = _render_a3("prefill", "1m")
+    assert "--prefill-context-parallel-size 1" in out_p
+    assert "--decode-context-parallel-size 16" in out_p
+    assert "--decode-context-parallel-size 4" not in out_p
+    out_d = _render_a3("decode", "1m")
+    assert "--prefill-context-parallel-size 1" in out_d
+    assert "--decode-context-parallel-size 4" in out_d
+    assert "--decode-context-parallel-size 16" not in out_d
+    for out in (out_p, out_d):
+        assert "--cp-kv-cache-interleave-size 128" in out
+
+
+def test_a3_1m_additional_config_per_role():
+    """A3 1M：additional-config 逐字取 group_vars 配置值（prefill 开 DSA CP，decode 不开）。"""
+    pd = _gv(GV_FILE_A3, "1m")["pd_cluster"]
+    out_p = _render_a3("prefill", "1m")
+    assert pd["prefill"]["additional_config"] in out_p
+    for flag in ('"enable_dsa_cp":true', '"enable_sparse_sfa_c8": false',
+                 '"enable_sparse_li_c8": true', '"c8_enable_reshape_optim":true',
+                 '"recompute_scheduler_enable": false'):
+        assert flag in out_p, f"prefill additional-config 缺少 {flag}"
+
+    out_d = _render_a3("decode", "1m")
+    assert pd["decode"]["additional_config"] in out_d
+    for flag in ('"enable_sparse_sfa_c8": false', '"enable_sparse_li_c8": true',
+                 '"recompute_scheduler_enable":true', '"multistream_overlap_shared_expert":true'):
+        assert flag in out_d, f"decode additional-config 缺少 {flag}"
+    assert '"enable_dsa_cp"' not in out_d
+    assert '"c8_enable_reshape_optim"' not in out_d
+
+
+def test_a3_200k_additional_config_per_role():
+    """A3 200K：additional-config 逐字取 group_vars 配置值（prefill 开 DSA CP，decode 不开）。"""
+    pd = _gv(GV_FILE_A3, "200k")["pd_cluster"]
+    out_p = _render_a3("prefill", "200k")
+    assert pd["prefill"]["additional_config"] in out_p
+    for flag in ('"enable_dsa_cp":true', '"enable_sparse_sfa_c8": false',
+                 '"enable_sparse_li_c8": true', '"c8_enable_reshape_optim":true',
+                 '"recompute_scheduler_enable": false'):
+        assert flag in out_p, f"prefill additional-config 缺少 {flag}"
+
+    out_d = _render_a3("decode", "200k")
+    assert pd["decode"]["additional_config"] in out_d
+    assert '"recompute_scheduler_enable":true' in out_d
+    assert '"enable_dsa_cp"' not in out_d
+
+
+def test_a3_sfa_c8_disabled_for_both_configs():
+    """本项目策略：两档都关闭 enable_sparse_sfa_c8（官方参考为 true；见 c3b1d4d 精度问题）。"""
+    for cfg in ("200k", "1m"):
+        pd = _gv(GV_FILE_A3, cfg)["pd_cluster"]
+        for role in ("prefill", "decode"):
+            assert '"enable_sparse_sfa_c8": false' in pd[role]["additional_config"]
+            assert '"enable_sparse_sfa_c8": true' not in _render_a3(role, cfg)
+
+
+def test_a3_hf_overrides_only_in_200k():
+    """--hf-overrides 只在 200K 档渲染（官方 198K PD 参考有、1M 参考没有）。"""
+    pd200 = _gv(GV_FILE_A3, "200k")["pd_cluster"]
+    for role in ("prefill", "decode"):
+        out = _render_a3(role, "200k")
+        assert f"--hf-overrides '{pd200[role]['hf_overrides']}'" in out
+        assert "use_index_cache" in out
+    for role in ("prefill", "decode"):
+        assert "--hf-overrides" not in _render_a3(role, "1m")
+    # A2 也没有
+    assert "--hf-overrides" not in _render_prefill()
+    assert "--hf-overrides" not in _render_decode()
+
+
+def test_a3_max_num_batched_tokens_per_config():
+    """--max-num-batched-tokens 分档：官方 198K = prefill 16384 / decode 164；1M = 8192 / 192。"""
+    pd200 = _gv(GV_FILE_A3, "200k")["pd_cluster"]
+    pd1m = _gv(GV_FILE_A3, "1m")["pd_cluster"]
+    assert f"--max-num-batched-tokens {pd200['prefill']['max_num_batched_tokens']}" in _render_a3("prefill", "200k")
+    assert f"--max-num-batched-tokens {pd200['decode']['max_num_batched_tokens']}" in _render_a3("decode", "200k")
+    assert (pd200["prefill"]["max_num_batched_tokens"], pd200["decode"]["max_num_batched_tokens"]) == (16384, 164)
+    assert f"--max-num-batched-tokens {pd1m['prefill'].get('max_num_batched_tokens', 8192)}" in _render_a3("prefill", "1m")
+    assert f"--max-num-batched-tokens {pd1m['decode']['max_num_batched_tokens']}" in _render_a3("decode", "1m")
+
+
+def test_a3_decode_spec_tokens_and_hccl_buffsize_per_config():
+    """decode 分档：MTP spec tokens 3(200K)/5(1M)；HCCL_BUFFSIZE 256(200K)/400(1M)。"""
+    assert '"num_speculative_tokens": 3' in _render_a3("decode", "200k")
+    assert '"num_speculative_tokens": 5' in _render_a3("decode", "1m")
+    assert "export HCCL_BUFFSIZE=256" in _render_a3("decode", "200k").splitlines()
+    assert "export HCCL_BUFFSIZE=400" in _render_a3("decode", "1m").splitlines()
+    # prefill 两档都是 400（官方一致）
+    for cfg in ("200k", "1m"):
+        assert "export HCCL_BUFFSIZE=400" in _render_a3("prefill", cfg).splitlines()
+
+
+def test_a3_env_alignment_with_official_reference():
+    """A3 环境变量对齐官方参考：
+    ACL_OP_INIT_MODE 两侧都有；HCCL_BUFFSIZE=400；两侧都无 VLLM_HOST_IP。
+    （MLAPO 只在 decode 开，见 test_a3_a2_mlapo_branch）"""
+    for role in ("prefill", "decode"):
+        lines = _render_a3(role, "1m").splitlines()
+        assert "export ASCEND_A3_ENABLE=1" in lines
+        assert "export ACL_OP_INIT_MODE=1" in lines
+        assert "export HCCL_BUFFSIZE=400" in lines
+        assert "export HCCL_BUFFSIZE=256" not in lines
+        assert "export VLLM_HOST_IP=$local_ip" not in lines
+    # A2 仍然保留 VLLM_HOST_IP（回归）
+    assert "export VLLM_HOST_IP=$local_ip" in _render_decode().splitlines()
+
+
+def test_a3_a2_mlapo_branch():
+    """MLAPO：A3/A2 的 decode 都开；A3 prefill 不开（官方 PD 场景只在 decode 开），A2 prefill 开。"""
+    assert "export VLLM_ASCEND_ENABLE_MLAPO=1" in _render_a3("decode", "1m").splitlines()
+    assert "export VLLM_ASCEND_ENABLE_MLAPO=1" not in _render_a3("prefill", "1m").splitlines()
+    assert "export VLLM_ASCEND_ENABLE_MLAPO=1" in _render_prefill().splitlines()
+
+
+def test_a3_serve_args_by_role():
+    """A3 1M 推理参数：prefill enforce-eager/无 chunked-prefill；decode FULL_DECODE_ONLY/async。
+    具体数值（batched-tokens / gpu-mem 等）从 group_vars 动态读，避免配置微调就红。"""
+    pd = _gv(GV_FILE_A3, "1m")["pd_cluster"]
+    out_p = _render_a3("prefill", "1m")
+    assert "--max-num-seqs 64" in out_p
+    assert "--enforce-eager" in out_p
+    assert '"num_speculative_tokens": 1' in out_p
+    assert "--enable-prefix-caching" in out_p
+    assert "--enable-chunked-prefill" not in out_p
+    assert "--async-scheduling" not in out_p
+    assert "--safetensors-load-strategy" not in out_p
+    for key in ("max_num_seqs", "gpu_memory_utilization", "max_num_batched_tokens"):
+        if key in pd["prefill"]:
+            assert f"--{key.replace('_', '-')} {pd['prefill'][key]}" in out_p
+
+    out_d = _render_a3("decode", "1m")
+    assert "--max-num-seqs 32" in out_d
+    assert '"cudagraph_mode": "FULL_DECODE_ONLY"' in out_d
+    assert "--async-scheduling" in out_d
+    assert "--safetensors-load-strategy" not in out_d
+    for key in ("max_num_seqs", "gpu_memory_utilization", "max_num_batched_tokens"):
+        if key in pd["decode"]:
+            assert f"--{key.replace('_', '-')} {pd['decode'][key]}" in out_d
+    # A3 decode 用固定 cudagraph 形态，不渲染 A2 的长 capture_sizes 列表
+    assert '"cudagraph_capture_sizes"' not in out_d
+
+
+def test_a3_kvpool_keeps_multi_connector_with_1m_topology():
+    """A3 保持 kvpool（mooncake.enabled=true）→ MultiConnector，且 P/D 并行度取 1M 档值。"""
+    pd = _gv(GV_FILE_A3, "1m")["pd_cluster"]
+    out = _render_a3("prefill", "1m", mooncake_enabled=True)
+    assert '"kv_connector": "MultiConnector"' in out
+    assert '"kv_connector": "AscendStoreConnector"' in out
+    assert '"kv_role": "kv_producer"' in out
+    assert f'"prefill": {{ "dp_size": {pd["prefill"]["dp_size"]}, "tp_size": {pd["prefill"]["tp_size"]} }}' in out
+    assert f'"decode": {{ "dp_size": {pd["decode"]["dp_size"]}, "tp_size": {pd["decode"]["tp_size"]} }}' in out
+    assert f'"kv_port": "{pd["prefill"]["kv_port"]}"' in out
+    assert "MOONCAKE_CONFIG_PATH" in out
+
+    out_d = _render_a3("decode", "1m", mooncake_enabled=True)
+    assert '"kv_connector": "MultiConnector"' in out_d
+    assert '"kv_role": "kv_consumer"' in out_d
+    assert '"load_async": true' in out_d
+    assert f'"kv_port": "{pd["decode"]["kv_port"]}"' in out_d
+
+
+def test_a3_rendered_output_clean_newlines():
+    """A3 两档渲染结果换行干净（块标签行不留空行/纯空白行）。"""
+    for cfg in ("200k", "1m"):
+        for role in ("prefill", "decode"):
+            lines = _render_a3(role, cfg).splitlines()
+            for i in range(len(lines) - 1):
+                assert not (lines[i] == "" and lines[i + 1] == ""), f"{cfg}/{role} 连续空行 @{i}"
+            for i, ln in enumerate(lines):
+                assert not (ln and not ln.strip()), f"{cfg}/{role} 纯空白行 @{i}"
+            assert "{{" not in "\n".join(lines)
+
+
+def test_a3_model_path_shared_by_both_configs():
+    """A3 两档共用同一份权重路径（当前为 w4a8c8，非官方参考的 w8a8c8），且已填真实路径。"""
+    p200k = _gv(GV_FILE_A3, "200k")["model_path"]
+    p1m = _gv(GV_FILE_A3, "1m")["model_path"]
+    assert p200k == p1m
+    assert p1m.startswith("/") and "TODO" not in p1m
+    # 渲染时该路径必须原样出现在 vllm serve 后
+    assert f"vllm serve {p1m}" in _render_a3("prefill", "1m")
+    assert f"vllm serve {p1m}" in _render_a3("decode", "200k")
+
+
+def test_a3_mounts_and_logs_dir_are_container_visible():
+    """A3 关键约束：mounts 必须写 host:container（单路径会被 docker 当匿名卷）；
+    logs.dir 必须落在 mounts 覆盖的路径下（引擎容器不单独挂 logs.dir），否则日志出不了容器。"""
+    gv = _gv(GV_FILE_A3)
+    mounts = gv["model"]["mounts"]
+    log_dir = gv["logs"]["dir"]
+    assert mounts, "model.mounts 不能为空"
+    for m in mounts:
+        host_src = m.split(":")[0]
+        assert ":" in m, f"mount 必须写 host:container，当前: {m}"
+        assert host_src.startswith("/")
+        assert log_dir == host_src or log_dir.startswith(host_src.rstrip("/") + "/"), (
+            f"logs.dir={log_dir} 不在 mounts 覆盖范围内（{mounts}）")
+    # 模型权重也必须在 mounts 覆盖范围内，否则容器里看不到权重
+    assert gv["model_path"].startswith(tuple(m.split(":")[0].rstrip("/") for m in mounts))

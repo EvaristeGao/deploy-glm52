@@ -402,3 +402,176 @@ def test_start_yml_whitelist_assert_rejects_unknown_node():
         for tpl in t["assert"]["that"]
     ]
     assert results == [True, False]  # prefill 未配置→合法；decode 含 dX→非法
+
+
+# ==================== A3 配置选择器派生回归（deploy_config: 200k | 1m） ====================
+# 用 A3 真实 inventory + 真实 group_vars + start.yml 真实表达式渲染（不镜像表达式，防两处漂移）。
+# 1M 档对齐官方 A3 PD 分离 1M 参考：P 2 节点 dp2/tp16/每节点 1 引擎（rank 0/1），
+# D 2 节点 dp8/tp4/每节点 4 引擎（rank 0/4），proxy 端点随之变成 2 + 8。
+
+A3_INV_FILE = os.path.join(os.path.dirname(START_YML), "..", "inventories", "a3", "inventory.yaml")
+A3_GV_FILE = os.path.join(os.path.dirname(START_YML), "..", "inventories", "a3", "group_vars", "all.yml")
+
+
+def _resolve_gv(gv, rounds=3):
+    """展开 group_vars 的 Jinja 间接层（deploy_config → _active → pd_cluster），保留原生类型。"""
+    ev = NativeEnvironment(undefined=StrictUndefined)
+    for _ in range(rounds):
+        pending = False
+        for k, v in gv.items():
+            if isinstance(v, str) and "{{" in v:
+                r = ev.from_string(v).render(**gv)
+                if r != v:
+                    gv[k] = r
+                else:
+                    pending = True
+            elif isinstance(v, dict):
+                for kk, vv in list(v.items()):
+                    if isinstance(vv, str) and "{{" in vv:
+                        r = ev.from_string(vv).render(**gv)
+                        if r != vv:
+                            v[kk] = r
+                        else:
+                            pending = True
+        if not pending:
+            break
+    return gv
+
+
+def _load_inventory(path):
+    """按 Ansible 语义解析 inventory：groups（含 children 组）+ hostvars。"""
+    inv = yaml.safe_load(open(path, encoding="utf-8"))
+    groups, hostvars = {"all": []}, {}
+    for child, cdef in inv["all"]["children"].items():
+        groups[child] = list(cdef.get("hosts", {}).keys())
+        groups["all"].extend(groups[child])
+        for name, v in cdef.get("hosts", {}).items():
+            if v:
+                hostvars.setdefault(name, {}).update(v)
+    groups["all"] = sorted(set(groups["all"]))
+    return groups, hostvars
+
+
+def _a3_ctx(deploy_config=None):
+    gv = yaml.safe_load(open(A3_GV_FILE, encoding="utf-8"))
+    if deploy_config is not None:
+        gv["deploy_config"] = deploy_config
+    groups, hostvars = _load_inventory(A3_INV_FILE)
+    return _resolve_gv(gv), groups, hostvars
+
+
+def _derive_node(host, deploy_config=None):
+    """按 start.yml 真实 set_fact 顺序渲染 A3 节点的角色/索引 + 启动参数。
+
+    同一 set_fact 任务内各键互不引用（Ansible 语义），故按任务分批渲染后再合并。"""
+    gv, groups, hostvars = _a3_ctx(deploy_config)
+    ctx = {"inventory_hostname": host}
+    for task_name in ("派生本节点角色/索引", "派生本节点启动参数"):
+        t = _playbook_task(task_name)
+        env = _new_env(native=True)
+        base = dict(gv, groups=groups, hostvars=hostvars, **ctx)
+        ctx.update({
+            k: env.from_string(str(v)).render(**base)
+            for k, v in (t.get("set_fact") or {}).items()
+        })
+    return gv, groups, hostvars, ctx
+
+
+def _render_a3_task_fact(task_name, deploy_config=None, native=True):
+    """渲染 A3 下 start.yml 某任务的 vars: + set_fact: 表达式。
+
+    native=True 保留原生类型（实例清单是 list）；native=False 得到 shell 空格分隔字符串
+    （proxy 端点值）。"""
+    gv, groups, hostvars = _a3_ctx(deploy_config)
+    t = _playbook_task(task_name)
+    native_env = _new_env(native=True)
+    ctx = dict(gv, groups=groups, hostvars=hostvars)
+    for name, tpl in (t.get("vars") or {}).items():
+        ctx[name] = native_env.from_string(str(tpl)).render(**ctx)
+    env = _new_env(native=native)
+    return {k: env.from_string(str(v)).render(**ctx) for k, v in (t.get("set_fact") or {}).items()}
+
+
+def test_a3_1m_prefill_engine_args():
+    """A3 1M：p0/p1 各 1 引擎（dp2 tp16），rank 0/1，端口 9081，rpc 16600，dp_address = p0 IP。"""
+    _, _, hostvars, p0 = _derive_node("p0", "1m")
+    assert p0["node_role"] == "prefill"
+    assert p0["node_idx"] == 0
+    assert (p0["dp_size"], p0["tp_size"], p0["dp_size_local"]) == (2, 16, 1)
+    assert p0["dp_rank"] == 0
+    assert p0["start_port"] == 9081
+    assert p0["rpc_port"] == 16600
+    assert p0["kv_port"] == 30000
+    assert p0["dp_address"] == hostvars["p0"]["ip"]
+
+    _, _, _, p1 = _derive_node("p1", "1m")
+    assert p1["dp_rank"] == 1
+    assert p1["dp_address"] == hostvars["p0"]["ip"]   # dp master 恒为 p0
+
+
+def test_a3_1m_decode_engine_args():
+    """A3 1M：d0/d1 各 4 引擎（dp8 tp4），rank 0/4，端口 9900，kv_port 30200。"""
+    _, _, hostvars, d0 = _derive_node("d0", "1m")
+    assert d0["node_role"] == "decode"
+    assert (d0["dp_size"], d0["tp_size"], d0["dp_size_local"]) == (8, 4, 4)
+    assert d0["dp_rank"] == 0
+    assert d0["start_port"] == 9900
+    assert d0["rpc_port"] == 16600
+    assert d0["kv_port"] == 30200
+    assert d0["dp_address"] == hostvars["d0"]["ip"]
+
+    _, _, _, d1 = _derive_node("d1", "1m")
+    assert d1["dp_rank"] == 4
+    assert d1["dp_address"] == hostvars["d0"]["ip"]
+
+
+def test_a3_200k_engine_args():
+    """A3 200K：官方 198K PD 的 dp/tp —— prefill 用 DP2 TP16（每节点 1 引擎，rank 0/1）
+    代替官方的 PP2 TP16；decode 与官方一致 DP8 TP4（每节点 4 引擎，rank 0/4）。"""
+    _, _, hostvars, p1 = _derive_node("p1", "200k")
+    assert (p1["dp_size"], p1["tp_size"], p1["dp_size_local"]) == (2, 16, 1)
+    assert p1["dp_rank"] == 1
+    assert p1["start_port"] == 9081
+    assert p1["rpc_port"] == 16591
+    assert p1["kv_port"] == 30000
+    assert p1["dp_address"] == hostvars["p0"]["ip"]
+
+    _, _, hostvars, d1 = _derive_node("d1", "200k")
+    assert (d1["dp_size"], d1["tp_size"], d1["dp_size_local"]) == (8, 4, 4)
+    assert d1["dp_rank"] == 4
+    assert d1["start_port"] == 9900
+    assert d1["rpc_port"] == 16600
+    assert d1["kv_port"] == 30200
+    assert d1["dp_address"] == hostvars["d0"]["ip"]
+
+
+def test_a3_1m_instance_list_and_proxy_endpoints():
+    """A3 1M：探测实例 2×1 + 2×4 + 1 proxy = 11；proxy 端点 prefill 2 个、decode 8 个。"""
+    il = _render_a3_task_fact("生成实例清单", "1m")["instance_list"]
+    assert len(il) == 11
+    assert [r[0] for r in il].count("prefill") == 2
+    assert [r[0] for r in il].count("decode") == 8
+    assert il[-1][0] == "proxy"
+
+    pe = _render_a3_task_fact("生成 proxy 端点", "1m", native=False)
+    assert len(pe["prefiller_hosts"].split()) == 2
+    assert pe["prefiller_ports"] == "9081 9081"
+    assert len(pe["decoder_hosts"].split()) == 8
+    assert pe["decoder_ports"] == "9900 9901 9902 9903 9900 9901 9902 9903"
+    # decode 端点每节点 4 个，端口按节点本地序号递增（与官方参考一致）
+    dec_hosts = pe["decoder_hosts"].split()
+    assert dec_hosts[:4] == [dec_hosts[0]] * 4
+    assert dec_hosts[4:] == [dec_hosts[4]] * 4
+    assert dec_hosts[0] != dec_hosts[4]
+
+
+def test_a3_200k_instance_list_and_proxy_endpoints():
+    """A3 200K：探测实例 2×1 + 2×4 + 1 proxy = 11；proxy prefill 2 个、decode 8 个。"""
+    il = _render_a3_task_fact("生成实例清单", "200k")["instance_list"]
+    assert len(il) == 11
+    assert [r[0] for r in il].count("prefill") == 2
+    assert [r[0] for r in il].count("decode") == 8
+    pe = _render_a3_task_fact("生成 proxy 端点", "200k", native=False)
+    assert pe["prefiller_ports"] == "9081 9081"
+    assert pe["decoder_ports"] == "9900 9901 9902 9903 9900 9901 9902 9903"
+    assert len(pe["decoder_hosts"].split()) == 8

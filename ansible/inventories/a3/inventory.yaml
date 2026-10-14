@@ -1,6 +1,8 @@
 # =============================================================================
 # A3 inventory — 4xA3 2P+2D
-# 拓扑：Prefill dp4tp8（每节点 2 引擎），Decode dp32 tp1（每节点 16 引擎）
+# 拓扑由 group_vars 的 deploy_config 决定，两档形状相同（每节点均用满 16 卡）：
+#   Prefill dp2tp16（每节点 1 引擎）+ Decode dp8tp4（每节点 4 引擎）
+#   两档差别只在 max-model-len / CP(DCP) / batched-tokens / MTP spec tokens / hf-overrides / HCCL_BUFFSIZE
 # proxy 落在 p0；mooncake_master 3 节点（p0/p1/d0）
 #
 # 每节点字段：
@@ -8,18 +10,19 @@
 #   ip           : 节点网卡 IP（= ip addr show <nic> 的值），组件间互通统一用它（etcd/haproxy/mooncake/引擎）
 #   nic          : 网卡名（取 ip 的接口）
 #   idx          : 该角色内节点序号
-# ⚠ ip 字段暂用 ansible_host 值（7.150.x.x），生产环境核对并改成真实网卡 IP。
+# ip 字段已填网卡 IP（172.168.4.x），实机前用 `ip addr show <nic>` 复核；
+# ansible_host 用可解析的主机名（ott9-a3x），若控制机无 DNS 请改回 IP。
 # =============================================================================
 all:
   children:
     prefill:
       hosts:
-        p0: { ansible_host: "7.150.11.146", ip: "7.150.11.146", nic: enp23s0f3, idx: 0 }
-        p1: { ansible_host: "7.150.11.213", ip: "7.150.11.213", nic: enp23s0f3, idx: 1 }
+        p0: { ansible_host: "ott9-a31", ip: "172.168.4.237", nic: enp23s0f3, idx: 0 }
+        p1: { ansible_host: "ott9-a32", ip: "172.168.4.31", nic: enp23s0f3, idx: 1 }
     decode:
       hosts:
-        d0: { ansible_host: "7.150.12.179", ip: "7.150.12.179", nic: enp23s0f3, idx: 0 }
-        d1: { ansible_host: "7.150.12.191", ip: "7.150.12.191", nic: enp23s0f3, idx: 1 }
+        d0: { ansible_host: "ott9-a33", ip: "172.168.4.230", nic: enp23s0f3, idx: 0 }
+        d1: { ansible_host: "ott9-a34", ip: "172.168.4.226", nic: enp23s0f3, idx: 1 }
     proxy:  { hosts: { p0: {} } }
     # mooncake_master 3 节点（与 group_vars mooncake.ha.nodes 对齐；group 不参与 start.yml 部署判断，仅供调试）
     mooncake: { hosts: { p0: {}, p1: {}, d0: {} } }

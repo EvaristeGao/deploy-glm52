@@ -64,13 +64,27 @@ ansible/
 
 A2/A3 切换：`-i` 指不同 inventory 即可，互不影响。
 
+### 上下文长度档位选择器（`deploy_config`）
+
+各集群 `group_vars/all.yml` 顶部有 `deploy_config` 开关，选择 `_200k` / `_1m` 两个配置块之一（`_active: "{{ _1m if deploy_config == '1m' else _200k }}"`，再经 `pd_cluster: "{{ _active.pd_cluster }}"` 落到具体的 P/D 拓扑、端口、CP 参数、`additional-config`）：
+
+| inventory | `deploy_config` 当前值 | 200k 档 | 1m 档 |
+|---|---|---|---|
+| `a2` | `1m` | GLM-5.2 非对称 PD 4P+8D（P dp4tp8 / D dp8tp4），200K ctx | GLM-5.3 对称 PD 4P+4D，1M ctx + CP + timeouts + profiler |
+| `a3` | `200k` | GLM-5.2，官方 §5.2.1 198K PD 的 dp/tp（P **DP2 TP16** 每节点 1 引擎 / D **DP8 TP4** 每节点 4 引擎），max-model-len 202752 | GLM-5.2，官方 §5.2.2 1M PD（P DP2 TP16 / D DP8 TP4）+ DCP 128，max-model-len 1048576 |
+
+A3 两档**拓扑形状相同**（每节点都用满 16 卡），差别在上下文长度与运行时参数（batched-tokens / MTP spec tokens / `hf-overrides` / `HCCL_BUFFSIZE` / CP）。
+
+切换后重跑 `gen`（重渲染节点脚本）→ `start` 生效。A3 两档与官方参考的逐项对照、有意偏离（prefill 用 DP 代替官方 PP2、保持 kvpool、关闭 sfa_c8、w4a8c8 而非 w8a8c8）及部署前检查清单见 `../docs/a3-glm52-configs.md`。
+
 **关键字段**（group_vars/all.yml）：
-- `pd_cluster.prefill` / `pd_cluster.decode`：dp/tp/dp_size_local/base_port/kv_port/rpc_port
+- `pd_cluster.prefill` / `pd_cluster.decode`：dp/tp/dp_size_local/base_port/kv_port/rpc_port；可选分档覆盖项 `additional_config`、`hf_overrides`、`max_num_batched_tokens`、`num_speculative_tokens`（decode）、`hccl_buffsize`（decode）、`context_parallel_size`/`decode_context_parallel_size`（prefill）+ `cp_kv_cache_interleave_size`（未配置则不渲染，回落集群默认值）
 - `model.path` / `model.served_model_name`：模型权重路径与 serve 名
-- `proxy.port`、`mooncake.port`：统一入口与 KV 池端口
+- `model.mounts`：**必须写 `host:container`**（如 `/mnt/sfs_turbo:/mnt/sfs_turbo`）；单路径会被 docker 当匿名卷，容器里是空目录。`logs.dir` 与 `model_path` 都必须落在 mounts 覆盖范围内（引擎容器不单独挂 `logs.dir`，否则日志出不了容器）
+- `proxy.port`、`mooncake.port`（后者当前无任何 playbook/模板引用）：统一入口与 KV 池端口
 - `proxy.prefill_nodes` / `proxy.decode_nodes`：接入 proxy 的节点白名单（inventory 节点名，空/未配置 = 全量接入）；如 `decode_nodes: [d0]` 只让 d0 的实例接流量（模拟 decode 排队），改后重跑 `--tags proxy` 生效
 - `container.name` / `container.shm_size`：容器名与共享内存
-- `logs.dir` / `logs.vllm`：日志目录（建议共享目录，容器销毁后保留）+ 按节点 `vllm_{node}.log`
+- `logs.dir` / `logs.vllm`：日志目录（必须在共享目录且被 mounts 覆盖，容器销毁后保留）+ 按节点 `vllm_{node}.log`
 - `ansible_*`：SSH 连接（user/私钥/重试/心跳）
 
 ### 部署模式（kvpool / ha+etcd / haproxy 形态）
@@ -172,9 +186,10 @@ ansible-playbook -i inventories/a2/inventory.yaml playbooks/start.yml --check
 
 ## 7. 已知事项
 
-- **A3 已按实机配置对齐**：inventory 已填 IP（10.246.64.45-48，nic `enp162s0f0`）、`model.path /mnt/weight/GLM-5.2-w4a8c8` + `/mnt/weight` 挂载、decode 拓扑 `dp32 tp1 dp_size_local 16`、A3 特有环境变量（`ASCEND_A3_ENABLE`/`FUSED_MC2`/`HCCL_*_TIMEOUT`）与推理参数（模板 `cluster_type=='a3'` 条件）。**A3 仍未实机部署验证**（当前控制机连不上 10.246.64.x，需在能连 A3 的环境跑通）
+- **A3 双档配置（`deploy_config`，当前 `200k`）**：两档拓扑形状相同（P DP2 TP16 每节点 1 引擎 / D DP8 TP4 每节点 4 引擎），200k 档对齐官方 §5.2.1 198K PD 的 dp/tp（max-model-len 202752、prefill/decode batched-tokens 16384/164、decode MTP spec 3、**两侧 `--hf-overrides`**、decode `HCCL_BUFFSIZE=256`），1m 档对齐官方 §5.2.2（max-model-len 1048576、DCP 128、spec 5、`HCCL_BUFFSIZE=400`、无 hf-overrides）。**有意偏离**：prefill 用 DP2 TP16 代替官方的 PP2 TP16（`launch_online_dp.py` 是纯 DP 启动器）、保持 kvpool（官方参考是直连）、两档都关闭 `enable_sparse_sfa_c8`（c3b1d4d 精度策略）、权重用 w4a8c8（官方参考是 w8a8c8，官方标注 w4a8c8 的 PD 分离为 experimental）。逐项对照与部署前检查清单见 `../docs/a3-glm52-configs.md`。**A3 仍未实机部署验证**
+- **`model.mounts` 必须写 `host:container`**：单路径写法会被 docker 当匿名卷（容器内是空目录，模型权重看不见）；且 `logs.dir` 与 `model_path` 都要落在 mounts 覆盖范围内，否则引擎日志/权重在容器里不可见（单测已锁）
 - **运行需在 `ansible/` 目录内**（`ansible.cfg` 在 `ansible/`，让 Ansible 加载配置）
 - 完整 `--check` 是干跑近似，不等价 `--dry-run` 的完整模拟
 - `--tags engine` 等分段重跑依赖前置阶段（如 smoke 需 proxy 已起）
-- 引擎模板的 `local_ip`（HCCL）与控制面（etcd/haproxy/mooncake）统一用 inventory 的静态 `ip`（网卡 IP）；`ansible_host` 仅用于 SSH。剩余 `dp_address`/健康检查/proxy 端点仍用 `ansible_host`（数据面，未一并切换）
+- 节点互通地址统一用 inventory 的静态 `ip`（网卡 IP）：控制面（etcd/haproxy/mooncake）、数据面（`dp_address`/健康检查/proxy 端点）都是 `hostvars[...].ip`；`ansible_host` 仅用于 SSH，playbook/模板里无引用
 - 跑 `stop.yml` 会删 `container.name` 指定的容器（不影响其他运行容器）

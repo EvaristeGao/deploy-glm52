@@ -12,24 +12,126 @@ ansible_ssh_common_args: "-o BatchMode=yes -o StrictHostKeyChecking=accept-new -
 ansible_ssh_retries: 3                          # UNREACHABLE 自动重试（实机验证: 节点容器起后 sshd 瞬时不稳会 reset）
 ansible_python_interpreter: /usr/bin/python3
 
-# --- 集群参数（值抄自 config-a3.yaml，平铺、无 nodes/cluster 段）---
+# =============================================================================
+# 部署配置选择器（与 A2 同一套写法）
+#   取值：200k —— 当前启用，GLM-5.2 198K ctx（官方 A3 198K PD 参考；prefill 用 DP 代替 PP）
+#         1m   —— GLM-5.2 1M ctx + DCP（官方 A3 PD 分离 1M 参考）
+# 参考：https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html
+# =============================================================================
+deploy_config: 200k
+
 cluster_type: a3
-image: vllm-ascend-ha-gwh-test:v2.0 
+image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
 image_tar: ""                 # 非空则 pull.yml 改从该 tar docker load（需节点可见路径，如共享目录）；留空则 docker pull image
-model_path: /ce-efs-hd2-01/models/lh/GLM-5.2-w4a8c8
+
+# =============================================================================
+# 权重 / 模型（200k 与 1m 共用同一份权重，故不进下面的配置块；
+#   若将来两档需要不同权重，再把 model_path 各自移入配置块）
+#   注意：官方 A3 的 198K / 1M 参考权重都是 w8a8c8，当前用的是 w4a8c8
+#   （官方标注 w4a8c8 的 PD 分离为 experimental、有已知精度问题）
+# =============================================================================
+model_path: "/mnt/sfs_turbo/models/GLM-5.2-w4a8c8"
 model_name: glm-52
 model:
-  path: /ce-efs-hd2-01/models/lh/GLM-5.2-w4a8c8   # A3 实机权重路径
-  served_model_name: glm-52
-  dir_host: ""        # 非空则挂载 -v <dir_host>:/root/.cache（A3 用）
-  mounts: ["/ce-efs-hd2-01:/ce-efs-hd2-01"]   # 共享目录 + 模型权重挂载（A3 用 /mnt/weight）
+  path: "{{ model_path }}"
+  served_model_name: "{{ model_name }}"
+  dir_host: ""        # 非空则挂载 -v <dir_host>:/root/.cache
+  mounts:
+    - "/mnt/sfs_turbo:/mnt/sfs_turbo"   # 必须写 host:container（单路径会被 docker 当匿名卷，容器内是空的）
 
-pd_cluster:
-  max_model_len: 200000
-  num_cards: 16
-  prefill: { dp_size: 4, tp_size: 8, dp_size_local: 2, base_port: 9081, kv_port: 30000, rpc_port: 16591 }
-  decode:  { dp_size: 32, tp_size: 1, dp_size_local: 16, base_port: 9900, kv_port: 30100, rpc_port: 16600 }   # A3 实机: dp32 tp1, 每节点 16 引擎
-  enable_prefix_caching: true
+# =============================================================================
+# 200K 配置（对齐官方 A3 198K PD 分离参考，但 prefill 用 DP 代替 PP）
+#   官方：prefill PP2 TP16（2 节点合成 1 个 PP2 引擎）+ decode DP8 TP4（每节点 4 引擎）。
+#   本项目 launch_online_dp.py 是纯 DP 启动器，表达不了 PP，故 prefill 取 DP2 TP16
+#   （保留官方 TP16，DP 横向铺开 2 节点、每节点 1 引擎）；decode 与官方一致。
+#   官方参考 max-model-len 202752；prefill batched-tokens 16384 / decode 164；
+#   decode spec tokens 3（1M 档才是 5）；decode HCCL_BUFFSIZE 256（1M 档才是 400）；
+#   两侧 --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'（1M 档没有）。
+#   enable_sparse_sfa_c8 按本项目策略关闭（官方参考为 true；见 c3b1d4d 精度问题）。
+# =============================================================================
+_200k:
+  pd_cluster:
+    max_model_len: 202752
+    num_cards: 16
+    prefill:
+      dp_size: 2
+      tp_size: 16
+      dp_size_local: 1
+      base_port: 9081
+      kv_port: 30000
+      rpc_port: 16591
+      max_num_batched_tokens: 16384
+      max_num_seqs: 64
+      gpu_memory_utilization: 0.92
+      hf_overrides: '{"use_index_cache": true, "index_topk_freq": 4}'
+      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
+    decode:
+      dp_size: 8
+      tp_size: 4
+      dp_size_local: 4
+      base_port: 9900
+      kv_port: 30200
+      rpc_port: 16600
+      max_num_batched_tokens: 164
+      max_num_seqs: 32
+      gpu_memory_utilization: 0.92
+      num_speculative_tokens: 3
+      hccl_buffsize: 256
+      hf_overrides: '{"use_index_cache": true, "index_topk_freq": 4}'
+      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true}'
+    enable_prefix_caching: true
+
+# =============================================================================
+# 1M 配置（官方 A3 PD 分离 1M 参考：P 2 节点 dp2tp16 每节点 1 引擎；
+#   D 2 节点 dp8tp4 每节点 4 引擎；prefill 开 DSA CP，decode 开 DCP=4）
+#   注意：官方参考里 prefill 节点声明 --decode-context-parallel-size 16，
+#         decode 节点声明 4（各自本地口径不同），故 prefill 侧单独给
+#         decode_context_parallel_size。
+# =============================================================================
+_1m:
+  pd_cluster:
+    max_model_len: 1048576
+    num_cards: 16
+    cp_kv_cache_interleave_size: 128
+    prefill:
+      dp_size: 2
+      tp_size: 16
+      dp_size_local: 1
+      base_port: 9081
+      kv_port: 30000
+      rpc_port: 16600
+      context_parallel_size: 1
+      decode_context_parallel_size: 16
+      engine_id: 0
+      max_num_seqs: 64
+      gpu_memory_utilization: 0.85
+      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
+    decode:
+      dp_size: 8
+      tp_size: 4
+      dp_size_local: 4
+      base_port: 9900
+      kv_port: 30200
+      rpc_port: 16600
+      context_parallel_size: 4
+      engine_id: 2
+      max_num_batched_tokens: 192
+      max_num_seqs: 32
+      gpu_memory_utilization: 0.92
+      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true}'
+    enable_prefix_caching: true
+
+# =============================================================================
+# 激活的配置（由 deploy_config 选择；_active 必须先于 pd_cluster 定义，
+#   否则 {{ _active.pd_cluster }} 解析时 _active 还是未展开的字符串）
+# =============================================================================
+_active: "{{ _1m if deploy_config == '1m' else _200k }}"
+pd_cluster: "{{ _active.pd_cluster }}"
+
+# --- 共享字段（与部署配置无关）---
+runtime:
+  ready_timeout: 2400
+  proxy_ready_timeout: 600
 
 proxy:
   port: 8000
@@ -77,11 +179,12 @@ haproxy:
   nodes: [p0, p1, d0]        # standalone：3 个独立 haproxy 容器节点
   port: 12379                # standalone：统一监听端口（master/引擎共用，经 3 节点 IP:此端口 访问 etcd）
 
-container: { name: vllm-ascend-gwh-glm52, shm_size: 1024g }
-runtime: { ready_timeout: 2400, proxy_ready_timeout: 600 }
+container:
+  name: vllm-ascend-gwh-glm52
+  shm_size: 1024g
 
 logs:
-  dir: /ce-efs-hd2-01/g00832294/deploy_logs   # 共享目录（容器内可见，容器销毁后日志仍在）
+  dir: /mnt/sfs_turbo/g00832294/logs   # 必须在 model.mounts 覆盖的路径下（引擎容器不单独挂 logs.dir），否则日志出不了容器
   vllm: vllm_{node}.log     # {node} 按节点替换（p0/p1/d0..），避免节点互相覆盖
   mooncake: mooncake_{node}.log   # {node} 按节点替换（3 个 mooncake master 各写各的，避免共享目录互相覆盖）
   proxy: proxy.log
