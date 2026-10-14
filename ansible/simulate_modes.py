@@ -3,8 +3,10 @@
 """模拟各部署模式的 playbook 渲染，逐命令检查（无实机、不依赖 /dev/shm）。
 
 用法：
-    .venv/bin/python simulate_modes.py            # 全模式
-    .venv/bin/python simulate_modes.py standalone  # 只跑某模式（关键字过滤）
+    .venv/bin/python simulate_modes.py                       # a2 + 文件当前档位，全模式
+    .venv/bin/python simulate_modes.py standalone            # 只跑某模式（关键字过滤，忽略大小写）
+    .venv/bin/python simulate_modes.py --inv a3              # 跑 a3 inventory
+    .venv/bin/python simulate_modes.py --inv a3 --deploy-config 200k
 
 原理：用 jinja2（trim_blocks=True，与 Ansible 模板一致）复刻 start.yml / gen.yml 的
     when 判定、set_fact 派生、shell/template/copy 渲染；每个 shell 命令跑 bash -n 语法检查。
@@ -16,10 +18,60 @@ import sys
 import tempfile
 import yaml
 from jinja2 import Environment, FileSystemLoader, Undefined
+from jinja2.nativetypes import NativeEnvironment
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-INV = yaml.safe_load(open(os.path.join(BASE, "inventories/a2/inventory.yaml")))
-GV = yaml.safe_load(open(os.path.join(BASE, "inventories/a2/group_vars/all.yml")))
+
+
+def _parse_argv(argv):
+    """位置参数=模式过滤关键字；--inv <a2|a3>；--deploy-config <200k|1m>。"""
+    inv, deploy_config, key = "a2", None, ""
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--inv":
+            inv = argv[i + 1]; i += 2
+        elif a == "--deploy-config":
+            deploy_config = argv[i + 1]; i += 2
+        else:
+            key = a; i += 1
+    return inv, deploy_config, key
+
+
+def resolve_gv(gv, rounds=3):
+    """展开 group_vars 里的 Jinja 间接层：deploy_config → {_200k,_1m} → _active → pd_cluster。
+    与 tests/test_template_render.py::_gv 同一套做法（NativeEnvironment 保留原生类型）。
+    依赖 _active 在文件里先于 pd_cluster 定义（dict 保持插入顺序）。"""
+    _ev = NativeEnvironment(undefined=Undefined)
+    for _ in range(rounds):
+        any_skipped = False
+        for k, v in gv.items():
+            if isinstance(v, str) and "{{" in v:
+                rendered = _ev.from_string(v).render(**gv)
+                if rendered != v:
+                    gv[k] = rendered
+                else:
+                    any_skipped = True
+            elif isinstance(v, dict):
+                for kk in list(v.keys()):
+                    vv = v[kk]
+                    if isinstance(vv, str) and "{{" in vv:
+                        rendered = _ev.from_string(vv).render(**gv)
+                        if rendered != vv:
+                            v[kk] = rendered
+                        else:
+                            any_skipped = True
+        if not any_skipped:
+            break
+    return gv
+
+
+INV_NAME, DEPLOY_CONFIG, MODE_KEY = _parse_argv(sys.argv[1:])
+INV = yaml.safe_load(open(os.path.join(BASE, f"inventories/{INV_NAME}/inventory.yaml")))
+_gv_raw = yaml.safe_load(open(os.path.join(BASE, f"inventories/{INV_NAME}/group_vars/all.yml")))
+if DEPLOY_CONFIG is not None:
+    _gv_raw["deploy_config"] = DEPLOY_CONFIG
+GV = resolve_gv(_gv_raw)
 
 # ---- inventory 解析：groups / hostvars ----
 groups = {"all": []}
@@ -63,6 +115,10 @@ import itertools
 env.filters["dirname"] = os.path.dirname
 env.filters["basename"] = os.path.basename
 env.filters["product"] = lambda *a: list(itertools.product(*a))
+env.filters["difference"] = lambda a, b: [x for x in a if x not in b]
+env.filters["intersect"] = lambda a, b: [x for x in a if x in b]
+env.filters["union"] = lambda a, b: list(a) + [x for x in b if x not in a]
+env.filters["unique"] = lambda a: list(dict.fromkeys(a))
 
 MODES = [
     ("HA_per_container", dict(enabled=True, enable_ha=True, haproxy_mode="per_container"), "kvpool HA · 内嵌 haproxy（默认）"),
@@ -344,9 +400,8 @@ def report(mode_key, mode_cfg, mode_label):
 
 
 def main():
-    key = sys.argv[1] if len(sys.argv) > 1 else ""
     for mk, cfg, label in MODES:
-        if key and key.lower() not in mk:
+        if MODE_KEY and MODE_KEY.lower() not in mk.lower():
             continue
         report(mk, cfg, label)
 
