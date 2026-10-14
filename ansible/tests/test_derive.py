@@ -575,3 +575,52 @@ def test_a3_200k_instance_list_and_proxy_endpoints():
     assert pe["prefiller_ports"] == "9081 9081"
     assert pe["decoder_ports"] == "9900 9901 9902 9903 9900 9901 9902 9903"
     assert len(pe["decoder_hosts"].split()) == 8
+
+
+# ==================== kvpool 单主（enable_ha=false）：不起 etcd/haproxy，免证书依赖 ====================
+# 测试阶段用裸 mooncake_master（master 固定落 proxy 节点 p0），无需 etcd 选主与证书目录。
+
+
+def _a3_ctx_with_ha(enable_ha):
+    """A3 上下文 + 覆盖 mooncake.ha.enable_ha，并算好 mooncake_master_nodes（与 start.yml play vars 同式）。"""
+    gv, groups, hostvars = _a3_ctx()
+    gv = dict(gv)
+    gv["mooncake"] = dict(gv["mooncake"], ha=dict(gv["mooncake"]["ha"], enable_ha=enable_ha))
+    master_nodes = gv["mooncake"]["ha"]["nodes"] if enable_ha else [groups["proxy"][0]]
+    ctx = dict(gv, groups=groups, hostvars=hostvars,
+               inventory_hostname=groups["proxy"][0], mooncake_master_nodes=master_nodes)
+    return ctx
+
+
+def test_mooncake_container_certs_bind_only_in_ha_mode():
+    """etcd 证书挂载只在 HA 模式出现（start.yml「起 mooncake 容器」）。
+
+    单主模式没有 etcd，若仍 bind etcd.certs_dir，docker 会在宿主机创建一个空的
+    证书目录；而切回 HA 前又必须确认该目录真实存在。故按 enable_ha 门控。"""
+    env = _new_env(native=False)
+    shell = str(_playbook_task("起 mooncake 容器")["shell"])
+
+    out_ha = env.from_string(shell).render(**_a3_ctx_with_ha(True))
+    assert "certs:/etc/pki/etcd/certs" in out_ha
+
+    out_single = env.from_string(shell).render(**_a3_ctx_with_ha(False))
+    assert "certs:/etc/pki/etcd/certs" not in out_single
+    # 两种模式都要挂日志目录、用 mooncake 镜像、只在 proxy 节点起
+    for out in (out_ha, out_single):
+        assert "/mnt/sfs_turbo/g00832294/logs" in out
+        assert "vllm-ascend-ha-gwh-test:v2.0" in out
+        assert "docker run -itd --name mooncake-p0" in out
+
+
+def test_gen_mooncake_json_single_master_points_to_p0():
+    """gen.yml 单主分支：master_server_address 直连 p0 的 mooncake rpc 端口（无 etcd://）。"""
+    with open(os.path.join(os.path.dirname(START_YML), "gen.yml"), encoding="utf-8") as f:
+        play = yaml.safe_load(f)[0]
+    task = next(t for t in play["tasks"]
+                if (t.get("name") or "").startswith("渲染 mooncake.json（kvpool 单主"))
+    ctx = _a3_ctx_with_ha(False)
+    out = _new_env(native=False).from_string(str(task["copy"]["content"])).render(**ctx)
+    p0_ip = ctx["hostvars"]["p0"]["ip"]
+    assert f'"master_server_address": "{p0_ip}:{ctx["mooncake"]["ha"]["rpc_port"]}"' in out
+    assert "etcd://" not in out
+    assert '"metadata_server": "P2PHANDSHAKE"' in out

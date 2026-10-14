@@ -101,6 +101,7 @@ A3 两档**拓扑形状相同**（每节点都用满 16 卡），差别在上下
 - **校验**：`enable_ha=true` 要求 `enabled=true`（etcd/haproxy 为 mooncake_master 选主服务），非法组合 `start.yml` 开头 `assert` 拦截。
 - **haproxy 形态**：`per_container`（默认）在每个 mooncake/引擎容器内嵌 haproxy（master→`cache_master_port`、引擎→`pd_port`）；`standalone` 在 `haproxy.nodes`（3 节点）各起一个独立 haproxy 容器（镜像 `haproxy.image`，构建自 `image_build/Dockerfile_ha`）监听统一 `haproxy.port`，组件经 3 节点 `IP:port` 访问。
 - **生效点**：`start.yml`（etcd/mooncake/haproxy 容器、mooncake_master 任务门控与命令分支）、`gen.yml`（mooncake.json 三态渲染，无 kvpool 不生成，HA 时 `etcd://` 地址按 haproxy 形态二选一）、引擎模板（kv-transfer-config 两套 JSON + MOONCAKE_CONFIG_PATH 门控）、`check/pull/stop`（etcd/mooncake 镜像与容器按开关）、`status/logs`（无 mooncake 引用，不受影响）。
+- **证书只在 HA 模式挂**：`etcd.certs_dir` 的 bind 在引擎容器、mooncake 容器、独立 haproxy 容器上都按 `mooncake.ha.enable_ha` 门控 —— 单主/无 kvpool 模式整条链路都不需要证书目录，也不会在宿主机上创建空的 `/…/certs`。
 - ⚠️ **待实机确认**：`无 kvpool`（直连 PD 分离）在 w4a8c8 上官方标注有已知精度问题；`单主` 的 mooncake_master 调用与直连 `master_server_address`、`standalone` 下组件连 3 个 haproxy 的 `etcd://` 多地址形态，均需实机验证。
 
 ---
@@ -186,7 +187,8 @@ ansible-playbook -i inventories/a2/inventory.yaml playbooks/start.yml --check
 
 ## 7. 已知事项
 
-- **A3 双档配置（`deploy_config`，当前 `200k`）**：两档拓扑形状相同（P DP2 TP16 每节点 1 引擎 / D DP8 TP4 每节点 4 引擎），200k 档对齐官方 §5.2.1 198K PD 的 dp/tp（max-model-len 202752、prefill/decode batched-tokens 16384/164、decode MTP spec 3、**两侧 `--hf-overrides`**、decode `HCCL_BUFFSIZE=256`），1m 档对齐官方 §5.2.2（max-model-len 1048576、DCP 128、spec 5、`HCCL_BUFFSIZE=400`、无 hf-overrides）。**有意偏离**：prefill 用 DP2 TP16 代替官方的 PP2 TP16（`launch_online_dp.py` 是纯 DP 启动器）、保持 kvpool（官方参考是直连）、两档都关闭 `enable_sparse_sfa_c8`（c3b1d4d 精度策略）、权重用 w4a8c8（官方参考是 w8a8c8，官方标注 w4a8c8 的 PD 分离为 experimental）。逐项对照与部署前检查清单见 `../docs/a3-glm52-configs.md`。**A3 仍未实机部署验证**
+- **A3 双档配置（`deploy_config`，当前 `200k`）**：两档拓扑形状相同（P DP2 TP16 每节点 1 引擎 / D DP8 TP4 每节点 4 引擎），200k 档对齐官方 §5.2.1 198K PD 的 dp/tp（max-model-len 202752、prefill/decode batched-tokens 16384/164、decode MTP spec 3、**两侧 `--hf-overrides`**、decode `HCCL_BUFFSIZE=256`），1m 档对齐官方 §5.2.2（max-model-len 1048576、DCP 128、spec 5、`HCCL_BUFFSIZE=400`、无 hf-overrides）。**有意偏离**：prefill 用 DP2 TP16 代替官方的 PP2 TP16（`launch_online_dp.py` 是纯 DP 启动器）、两档都关闭 `enable_sparse_sfa_c8`（c3b1d4d 精度策略）、权重用 w4a8c8（官方参考是 w8a8c8，官方标注 w4a8c8 的 PD 分离为 experimental）。逐项对照与部署前检查清单见 `../docs/a3-glm52-configs.md`。**A3 仍未实机部署验证**
+- **A3 当前用 kvpool 单主（`mooncake.enabled=true` + `ha.enable_ha=false`）**：测试阶段不引入 etcd/ha 选主，只起 p0 上的裸 `mooncake_master`，`mooncake.json` 的 `master_server_address` 直连 `<p0_ip>:52050`；etcd/haproxy 相关配置块保留，切回 HA 前需确认 `etcd.certs_dir` 在宿主机真实存在
 - **`model.mounts` 必须写 `host:container`**：单路径写法会被 docker 当匿名卷（容器内是空目录，模型权重看不见）；且 `logs.dir` 与 `model_path` 都要落在 mounts 覆盖范围内，否则引擎日志/权重在容器里不可见（单测已锁）
 - **运行需在 `ansible/` 目录内**（`ansible.cfg` 在 `ansible/`，让 Ansible 加载配置）
 - 完整 `--check` 是干跑近似，不等价 `--dry-run` 的完整模拟

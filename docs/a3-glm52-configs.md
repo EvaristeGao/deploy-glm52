@@ -21,6 +21,7 @@
 | 项 | `200k`（当前启用） | `1m` |
 |---|---|---|
 | 官方出处 | §5.2.1（198K PD） | §5.2.2（1M PD） |
+| KV 传输 | kvpool 单主：p0 裸 `mooncake_master`，`master_server_address=<p0_ip>:52050`，无 etcd/haproxy | 同 |
 | `max_model_len` | **202752** | **1048576** |
 | prefill dp / tp / local | 2 / 16 / 1 | 2 / 16 / 1 |
 | decode dp / tp / local | 8 / 4 / 4 | 8 / 4 / 4 |
@@ -57,13 +58,20 @@
 
 若将来要真正对齐 PP2，需要新增一条 PP 启动路径（模板 PP 分支 + `start.yml` 每节点 1 进程 + proxy/实例清单改造）。
 
-### 2.2 KV 传输：保持 kvpool（官方参考是直连）
+### 2.2 KV 传输：kvpool 单主（官方参考是直连）
 
 官方 198K/1M 参考都用直连 `MooncakeConnectorV1` + `use_ascend_direct: true`（无 `AscendStoreConnector`）。
-本项目 A3 保持 **kvpool HA**（`mooncake.enabled: true` + `ha.enable_ha: true`），模板走
-`MultiConnector`（内层 `MooncakeConnectorV1` + `AscendStoreConnector`），因此渲染结果里
-**没有 `engine_id`**（kvpool 形态不需要）。
+本项目 A3 走 **kvpool 单主**：`mooncake.enabled: true` + `mooncake.ha.enable_ha: false` ——
+只在 proxy 节点（p0）起一个裸 `mooncake_master`（`--rpc-address <p0_ip> -rpc_port=52050`），
+**不起 etcd、不起 haproxy、不需要证书目录**；`mooncake.json` 的 `master_server_address`
+直连 `<p0_ip>:52050`。模板走 `MultiConnector`（内层 `MooncakeConnectorV1` + `AscendStoreConnector`），
+因此渲染结果里 **没有 `engine_id`**（kvpool 形态不需要）。
 
+> 选单主是为了测试阶段规避 etcd/ha 选主与 `etcd.certs_dir` 证书依赖；`etcd` / `haproxy` 配置块保留，
+> 切回 HA（`enable_ha: true`）前必须先确认 `etcd.certs_dir` 在宿主机上真实存在
+> （`ca.crt`/`server.crt`/`server.key`）。`etcd.certs_dir` 的 bind 在引擎容器、mooncake 容器、
+> 独立 haproxy 容器上都按 `enable_ha` 门控，单主模式下整条链路都不会挂它。
+>
 > 官方 198K 档 decode 用**每 rank 独立 engine_id**（`$((100 + $4))`）来避免 KV 路由混乱；
 > 本项目在 kvpool 模式下不渲染 engine_id，故未实现。若切到直连模式
 > （`mooncake.enabled: false`），需要补上 per-rank engine_id 能力。
@@ -146,11 +154,12 @@ python3 load_balance_proxy_server_example.py --host 0.0.0.0 --port 8000 \
 
 | 级别 | 项 | 说明 |
 |---|---|---|
-| 🔴 | **etcd 证书目录** | `etcd.certs_dir` 仍是旧路径 `/ce-efs-hd2-01/g00832294/certs`；若该共享目录在这些 A3 节点上不存在，docker 会创建空目录，etcd 因缺 `ca.crt/server.crt/server.key` 起不来。需确认路径或改到 `/mnt/sfs_turbo/...` 并放好证书 |
 | 🔴 | **`ansible_host` 可解析** | inventory 用的是主机名 `ott9-a31..34`，控制机若无 DNS 需改回 IP |
 | 🟡 | **权重目录** | `model_path` 必须在 `model.mounts`（`/mnt/sfs_turbo:/mnt/sfs_turbo`）覆盖范围内，单测已加校验 |
-| 🟡 | **镜像存在** | `image` = `quay.io/ascend/vllm-ascend:v0.30.0rc1-a3`；`mooncake.image` = `vllm-ascend-ha-gwh-test:v2.0`（含 mooncake_master+haproxy+nc）。`check.yml` 会在 p0/p1/d0 上校验 |
+| 🟡 | **镜像存在** | `image` = `quay.io/ascend/vllm-ascend:v0.30.0rc1-a3`；`mooncake.image` = `vllm-ascend-ha-gwh-test:v2.0`（需含 `mooncake_master`）。`check.yml` 会在 p0 上校验 mooncake 镜像 |
 | 🟡 | **镜像版本 vs 文档** | 官方参考基于 v0.23.0；当前用 v0.30.0rc1，`additional_config` 的 flag 名/语义如有变化需以该版本为准 |
 | 🟡 | **w4a8c8 + PD 精度** | 官方标注 w4a8c8 的 PD 分离为 experimental、有已知精度问题；建议尽快切 w8a8c8 |
+| ⚪ | **单主模式的 KV 池是单点** | p0 的 `mooncake_master` 挂了则整个 KV 池不可用；测试够用，上生产需切回 HA（并先备好证书） |
+| ⚪ | **切回 HA 前** | 确认 `etcd.certs_dir`（当前 `/ce-efs-hd2-01/g00832294/certs`）在宿主机真实存在且有 `ca.crt`/`server.crt`/`server.key`；单主模式下不挂它，不会报错 |
 | ⚪ | **首次启动耗时** | 202752/1048576 上下文模型加载 + 图捕获较慢；`runtime.ready_timeout`（2400s）不够时上调 |
 | ⚪ | **死配置** | `mooncake.port`、`pd_cluster.enable_prefix_caching` 目前没有任何 playbook/模板引用 |

@@ -136,7 +136,8 @@
           -v /etc/hccn.conf:/etc/hccn.conf \
           -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
           -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
-          -v {{ etcd.certs_dir }}:/etc/pki/etcd/certs \
+          {# etcd 证书只在 HA（有 etcd）时需要；单主模式不挂，免得 bind 一个不存在的宿主机目录 #}
+          {% if mooncake.ha.enable_ha %}-v {{ etcd.certs_dir }}:/etc/pki/etcd/certs {% endif %}\
           {% if logs.dir | default('') %}-v {{ logs.dir }}:{{ logs.dir }} {% endif %}\
           {{ mooncake.image }}
       tags: mooncake
