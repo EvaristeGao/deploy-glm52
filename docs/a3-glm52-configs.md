@@ -38,7 +38,13 @@
 | prefix caching | prefill `--enable-` / decode `--no-enable-` | 同 |
 | `enable_sparse_sfa_c8` | **false** | **false**（两档都关；有意不跟参考，见 §2.4） |
 
-切换方式：改 `deploy_config` → 重跑 `gen`（重渲染节点脚本）→ `start` 生效。
+另有第三档 **`1m-v030`**（当前启用）：严格按 **v0.30.0rc1 文档 §5.2.3** 的 A3 1M PD 配置
+（decode **DP4 TP8** + DCP 8、`--kv-cache-dtype int8`、`--attention_config.indexer_kv_dtype int8`、
+`--safetensors-load-strategy prefetch`、`--api-server-count`/`--headless`、v0.30 精简 env 集、
+additional-config 用 `enable_flashcomm1`/`enable_fused_mc2`/`enable_mlapo`/`mega_moe_max_tokens`）。
+逐项对应与有意偏离见 `a3-v030rc1-doc-crosscheck.md` §4。
+
+切换方式：改 `deploy_config`（`200k` / `1m` / `1m-v030`）→ 重跑 `gen`（重渲染节点脚本）→ `start` 生效。
 
 ---
 

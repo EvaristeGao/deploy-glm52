@@ -14,11 +14,13 @@ ansible_python_interpreter: /usr/bin/python3
 
 # =============================================================================
 # 部署配置选择器（与 A2 同一套写法）
-#   取值：200k —— 当前启用，GLM-5.2 198K ctx（官方 A3 198K PD 参考；prefill 用 DP 代替 PP）
-#         1m   —— GLM-5.2 1M ctx + DCP（官方 A3 PD 分离 1M 参考）
-# 参考：https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html
+#   取值：1m-v030 —— ★ 当前启用，严格按 v0.30.0rc1 文档 §5.2.3（A3 1M PD 分离）
+#         1m      —— 按 v0.23.0 文档 §5.2.2 + 集群现网参考（A3 1M PD，DP8TP4/DCP4）
+#         200k    —— 按 v0.23.0 文档 §5.2.1 + 集群现网参考（A3 198K PD；prefill 用 DP 代替 PP）
+# 参考：https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/GLM5.2.html
+#       https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html
 # =============================================================================
-deploy_config: 200k
+deploy_config: 1m-v030
 
 cluster_type: a3
 image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
@@ -134,10 +136,79 @@ _1m:
       additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true}'
 
 # =============================================================================
+# 1M-v030 配置 —— 严格按 v0.30.0rc1 文档 §5.2.3「PD Disaggregation 1M Deployment」
+#   文档：https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/GLM5.2.html#52-1m-context-configuration
+#   （engine 镜像 quay.io/ascend/vllm-ascend:v0.30.0rc1-a3 对应的版本文档）
+#
+#   与 v0.23 口径（_200k / _1m）的差异 —— v0.30 是另一代配置：
+#     · C8 稀疏优化不再是独立开关：文档原文说明 --kv-cache-dtype int8 +
+#       --attention_config.indexer_kv_dtype int8 即「SFA/LI 稀疏注意力 + C8 reshape 优化」，
+#       enable_sparse_sfa_c8 / enable_sparse_li_c8 / c8_enable_reshape_optim 三个键已从文档消失
+#     · 开关从 env 搬进 additional-config：enable_flashcomm1 / enable_fused_mc2 / enable_mlapo
+#     · 新增 --safetensors-load-strategy 'prefetch'、mega_moe_max_tokens
+#     · v0.23 的 env（ACL_OP_INIT_MODE / ASCEND_A3_ENABLE / TASK_QUEUE_ENABLE /
+#       VLLM_ASCEND_ENABLE_* / HCCL_*_TIMEOUT / OMP_*）文档里已全部删除 → 由 v030_env 精简集替代
+#     · decode 拓扑改为 DP4 TP8（每节点 2 引擎）+ DCP 8（v0.23 是 DP8 TP4 + DCP 4）
+#     · 各 role 只有首节点对外提供 API：p0/d0 加 --api-server-count，p1/d1 加 --headless
+#       （start.yml 的实例清单与 proxy 端点已按 non_master_headless 只取首节点）
+#     · 无 --hf-overrides（v0.30 文档已删除该参数）
+#   注意：本档没有 enable_sparse_sfa_c8 这类开关；若精度上要避开 SFA/LI，
+#        需要去掉 --kv-cache-dtype int8 与 --attention_config.indexer_kv_dtype int8
+#        （即删掉下面两处 kv_cache_dtype / indexer_kv_dtype），这与文档配置会有偏离。
+# =============================================================================
+_1m_v030:
+  pd_cluster:
+    max_model_len: 1048576
+    num_cards: 16
+    cp_kv_cache_interleave_size: 128
+    v030_env: true              # 渲染 v0.30 §5.2.3 的精简 env 集（见模板）
+    prefill:
+      dp_size: 2
+      tp_size: 16
+      dp_size_local: 1
+      base_port: 9081
+      kv_port: 30000
+      rpc_port: 16591
+      context_parallel_size: 1
+      decode_context_parallel_size: 16
+      engine_id: 0
+      max_num_batched_tokens: 8192
+      max_num_seqs: 64
+      gpu_memory_utilization: 0.85
+      enable_prefix_caching: true
+      safetensors_prefetch: true
+      kv_cache_dtype: int8
+      indexer_kv_dtype: int8
+      non_master_headless: true
+      api_server_count: 1
+      additional_config: '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
+    decode:
+      dp_size: 4
+      tp_size: 8
+      dp_size_local: 2
+      base_port: 9900
+      kv_port: 30200
+      rpc_port: 16600
+      context_parallel_size: 8
+      engine_id: 2
+      max_num_batched_tokens: 192
+      max_num_seqs: 32
+      gpu_memory_utilization: 0.9
+      num_speculative_tokens: 5
+      hccl_buffsize: 400
+      enable_prefix_caching: false
+      safetensors_prefetch: true
+      kv_cache_dtype: int8
+      indexer_kv_dtype: int8
+      non_master_headless: true
+      api_server_count: 1
+      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_fused_mc2": 1, "enable_mlapo": true}'
+
+# =============================================================================
 # 激活的配置（由 deploy_config 选择；_active 必须先于 pd_cluster 定义，
 #   否则 {{ _active.pd_cluster }} 解析时 _active 还是未展开的字符串）
 # =============================================================================
-_active: "{{ _1m if deploy_config == '1m' else _200k }}"
+_active: "{{ {'200k': _200k, '1m': _1m, '1m-v030': _1m_v030}[deploy_config] }}"
 pd_cluster: "{{ _active.pd_cluster }}"
 
 # --- 共享字段（与部署配置无关）---
@@ -162,7 +233,8 @@ mooncake:
   evict: 0.9
   global_segment_size: 40GB
   default_kv_lease_ttl: 11000
-  image: vllm-ascend-ha-gwh-test:v2.0   # TODO: mooncake 容器镜像（含 mooncake_master+haproxy+nc），用户填
+  # image: vllm-ascend-ha-gwh-test:v2.0   # TODO: mooncake 容器镜像（含 mooncake_master+haproxy+nc），用户填
+  image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
   ha:
     enable_ha: false         # ha+etcd 开关（前提 enabled: true）；false=单 master 直连 p0（当前）
     nodes: [p0, p1, d0]      # 3 个 mooncake_master 节点；仅 enable_ha=true 生效（单主时 master 固定落 proxy 节点 p0）

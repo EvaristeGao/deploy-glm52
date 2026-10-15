@@ -36,22 +36,24 @@ def _env():
     return Environment(loader=FileSystemLoader(TPL_DIR), undefined=StrictUndefined, trim_blocks=True)
 
 
-def _ctx(role, cluster_type=None, mooncake_enabled=None, gv=None):
+def _ctx(role, cluster_type=None, mooncake_enabled=None, gv=None, idx=0):
     """直接用 group_vars 平铺变量构造模板 ctx（小写变量，直接渲染）。
     role ∈ {prefill, decode}；运行时参数（$1..$7）不进 ctx——它们由
     launch_online_dp.py 按每引擎位置传入，模板只保留部署期确定的变量。
     cluster_type 可覆盖 group_vars 值（测 RoCE 开关）；
     mooncake_enabled 可覆盖 group_vars 的 kvpool 开关（测直连 MooncakeConnectorV1 分支）；
-    gv 可传入别的 inventory / 别的 deploy_config 档位（默认 A2 当前档）。
+    gv 可传入别的 inventory / 别的 deploy_config 档位（默认 A2 当前档）；
+    idx 是该 role 内的节点序号（inventory 主机变量，v0.30 档用它决定 --api-server-count/--headless）。
 
     group_vars 含有 Jinja 表达式（deploy_config→{_200k,_1m}→_active→pd_cluster 等），
     用 _gv() 已展开为原生 Python 类型。"""
     gv = gv if gv is not None else _gv()
     pd = gv["pd_cluster"]
     return {
-        # 节点级变量：nic 取自 inventory 节点（host 级）；ip 取自 inventory 静态字段（真实网卡 IP）
+        # 节点级变量：nic/idx 取自 inventory 节点（host 级）；ip 取自 inventory 静态字段（真实网卡 IP）
         "nic": "enp67s0f5",
         "ip": "192.168.0.245",
+        "idx": idx,
         # 集群级平铺变量（来源：group_vars 的 model / model_path / pd_cluster）
         "model_path": gv["model_path"],
         "served_model_name": gv["model"]["served_model_name"],
@@ -72,9 +74,9 @@ def _ctx(role, cluster_type=None, mooncake_enabled=None, gv=None):
     }
 
 
-def _render(role, cluster_type=None, mooncake_enabled=None, gv=None):
+def _render(role, cluster_type=None, mooncake_enabled=None, gv=None, idx=0):
     tpl = _env().get_template(f"run_dp_{role}_template.sh.j2")
-    return tpl.render(**{**_ctx(role, cluster_type, mooncake_enabled, gv)})
+    return tpl.render(**{**_ctx(role, cluster_type, mooncake_enabled, gv, idx)})
 
 
 def _render_prefill(cluster_type=None, mooncake_enabled=None):
@@ -85,10 +87,10 @@ def _render_decode(cluster_type=None, mooncake_enabled=None):
     return _render("decode", cluster_type, mooncake_enabled)
 
 
-def _render_a3(role, deploy_config=None, mooncake_enabled=None):
-    """按 A3 group_vars 的指定档位（200k / 1m）渲染 A3 模板。"""
+def _render_a3(role, deploy_config=None, mooncake_enabled=None, idx=0):
+    """按 A3 group_vars 的指定档位（200k / 1m / 1m-v030）渲染 A3 模板。"""
     gv = _gv(GV_FILE_A3, deploy_config)
-    return _render(role, cluster_type="a3", mooncake_enabled=mooncake_enabled, gv=gv)
+    return _render(role, cluster_type="a3", mooncake_enabled=mooncake_enabled, gv=gv, idx=idx)
 
 
 def test_prefill_uses_inventory_ip():
@@ -429,8 +431,160 @@ def test_a3_deploy_config_selects_matching_block():
     """deploy_config 选中哪一档，pd_cluster 就解析成哪一块（不锁死具体默认值，防止手改后单测变红）。"""
     gv = _gv(GV_FILE_A3)
     cfg = gv["deploy_config"]
-    assert cfg in ("200k", "1m")
-    assert gv["pd_cluster"] == gv[f"_{cfg}"]["pd_cluster"]
+    assert cfg in ("200k", "1m", "1m-v030")
+    assert gv["pd_cluster"] == gv[f"_{cfg.replace('-', '_')}"]["pd_cluster"]
+
+
+# ==================== A3 v0.30.0rc1 档（_1m_v030，严格按 §5.2.3） ====================
+# 文档：https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/GLM5.2.html#52-1m-context-configuration
+
+
+def test_a3_v030_topology_and_cp():
+    """v0.30 §5.2.3 拓扑：prefill DP2 TP16（每节点 1 引擎）+ decode DP4 TP8（每节点 2 引擎）；
+    prefill 侧声明 decode CP 16、decode 侧 CP 8，interleave 128。"""
+    pd = _gv(GV_FILE_A3, "1m-v030")["pd_cluster"]
+    assert pd["max_model_len"] == 1048576
+    assert (pd["prefill"]["dp_size"], pd["prefill"]["tp_size"], pd["prefill"]["dp_size_local"]) == (2, 16, 1)
+    assert (pd["decode"]["dp_size"], pd["decode"]["tp_size"], pd["decode"]["dp_size_local"]) == (4, 8, 2)
+    assert pd["prefill"]["context_parallel_size"] == 1
+    assert pd["prefill"]["decode_context_parallel_size"] == 16
+    assert pd["decode"]["context_parallel_size"] == 8
+    assert pd["cp_kv_cache_interleave_size"] == 128
+    # 端口：prefill rpc 16591 / decode rpc 16600，kv 30000 / 30200
+    assert (pd["prefill"]["rpc_port"], pd["decode"]["rpc_port"]) == (16591, 16600)
+    assert (pd["prefill"]["kv_port"], pd["decode"]["kv_port"]) == (30000, 30200)
+    # 每节点卡数仍是 16
+    for role in ("prefill", "decode"):
+        assert pd[role]["dp_size_local"] * pd[role]["tp_size"] == pd["num_cards"]
+    # 渲染出的 CP 三件套按 role 分开
+    out_p = _render_a3("prefill", "1m-v030")
+    assert "--prefill-context-parallel-size 1" in out_p
+    assert "--decode-context-parallel-size 16" in out_p
+    out_d = _render_a3("decode", "1m-v030")
+    assert "--decode-context-parallel-size 8" in out_d
+    assert "--cp-kv-cache-interleave-size 128" in out_d
+
+
+def test_a3_v030_new_args():
+    """v0.30 新增参数：--safetensors-load-strategy prefetch（A3 原本不渲染）、
+    --kv-cache-dtype int8、--attention_config.indexer_kv_dtype int8；两侧都有。"""
+    for role in ("prefill", "decode"):
+        out = _render_a3(role, "1m-v030")
+        assert "--safetensors-load-strategy prefetch" in out
+        assert "--kv-cache-dtype int8" in out
+        assert "--attention_config.indexer_kv_dtype int8" in out
+    # v0.23 档（1m/200k）不应出现这三个（A3 原本不渲染 prefetch，也没有 v0.30 新参数）
+    for cfg in ("1m", "200k"):
+        for role in ("prefill", "decode"):
+            out = _render_a3(role, cfg)
+            assert "--safetensors-load-strategy" not in out
+            assert "--kv-cache-dtype" not in out
+            assert "--attention_config.indexer_kv_dtype" not in out
+
+
+def test_a3_v030_headless_api_server_count():
+    """v0.30：各 role 首节点（idx=0）--api-server-count，其余节点（idx>0）--headless。"""
+    for role in ("prefill", "decode"):
+        head = _render_a3(role, "1m-v030", idx=0)
+        assert "--api-server-count 1" in head
+        assert "--headless" not in head
+        worker = _render_a3(role, "1m-v030", idx=1)
+        assert "--headless" in worker
+        assert "--api-server-count" not in worker
+    # v0.23 档与 A2 不带这两个参数（回归）
+    for cfg in ("1m", "200k"):
+        for role in ("prefill", "decode"):
+            out = _render_a3(role, cfg, idx=1)
+            assert "--headless" not in out
+            assert "--api-server-count" not in out
+    for role in ("prefill", "decode"):
+        out = _render(role)
+        assert "--headless" not in out
+        assert "--api-server-count" not in out
+
+
+def test_a3_v030_additional_config_and_no_sfa():
+    """v0.30 additional-config：prefill 有 mega_moe_max_tokens/enable_flashcomm1/enable_fused_mc2，
+    decode 有 enable_fused_mc2/enable_mlapo；两侧都**没有** enable_sparse_sfa_c8 这类开关
+    （v0.30 已把 C8 稀疏优化绑到 --kv-cache-dtype int8 + indexer_kv_dtype 上）。"""
+    pd = _gv(GV_FILE_A3, "1m-v030")["pd_cluster"]
+    out_p = _render_a3("prefill", "1m-v030")
+    assert pd["prefill"]["additional_config"] in out_p
+    for flag in ('"mega_moe_max_tokens": 8192', '"enable_flashcomm1": true',
+                 '"enable_fused_mc2": 1', '"enable_dsa_cp":true'):
+        assert flag in out_p, f"prefill additional-config 缺少 {flag}"
+    out_d = _render_a3("decode", "1m-v030")
+    assert pd["decode"]["additional_config"] in out_d
+    for flag in ('"enable_fused_mc2": 1', '"enable_mlapo": true',
+                 '"recompute_scheduler_enable":true'):
+        assert flag in out_d, f"decode additional-config 缺少 {flag}"
+    for out in (out_p, out_d):
+        assert "enable_sparse_sfa_c8" not in out
+        assert "enable_sparse_li_c8" not in out
+        assert "c8_enable_reshape_optim" not in out
+
+
+def test_a3_v030_env_profile():
+    """v0.30 env 精简集：新增 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS / MF_GROUP_JOIN_MAX_TIMEOUT /
+    VLLM_USE_FASTOKENS；v0.23 的开关 env（ACL_OP_INIT_MODE / ASCEND_A3_ENABLE /
+    TASK_QUEUE_ENABLE / VLLM_ASCEND_ENABLE_FUSED_MC2 / FLASHCOMM1 / MLAPO / HCCL_*_TIMEOUT）不渲染。"""
+    for role in ("prefill", "decode"):
+        lines = _render_a3(role, "1m-v030").splitlines()
+        assert "export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000" in lines
+        assert "export MF_GROUP_JOIN_MAX_TIMEOUT=1200" in lines
+        assert "export VLLM_USE_FASTOKENS=1" in lines
+        # v0.30 文档里被删除的 v0.23 env
+        for gone in ("export ACL_OP_INIT_MODE=1", "export ASCEND_A3_ENABLE=1",
+                     "export TASK_QUEUE_ENABLE=1", "export VLLM_ASCEND_ENABLE_FUSED_MC2=1",
+                     "export VLLM_ASCEND_ENABLE_FLASHCOMM1=1", "export VLLM_ASCEND_ENABLE_MLAPO=1",
+                     "export HCCL_TRANSFER_TIMEOUT=600", "export HCCL_EXEC_TIMEOUT=3600",
+                     "export HCCL_CONNECT_TIMEOUT=3600", "export OMP_NUM_THREADS=1",
+                     "export OMP_PROC_BIND=false"):
+            assert gone not in lines, f"v030 档不应渲染 {gone}"
+        # 文档里保留的
+        assert "export HCCL_BUFFSIZE=400" in lines
+        assert "export HCCL_OP_EXPANSION_MODE=\"AIV\"" in lines
+        assert "export ASCEND_RT_VISIBLE_DEVICES=$1" in lines
+    # v0.23 档（1m/200k）与 A2 仍是老 env 集（回归）
+    for cfg in ("1m", "200k"):
+        for role in ("prefill", "decode"):
+            lines = _render_a3(role, cfg).splitlines()
+            assert "export ACL_OP_INIT_MODE=1" in lines
+            assert "export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000" not in lines
+            assert "export MF_GROUP_JOIN_MAX_TIMEOUT=1200" not in lines
+            assert "export VLLM_USE_FASTOKENS=1" not in lines
+    for role in ("prefill", "decode"):
+        lines = _render(role).splitlines()
+        assert "export VLLM_USE_FASTOKENS=1" not in lines
+
+
+def test_a3_v030_gpu_mem_and_spec_tokens():
+    """v0.30 §5.2.3 数值：prefill gpu-mem 0.85 / decode 0.90；prefill spec 1 / decode spec 5；
+    batched 8192 / 192；max-num-seqs 64 / 32；decode 关 prefix caching。"""
+    pd = _gv(GV_FILE_A3, "1m-v030")["pd_cluster"]
+    assert (pd["prefill"]["gpu_memory_utilization"], pd["decode"]["gpu_memory_utilization"]) == (0.85, 0.9)
+    out_p = _render_a3("prefill", "1m-v030")
+    assert "--gpu-memory-utilization 0.85 \\" in out_p
+    assert "--max-num-batched-tokens 8192" in out_p
+    assert "--max-num-seqs 64" in out_p
+    assert '"num_speculative_tokens": 1' in out_p
+    assert "--enable-prefix-caching" in out_p
+    out_d = _render_a3("decode", "1m-v030")
+    assert "--gpu-memory-utilization 0.9 \\" in out_d
+    assert "--max-num-batched-tokens 192" in out_d
+    assert "--max-num-seqs 32" in out_d
+    assert '"num_speculative_tokens": 5' in out_d
+    assert "--no-enable-prefix-caching" in out_d
+    assert '"cudagraph_mode": "FULL_DECODE_ONLY"' in out_d
+    assert "--async-scheduling" in out_d
+
+
+def test_a3_v030_no_hf_overrides():
+    """v0.30 文档已删除 --hf-overrides：v030 档与 v0.23 的 1m 都不渲染，只有 200k 档有（v0.23 文档）。"""
+    for role in ("prefill", "decode"):
+        assert "--hf-overrides" not in _render_a3(role, "1m-v030")
+        assert "--hf-overrides" not in _render_a3(role, "1m")
+        assert "--hf-overrides" in _render_a3(role, "200k")
 
 
 def test_a3_1m_topology():

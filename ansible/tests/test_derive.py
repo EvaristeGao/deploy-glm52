@@ -592,6 +592,27 @@ def _a3_ctx_with_ha(enable_ha):
     return ctx
 
 
+def test_a3_v030_instance_list_and_proxy_endpoints_headless():
+    """v0.30 档：各 role 只有首节点有 API server（p1/d1 --headless），
+    实例清单与 proxy 端点只取首节点 —— 1 prefill + 2 decode + 1 proxy = 4 个探测目标。"""
+    il = _render_a3_task_fact("生成实例清单", "1m-v030")["instance_list"]
+    assert len(il) == 4
+    assert [r[0] for r in il].count("prefill") == 1
+    assert [r[0] for r in il].count("decode") == 2
+    assert il[-1][0] == "proxy"
+    pe = _render_a3_task_fact("生成 proxy 端点", "1m-v030", native=False)
+    ctx = _a3_ctx_with_ha(False)
+    p0_ip = ctx["hostvars"]["p0"]["ip"]
+    d0_ip = ctx["hostvars"]["d0"]["ip"]
+    assert pe["prefiller_hosts"] == p0_ip
+    assert pe["prefiller_ports"] == "9081"
+    assert pe["decoder_hosts"] == f"{d0_ip} {d0_ip}"
+    assert pe["decoder_ports"] == "9900 9901"
+    # 对照：v0.23 档没有 headless，两个节点全进清单（1m：2×1 + 2×4 + 1 = 11）
+    il_legacy = _render_a3_task_fact("生成实例清单", "1m")["instance_list"]
+    assert len(il_legacy) == 11
+
+
 def test_mooncake_container_certs_bind_only_in_ha_mode():
     """etcd 证书挂载只在 HA 模式出现（start.yml「起 mooncake 容器」）。
 
@@ -605,10 +626,11 @@ def test_mooncake_container_certs_bind_only_in_ha_mode():
 
     out_single = env.from_string(shell).render(**_a3_ctx_with_ha(False))
     assert "certs:/etc/pki/etcd/certs" not in out_single
-    # 两种模式都要挂日志目录、用 mooncake 镜像、只在 proxy 节点起
+    # 两种模式都要挂日志目录、用 mooncake 镜像（值从 group_vars 动态读，不硬编码）、只在 proxy 节点起
+    mooncake_image = _a3_ctx_with_ha(False)["mooncake"]["image"]
     for out in (out_ha, out_single):
         assert "/mnt/sfs_turbo/g00832294/logs" in out
-        assert "vllm-ascend-ha-gwh-test:v2.0" in out
+        assert mooncake_image in out
         assert "docker run -itd --name mooncake-p0" in out
 
 

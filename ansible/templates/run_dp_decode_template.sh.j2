@@ -7,6 +7,8 @@
 #   需拉起多个引擎，端口/rank 必须每次不同，绝不能固化成模板常量）。
 {# 可读性约定：Jinja 块标签一律顶格独立成行（Ansible 模板 trim_blocks 会吃掉标签行换行，
    渲染结果无多余空行）；同一行内仅取值的分支用内联条件表达式（'A' if cond else 'B'）。 #}
+{# v0.30 文档档位标记：开关搬进 additional-config、env 精简集（见 group_vars pd_cluster.v030_env） #}
+{% set v030 = pd_cluster.v030_env | default(false) %}
 nic_name="{{ nic }}"
 local_ip="{{ ip }}"
 
@@ -19,20 +21,27 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export VLLM_HOST_IP=$local_ip
 {% endif %}
 
+{% if not v030 %}
 export OMP_PROC_BIND=false
-{# ---- 环境变量（a2/a3 每集群差异；a3 走灵衢 UB，a2 为常规昇腾栈） ---- #}
-{% if cluster_type == "a3" %}
+{% endif %}
+{# ---- 环境变量（a2/a3 每集群差异；a3 走灵衢 UB，a2 为常规昇腾栈）。
+   v030 档（v0.30 文档）不设 OMP_*，由下面的 v0.30 env 集替代 ---- #}
+{% if cluster_type == "a3" and not v030 %}
 export OMP_NUM_THREADS=1
-{% else %}
+{% elif cluster_type != "a3" %}
 export OMP_NUM_THREADS=10
 {% endif %}
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-{# MLAPO：官方口径为 A3 decode（PD 场景只在 decode 开）/ A2 P/D 都开 → decode 侧两集群都开 #}
+{# MLAPO：v0.23 口径为 A3 decode 用 env 开；v0.30 改为 additional-config 的 enable_mlapo #}
+{% if cluster_type != "a3" or not v030 %}
 export VLLM_ASCEND_ENABLE_MLAPO=1
+{% endif %}
 {# HCCL_BUFFSIZE：官方 A3 参考里 decode 是分档的（198K=256 / 1M=400），故可配；
    未配置时回落集群默认（a3=400，a2=2560） #}
 export HCCL_BUFFSIZE={{ pd_cluster.decode.hccl_buffsize | default('400' if cluster_type == "a3" else '2560') }}
+{% if not v030 %}
 export TASK_QUEUE_ENABLE=1
+{% endif %}
 export HCCL_OP_EXPANSION_MODE="AIV"
 
 {% if cluster_type != "a3" %}
@@ -44,12 +53,20 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 {% else %}
 export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:/usr/local/lib:$LD_LIBRARY_PATH
 {% endif %}
-{% if cluster_type == "a3" %}
+{% if cluster_type == "a3" and not v030 %}
 export ASCEND_A3_ENABLE=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export HCCL_TRANSFER_TIMEOUT=600
 export HCCL_EXEC_TIMEOUT=3600
 export HCCL_CONNECT_TIMEOUT=3600
+{% endif %}
+{# ---- v0.30 §5.2.3 env 集（文档里只剩这几个；开关走 additional-config） ---- #}
+{% if v030 %}
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS={{ pd_cluster.execute_model_timeout_seconds | default(30000) }}
+export MF_GROUP_JOIN_MAX_TIMEOUT={{ pd_cluster.mf_group_join_max_timeout | default(1200) }}
+{% if pd_cluster.use_fastokens | default(true) %}
+export VLLM_USE_FASTOKENS=1
+{% endif %}
 {% endif %}
 
 export PYTHONHASHSEED=0
@@ -60,8 +77,11 @@ export MOONCAKE_CONFIG_PATH="{{ mooncake_config_path }}"
 {% if cluster_type == "a2" %}
 export HCCL_INTRA_ROCE_ENABLE=1
 {% endif %}
+{# ACL_OP_INIT_MODE：v0.30 文档已删除该 env，v030 档不渲染 #}
+{% if not v030 %}
 export ACL_OP_INIT_MODE=1
-{# ---- runtime.timeouts ---- #}
+{% endif %}
+{# ---- runtime.timeouts（v030 档由 v0.30 env 集的 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS 等覆盖） ---- #}
 {% if runtime.timeouts is defined %}
 export VLLM_RPC_TIMEOUT={{ runtime.timeouts.vllm_rpc_timeout }}
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS={{ runtime.timeouts.execute_model_timeout_seconds }}
@@ -103,10 +123,27 @@ vllm serve {{ model_path }} \
     --trust-remote-code \
     --max-num-seqs {{ pd_cluster.decode.max_num_seqs | default('32' if cluster_type == "a3" else '128') }} \
     --gpu-memory-utilization {{ pd_cluster.decode.gpu_memory_utilization | default('0.92') }} \
-{% if cluster_type != "a3" %}
+{# ---- safetensors 预取：A2 默认开；A3 由 pd_cluster.decode.safetensors_prefetch 控制（v0.30 文档为开） ---- #}
+{% if pd_cluster.decode.safetensors_prefetch | default(cluster_type != "a3") %}
     --safetensors-load-strategy prefetch \
 {% endif %}
     --quantization ascend \
+{# ---- KV cache 量化（v0.30 新增）：--kv-cache-dtype + --attention_config.indexer_kv_dtype。
+   注意 v0.30 文档说明这两项即「SFA/LI 稀疏注意力 + C8 reshape 优化」的开关 ---- #}
+{% if pd_cluster.decode.kv_cache_dtype is defined %}
+    --kv-cache-dtype {{ pd_cluster.decode.kv_cache_dtype }} \
+{% endif %}
+{% if pd_cluster.decode.indexer_kv_dtype is defined %}
+    --attention_config.indexer_kv_dtype {{ pd_cluster.decode.indexer_kv_dtype }} \
+{% endif %}
+{# ---- 对外 API：v0.30 起只有各 role 首节点提供（首节点 --api-server-count，其余 --headless，见 non_master_headless） ---- #}
+{% if pd_cluster.decode.non_master_headless | default(false) %}
+{% if idx | default(0) | int == 0 %}
+    --api-server-count {{ pd_cluster.decode.api_server_count | default(1) }} \
+{% else %}
+    --headless \
+{% endif %}
+{% endif %}
     --enable-auto-tool-choice \
     --tool-call-parser glm47 \
     --reasoning-parser glm45 \

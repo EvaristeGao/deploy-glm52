@@ -71,7 +71,7 @@ A2/A3 切换：`-i` 指不同 inventory 即可，互不影响。
 | inventory | `deploy_config` 当前值 | 200k 档 | 1m 档 |
 |---|---|---|---|
 | `a2` | `1m` | GLM-5.2 非对称 PD 4P+8D（P dp4tp8 / D dp8tp4），200K ctx | GLM-5.3 对称 PD 4P+4D，1M ctx + CP + timeouts + profiler |
-| `a3` | `200k` | GLM-5.2，官方 §5.2.1 198K PD 的 dp/tp（P **DP2 TP16** 每节点 1 引擎 / D **DP8 TP4** 每节点 4 引擎），max-model-len 202752 | GLM-5.2，官方 §5.2.2 1M PD（P DP2 TP16 / D DP8 TP4）+ DCP 128，max-model-len 1048576 |
+| `a3` | `1m-v030` | GLM-5.2 **v0.30.0rc1 §5.2.3**（1M PD）：P DP2 TP16 / D **DP4 TP8**（每节点 2 引擎）+ DCP 8、`--kv-cache-dtype int8`、`--attention_config.indexer_kv_dtype int8`、`--safetensors-load-strategy prefetch`、`--api-server-count`/`--headless`、v0.30 env 集；另有 `1m`（v0.23 §5.2.2 口径）/ `200k`（v0.23 §5.2.1 口径，prefill 用 DP 近似官方 PP2） |
 
 A3 两档**拓扑形状相同**（每节点都用满 16 卡），差别在上下文长度与运行时参数（batched-tokens / MTP spec tokens / `hf-overrides` / `HCCL_BUFFSIZE` / CP）。
 
