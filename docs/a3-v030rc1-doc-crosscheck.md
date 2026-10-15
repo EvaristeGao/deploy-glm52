@@ -150,10 +150,10 @@ v0.30 原文要点：4×A3（64GB × 16）、w8a8c8；prefill **PP2 TP16**（`--
 
 ### 4.2 有意保留的偏离（需知悉）
 
-| # | 偏离 | 说明 / 怎么改回 |
+| # | 偏离 | 结论 / 说明 |
 |---|---|---|
-| 1 | **`mooncake.enabled: true`（kvpool 单主）** | §5.2.3 用的是**直连** `MooncakeConnectorV1`（无 `AscendStoreConnector`、不需要 mooncake master）。此处沿用你之前的单主 kvpool，渲染成 `MultiConnector`。要完全对齐文档：把 `mooncake.enabled` 改 `false`（一行），此时也不再需要 mooncake 容器与 master |
-| 2 | **`--kv-cache-dtype int8` 会带上 SFA/LI** | 文档原文：这两项即「SFA/LI sparse attention optimizations and the reshape optimization of the C8 quantized model」——v0.30 **没有**单独关 SFA 的开关。若精度上要避开，删掉 `_1m_v030` 里两处 `kv_cache_dtype` / `indexer_kv_dtype`（配置会偏离文档） |
+| 1 | **`mooncake.enabled: true`（kvpool 单主）** —— ✅ **已确认为有意保留** | §5.2.3 用的是**直连** `MooncakeConnectorV1`（无 `AscendStoreConnector`、不需要 mooncake master）；本项目 KV **要走 mooncake 池化**，故保留 `MultiConnector`（内层 MooncakeConnectorV1 + AscendStoreConnector），master 为 p0 上的单主（`ha.enable_ha: false`）|
+| 2 | **`--kv-cache-dtype int8` + `--attention_config.indexer_kv_dtype int8`** —— ✅ **已确认为有意保留** | 文档原文：这两项即「SFA/LI sparse attention optimizations and the reshape optimization of the C8 quantized model」——v0.30 **没有**单独关 SFA 的开关，用 int8 就意味着带上 SFA/LI + C8 reshape。镜像侧已确认支持：v0.30.0rc1 的 vllm-ascend 自带 platform+worker patch，把 `CacheDType`/`IndexerKVDType` 的 Literal 放宽到 `int8`（否则 attention backend 选择时会 `AssertionError: Invalid kv_cache_dtype: int8`）。**精度若出问题，先怀疑这里** |
 | 3 | **权重仍是 w4a8c8** | 文档 §5.2.3 用 w8a8c8；集群上 `/mnt/sfs_turbo/models/GLM-5.2-w8a8c8` 已存在，改 `model_path` 即可 |
 | 4 | `--served-model-name glm-52` | 文档为 `glm-5`；只影响对外模型名，改 `model_name` 即可 |
 | 5 | prefill p1 用 `--vllm-start-port 9081` | 文档写 9082；但 p1 是 `--headless`，不进 proxy 端点也不进 `wait_ready` 探测清单，端口无实际影响（本项目端口恒为 `base_port + 本节点本地引擎序号`） |
@@ -210,3 +210,14 @@ v0.30 原文要点：4×A3（64GB × 16）、w8a8c8；prefill **PP2 TP16**（`--
 `enable_flashcomm1/fused_mc2/mlapo`、headless 架构、decode 拓扑等）
 只应用到了新的 `1m-v030` 档，`1m`/`200k` 维持原样以便对比与回退。
 若确认 v0.30 口径可用，可以再决定是否把 `1m`/`200k` 也切换过去。
+
+### 4.4 镜像侧预检（在 ott9-a31/p0 上实测）
+
+| 检查 | 结果 |
+|---|---|
+| `quay.io/ascend/vllm-ascend:v0.30.0rc1-a3` 是否已在节点上 | ✅ 已存在 |
+| 镜像里有没有 `mooncake_master`（单主 kvpool 需要） | ✅ `/usr/local/python3.12.13/bin/mooncake_master`（带驱动挂载时 `--help` 正常输出） |
+| `--api-server-count` / `--headless` 是否为合法 flag，是否互斥 | ✅ 都存在；`entrypoints/cli/serve.py` 显式校验二者互斥（render 时每节点只输出其中一个） |
+| `--kv-cache-dtype int8` / `--attention_config.indexer_kv_dtype int8` | ✅ 镜像自带放宽 Literal 的 patch（`vllm_ascend/patch/platform/patch_kv_cache_dtype.py`、`patch_kv_cache_dtype.py`、`patch_indexer_kv_dtype.py`），否则 worker 侧会 `AssertionError: Invalid kv_cache_dtype: int8` |
+| `--safetensors-load-strategy` | ✅ `vllm/engine/arg_utils.py` |
+| `vllm` 版本 | `0.30.0+empty`（`/vllm-workspace/vllm` 源码安装） |
