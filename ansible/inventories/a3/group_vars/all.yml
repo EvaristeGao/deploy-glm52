@@ -248,16 +248,17 @@ _1m_v030_lw:
       max_transfer_blocks: 64
       max_transfer_bytes: 16777216
     prefill:
-      dp_size: 4                      # 2 节点 × 每节点 2 引擎
-      tp_size: 8                      # 与 decode 的 TP 保持一致（layerwise 硬约束）
-      dp_size_local: 2
+      dp_size: 2                      # 2 节点 × 每节点 1 引擎（TP16）
+      tp_size: 16                     # 与 decode 的 TP 保持一致（layerwise 硬约束）；
+                                      # 且 TP8 在 1M 下 KV 装不下（见下方注释）
+      dp_size_local: 1
       base_port: 9081
       kv_port: 30000
       rpc_port: 16591
       engine_id: 0
       max_num_batched_tokens: 4096     # layerwise 文档示例值（配 chunked prefill）
       max_num_seqs: 64
-      gpu_memory_utilization: 0.85
+      gpu_memory_utilization: 0.9
       enable_prefix_caching: true
       enable_chunked_prefill: true
       safetensors_prefetch: true
@@ -268,16 +269,16 @@ _1m_v030_lw:
       # 相对 1m-v030 去掉了 enable_dsa_cp（本档 CP/DCP=1，DSA CP 无意义）
       additional_config: '{"multistream_overlap_shared_expert": true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"fuse_muls_add": true}}'
     decode:
-      dp_size: 4
-      tp_size: 8                      # 与 prefill 一致（layerwise 硬约束）
-      dp_size_local: 2
+      dp_size: 2
+      tp_size: 16                     # 与 prefill 一致（layerwise 硬约束）
+      dp_size_local: 1
       base_port: 9900
       kv_port: 30200
       rpc_port: 16600
       engine_id: 2
       max_num_batched_tokens: 192
       max_num_seqs: 32
-      gpu_memory_utilization: 0.9
+      gpu_memory_utilization: 0.92
       num_speculative_tokens: 5
       hccl_buffsize: 400
       enable_prefix_caching: false

@@ -580,8 +580,11 @@ def test_a3_additional_config_uses_image_required_nesting():
 def test_a3_v030_lw_topology_and_no_cp():
     """layerwise 档：P/D 都 DP4 TP8（TP 必须一致）、每节点 2 引擎、无任何 CP/DCP 键与 flag。"""
     pd = _gv(GV_FILE_A3, "1m-v030-lw")["pd_cluster"]
-    assert (pd["prefill"]["dp_size"], pd["prefill"]["tp_size"], pd["prefill"]["dp_size_local"]) == (4, 8, 2)
-    assert (pd["decode"]["dp_size"], pd["decode"]["tp_size"], pd["decode"]["dp_size_local"]) == (4, 8, 2)
+    assert (pd["prefill"]["dp_size"], pd["prefill"]["tp_size"], pd["prefill"]["dp_size_local"]) == (2, 16, 1)
+    assert (pd["decode"]["dp_size"], pd["decode"]["tp_size"], pd["decode"]["dp_size_local"]) == (2, 16, 1)
+    # TP16 也是 1M KV 容量所要求的（TP8 每 rank 需 54.14 GiB > 可用 33 GiB，装不下）
+    for role in ("prefill", "decode"):
+        assert pd[role]["dp_size_local"] * pd[role]["tp_size"] == pd["num_cards"]
     assert pd["prefill"]["tp_size"] == pd["decode"]["tp_size"], "layerwise 要求 P/D TP 一致"
     for role in ("prefill", "decode"):
         assert "context_parallel_size" not in pd[role]

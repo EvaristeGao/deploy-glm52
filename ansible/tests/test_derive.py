@@ -638,17 +638,17 @@ def test_non_master_headless_filters_endpoints():
 
 
 def test_a3_v030_lw_instance_list_and_proxy_endpoints():
-    """layerwise 档拓扑是 P dp4tp8（每节点 2 引擎）/ D dp4tp8（每节点 2 引擎）：
-    探测目标 = 2×2 + 2×2 + 1 proxy = 9；proxy 两端都列 p0/p1 与 d0/d1 的 9900/9901。"""
+    """layerwise 档拓扑是 P dp2tp16（每节点 1 引擎）/ D dp2tp16（每节点 1 引擎）：
+    探测目标 = 2×1 + 2×1 + 1 proxy = 5；proxy 端点 p0/p1 的 9081、d0/d1 的 9900。"""
     il = _render_a3_task_fact("生成实例清单", "1m-v030-lw")["instance_list"]
-    assert len(il) == 9
-    assert [r[0] for r in il].count("prefill") == 4
-    assert [r[0] for r in il].count("decode") == 4
+    assert len(il) == 5
+    assert [r[0] for r in il].count("prefill") == 2
+    assert [r[0] for r in il].count("decode") == 2
     pe = _render_a3_task_fact("生成 proxy 端点", "1m-v030-lw", native=False)
-    assert len(pe["prefiller_hosts"].split()) == 4
-    assert pe["prefiller_ports"] == "9081 9082 9081 9082"
-    assert len(pe["decoder_hosts"].split()) == 4
-    assert pe["decoder_ports"] == "9900 9901 9900 9901"
+    assert len(pe["prefiller_hosts"].split()) == 2
+    assert pe["prefiller_ports"] == "9081 9081"
+    assert len(pe["decoder_hosts"].split()) == 2
+    assert pe["decoder_ports"] == "9900 9900"
 
 
 def test_mooncake_container_certs_bind_only_in_ha_mode():
