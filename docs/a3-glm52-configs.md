@@ -36,7 +36,7 @@
 | prefill `gpu_memory_utilization` | 0.92 | 0.9（对齐集群 1M 参考 0.89~0.9） |
 | decode `gpu_memory_utilization` | 0.92 | 0.92 |
 | prefix caching | prefill `--enable-` / decode `--no-enable-` | 同 |
-| `enable_sparse_sfa_c8` | **false**（128K/dspark 参考也是 false） | **true**（对齐集群三份 1M 参考；官方警告见 §2.4） |
+| `enable_sparse_sfa_c8` | **false** | **false**（两档都关；有意不跟参考，见 §2.4） |
 
 切换方式：改 `deploy_config` → 重跑 `gen`（重渲染节点脚本）→ `start` 生效。
 
@@ -84,21 +84,20 @@
 
 - `GLM-5.2-w4a8c8 (experimental) ... has known accuracy issues in Prefill-Decode (PD) disaggregation scenarios`
 - w4a8c8 权重上 **DCP + `enable_sparse_sfa_c8` 同开有已知问题，不推荐**
-  （1M 档现在正是这个组合，见 §2.4）
+  （本项目 1M 档开着 DCP，因此 sfa_c8 关掉，正好规避该组合，见 §2.4）
 
-### 2.4 `enable_sparse_sfa_c8` 分档
+### 2.4 `enable_sparse_sfa_c8` 两档都关（有意不跟参考）
 
-| 档 | 取值 | 依据 |
-|---|---|---|
-| `1m` | **true** | 集群三份 1M 参考（`yy/GLM5.2-1M`、`a3-w8a8c8-1MB-nokvpool`、`didi-1`）的 additional-config 一致为 true；官方 1M 参考也是 true |
-| `200k` | **false** | 128K/dspark 参考为 false；官方 198K 参考为 true，此处沿用 c3b1d4d「关闭 sfa_c8 防精度问题」的策略 |
+沿用 c3b1d4d「关闭 sfa_c8 开关，防止精度问题」，`200k` / `1m` 两档、prefill/decode 两侧都是 **false**。
 
-> ⚠️ 1M 档开了 sfa_c8 后，就是官方明确警告的「w4a8c8 + DCP + sfa_c8 同开」：
-> 官方原文 `on the w4a8c8 weights enabling both together has known issues and is not recommended`。
-> 集群参考 R2/R3 在 w4a8c8 上实测如此（R1 用的是 w8a8c8）。**若出现精度问题**：
-> 优先把 `_1m` 两处 `enable_sparse_sfa_c8` 关回 `false`，或把权重换成
-> `/mnt/sfs_turbo/models/GLM-5.2-w8a8c8`（集群上已有）。
-> 单测 `test_a3_sfa_c8_per_config` 锁住分档。
+> **这是本项目唯一一处「参考都开、我们关」的有意偏离**：
+> 官方 1M 参考与集群三份 1M 参考（`yy/GLM5.2-1M`、`a3-w8a8c8-1MB-nokvpool`、`didi-1`）
+> 的 additional-config 里 `enable_sparse_sfa_c8` 都是 `true`；官方 198K 参考也是 `true`。
+> 关掉的依据：① 精度优先（c3b1d4d）；② 当前权重是 w4a8c8、1M 档又开着 DCP，
+> 正是官方警告的组合 —— 官方原文
+> `on the w4a8c8 weights enabling both together has known issues and is not recommended`。
+> 若将来换 w8a8c8 权重并确认精度 OK，可再考虑开 `true`。
+> 单测 `test_a3_sfa_c8_disabled_for_both_configs` 锁住该策略。
 
 ### 2.5 prefix caching 按 role 分
 
@@ -147,7 +146,7 @@ cd ansible && .venv/bin/python -m pytest tests/ -q        # 64 passed
 ```
 
 覆盖点：两档拓扑/端口/CP/additional-config/hf-overrides/batched-tokens/spec tokens/HCCL_BUFFSIZE/
-prefix caching 按 role（A3 prefill 开 decode 关、A2 两侧开）、sfa_c8 分档、
+prefix caching 按 role（A3 prefill 开 decode 关、A2 两侧开）、sfa_c8 两档都关、
 `deploy_config` 选块行为、kvpool MultiConnector、A3 环境变量、渲染换行干净、
 挂载与日志目录在容器内可见（`test_a3_mounts_and_logs_dir_are_container_visible`）、
 以及 A2 全量回归。

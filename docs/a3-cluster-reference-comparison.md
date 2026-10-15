@@ -55,7 +55,7 @@ R1 最接近"官方 1M + kvpool"形态，R2/R3 是当前 4 台节点上的直连
 | decode `--compilation-config` | FULL_DECODE_ONLY | 同 | 同 | 一致 | 同 ✅ |
 | decode `--async-scheduling` | 有 | 有 | 有 | 一致 | 有 ✅ |
 | **decode prefix-caching** | 无（vLLM 默认关） | 无（默认关） | **`--no-enable-prefix-caching`** | 一致=**关** | `--no-enable` ✅（已按参考改） |
-| **`enable_sparse_sfa_c8`** | **true** | **true** | **true** | 一致=**true** | **true** ✅（已按参考改；原 false） |
+| **`enable_sparse_sfa_c8`** | **true** | **true** | **true** | 一致=**true** | **false**（有意不跟参考：精度优先，见 §3） |
 | prefill `enable_dsa_cp` | true | true | true | 一致 | true ✅ |
 | `enable_sparse_li_c8` | true | true | true | 一致 | true ✅ |
 | prefill `c8_enable_reshape_optim` | true | true | true | 一致 | true ✅ |
@@ -114,15 +114,17 @@ R1 最接近"官方 1M + kvpool"形态，R2/R3 是当前 4 台节点上的直连
 |---|---|---|---|---|
 | 1 | **decode 侧 prefix-caching** | 一致为**关**（R1/R2 不带 flag = 默认关；R3 显式 `--no-`） | 模板两侧都硬编码 `--enable-prefix-caching` | 模板改为按 role 取 `pd_cluster.<role>.enable_prefix_caching`（缺省 true → A2 渲染不变）；A3 两档 prefill=true / decode=false |
 | 2 | prefill `gpu_memory_utilization` | 0.9 / 0.9 / 0.89 | `0.85`（来自 dspark/128K 参考） | **`0.9`**（对齐官方文档与 R1/R2） |
-| 3 | `enable_sparse_sfa_c8`（1M） | 一致为 **true** | `false`（c3b1d4d 精度策略） | **`true`**（`_200k` 保持 `false`，与 128K/dspark 参考一致） |
+| 3 | ~~`enable_sparse_sfa_c8`（1M）~~ | 一致为 **true** | `false` | **保持 `false`（不改）** —— 精度优先，有意不跟参考；而且当前权重 w4a8c8 + 1M 开着 DCP，正是官方警告的组合 |
 
-对应的单测：`test_a3_sfa_c8_per_config`、`test_a3_prefix_caching_per_role`、
+对应的单测：`test_a3_sfa_c8_disabled_for_both_configs`、`test_a3_prefix_caching_per_role`、
 `test_prefix_caching_default_keeps_a2_unchanged`、`test_a3_1m_prefill_gpu_mem_matches_reference`。
 
-> ⚠️ 第 3 项开了之后，1M 档就是官方明确警告的「**w4a8c8 权重 + DCP + sfa_c8 同开**」组合
-> （官方：has known issues, not recommended）。集群参考 R2/R3 在 w4a8c8 上实测如此，
-> 所以跟参考对齐；**若出现精度问题，优先把 1M 的 `enable_sparse_sfa_c8` 关回 false，
-> 或把权重换成 `/mnt/sfs_turbo/models/GLM-5.2-w8a8c8`（集群上已有，R1 用的就是它）**。
+> **第 3 项是有意不跟参考**：官方与三份集群 1M 参考的 `enable_sparse_sfa_c8` 都是 `true`，
+> 本项目按 c3b1d4d「关闭 sfa_c8 防精度问题」保持 `false`（两档都关）。
+> 关掉也正好规避官方警告的「**w4a8c8 权重 + DCP + sfa_c8 同开**」组合
+> （官方原文：has known issues, not recommended）——当前权重是 w4a8c8，1M 档还开着 DCP。
+> 若将来换 `/mnt/sfs_turbo/models/GLM-5.2-w8a8c8`（集群上已有，R1 用的就是它）
+> 且确认精度 OK，再考虑开 `true`。
 
 此外可考虑（参考之间不一致，属"增强"而非"纠错"，**本次未改**）：
 

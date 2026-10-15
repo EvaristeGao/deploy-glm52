@@ -493,14 +493,14 @@ def test_a3_1m_additional_config_per_role():
     pd = _gv(GV_FILE_A3, "1m")["pd_cluster"]
     out_p = _render_a3("prefill", "1m")
     assert pd["prefill"]["additional_config"] in out_p
-    for flag in ('"enable_dsa_cp":true', '"enable_sparse_sfa_c8": true',
+    for flag in ('"enable_dsa_cp":true', '"enable_sparse_sfa_c8": false',
                  '"enable_sparse_li_c8": true', '"c8_enable_reshape_optim":true',
                  '"recompute_scheduler_enable": false'):
         assert flag in out_p, f"prefill additional-config 缺少 {flag}"
 
     out_d = _render_a3("decode", "1m")
     assert pd["decode"]["additional_config"] in out_d
-    for flag in ('"enable_sparse_sfa_c8": true', '"enable_sparse_li_c8": true',
+    for flag in ('"enable_sparse_sfa_c8": false', '"enable_sparse_li_c8": true',
                  '"recompute_scheduler_enable":true', '"multistream_overlap_shared_expert":true'):
         assert flag in out_d, f"decode additional-config 缺少 {flag}"
     assert '"enable_dsa_cp"' not in out_d
@@ -523,20 +523,18 @@ def test_a3_200k_additional_config_per_role():
     assert '"enable_dsa_cp"' not in out_d
 
 
-def test_a3_sfa_c8_per_config():
-    """sfa_c8 分档：1M 对齐集群三份 1M 参考 = true；200K 保持 false（128K/dspark 参考也是 false）。
+def test_a3_sfa_c8_disabled_for_both_configs():
+    """sfa_c8 两档都关（沿用 c3b1d4d「关闭 sfa_c8 防精度问题」）。
 
-    ⚠️ 官方警告「w4a8c8 下 sfa_c8 + DCP 同开有已知问题」——当前权重是 w4a8c8，
-    1M 档同时开了 DCP 与 sfa_c8；集群参考在 w4a8c8 上实测如此，若出精度问题优先关这里。
+    有意不跟参考：官方 1M 参考与集群三份 1M 参考（yy/GLM5.2-1M、a3-w8a8c8-1MB-nokvpool、
+    didi-1）的 additional-config 都是 true。这里精度优先关掉——而且当前权重是 w4a8c8，
+    1M 档又开着 DCP，正是官方警告的「DCP + sfa_c8 同开」组合。
     """
-    p1m = _gv(GV_FILE_A3, "1m")["pd_cluster"]
-    for role in ("prefill", "decode"):
-        assert '"enable_sparse_sfa_c8": true' in p1m[role]["additional_config"]
-        assert '"enable_sparse_sfa_c8": true' in _render_a3(role, "1m")
-    p200 = _gv(GV_FILE_A3, "200k")["pd_cluster"]
-    for role in ("prefill", "decode"):
-        assert '"enable_sparse_sfa_c8": false' in p200[role]["additional_config"]
-        assert '"enable_sparse_sfa_c8": true' not in _render_a3(role, "200k")
+    for cfg in ("200k", "1m"):
+        pd = _gv(GV_FILE_A3, cfg)["pd_cluster"]
+        for role in ("prefill", "decode"):
+            assert '"enable_sparse_sfa_c8": false' in pd[role]["additional_config"]
+            assert '"enable_sparse_sfa_c8": true' not in _render_a3(role, cfg)
 
 
 def test_a3_prefix_caching_per_role():

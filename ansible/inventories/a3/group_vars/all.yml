@@ -90,11 +90,12 @@ _200k:
 #   注意 1：官方参考里 prefill 节点声明 --decode-context-parallel-size 16，
 #          decode 节点声明 4（各自本地口径不同），故 prefill 侧单独给
 #          decode_context_parallel_size。
-#   注意 2：三份集群 1M 参考（yy/GLM5.2-1M、a3-w8a8c8-1MB-nokvpool、didi-1）的
-#          additional_config 里 enable_sparse_sfa_c8 都是 true，此处跟参考对齐（
-#          200K 档保持 false：128K/dspark 参考也是 false）。
-#          官方警告「w4a8c8 下 sfa_c8 + DCP 同开有已知问题」，当前权重恰是 w4a8c8；
-#          集群参考在 w4a8c8 上实测开着，若出现精度问题优先关这里或换 w8a8c8 权重。
+#   注意 2：enable_sparse_sfa_c8 本项目**两档都关闭**（沿用 c3b1d4d「关闭 sfa_c8 开关，
+#          防止精度问题」）。注意三份集群 1M 参考（yy/GLM5.2-1M、a3-w8a8c8-1MB-nokvpool、
+#          didi-1）与官方 1M 参考都是 true —— 这里是有意不跟参考，精度优先。
+#          另外一个佐证：官方明确警告「w4a8c8 权重下 DCP + sfa_c8 同开有已知问题，不推荐」，
+#          而当前权重正是 w4a8c8、1M 档又开着 DCP，关掉正好规避该组合。
+#          若将来换 w8a8c8 权重并确认精度 OK，再考虑开 true。
 #   注意 3：prefix caching —— prefill 开（官方参考脚本给 enable）、decode 关
 #          （官方 A3 PD 的 decode 脚本一律不带该参数，三份集群参考也都是关）。
 # =============================================================================
@@ -116,7 +117,7 @@ _1m:
       max_num_seqs: 64
       gpu_memory_utilization: 0.9
       enable_prefix_caching: true
-      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
+      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
     decode:
       dp_size: 8
       tp_size: 4
@@ -130,7 +131,7 @@ _1m:
       max_num_seqs: 32
       gpu_memory_utilization: 0.92
       enable_prefix_caching: false
-      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
+      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true}'
 
 # =============================================================================
 # 激活的配置（由 deploy_config 选择；_active 必须先于 pd_cluster 定义，
