@@ -14,6 +14,7 @@
 
 仅纯本地 Jinja2 渲染，不拉起任何服务、不 ssh 节点、不占卡。
 """
+import json
 import os
 
 import pytest
@@ -511,17 +512,47 @@ def test_a3_v030_additional_config_and_no_sfa():
     out_p = _render_a3("prefill", "1m-v030")
     assert pd["prefill"]["additional_config"] in out_p
     for flag in ('"mega_moe_max_tokens": 8192', '"enable_flashcomm1": true',
-                 '"enable_fused_mc2": 1', '"enable_dsa_cp":true'):
+                 '"enable_fused_mc2": 1', '"enable_dsa_cp": true',
+                 '"ascend_compilation_config": {"fuse_muls_add": true}'):
         assert flag in out_p, f"prefill additional-config 缺少 {flag}"
     out_d = _render_a3("decode", "1m-v030")
     assert pd["decode"]["additional_config"] in out_d
     for flag in ('"enable_fused_mc2": 1', '"enable_mlapo": true',
-                 '"recompute_scheduler_enable":true'):
+                 '"recompute_scheduler_enable": true',
+                 '"scheduler_config": {"recompute_scheduler_enable": true}'):
         assert flag in out_d, f"decode additional-config 缺少 {flag}"
     for out in (out_p, out_d):
         assert "enable_sparse_sfa_c8" not in out
         assert "enable_sparse_li_c8" not in out
         assert "c8_enable_reshape_optim" not in out
+
+
+def test_a3_additional_config_uses_image_required_nesting():
+    """A3 镜像（vllm-ascend 0.30.0rc1）的 AscendConfig 是 extra="forbid"：
+    `fuse_muls_add` 只属于嵌套的 `ascend_compilation_config`、`recompute_scheduler_enable` 只属于
+    嵌套的 `scheduler_config`（顶层的 scheduler 系列键已被 deprecated 并会在校验前被 strip）。
+    写在顶层会直接 pydantic ValidationError: Unexpected keyword argument。
+    2026-10-15 实机首次启动就踩了这个坑，这里锁死三档都不得再出现顶层写法。"""
+    scheduler_legacy = ("recompute_scheduler_enable", "enable_balance_scheduling",
+                        "short_request_first_config", "profiling_chunk_config")
+    for cfg in ("1m-v030", "1m", "200k"):
+        pd = _gv(GV_FILE_A3, cfg)["pd_cluster"]
+        for role in ("prefill", "decode"):
+            parsed = json.loads(pd[role]["additional_config"])
+            # fuse_muls_add 必须嵌套，不能出现在顶层
+            assert "fuse_muls_add" not in parsed, f"{cfg}/{role} 顶层不应有 fuse_muls_add"
+            assert parsed["ascend_compilation_config"]["fuse_muls_add"] is True
+            # scheduler 系列键同理
+            for key in scheduler_legacy:
+                assert key not in parsed, f"{cfg}/{role} 顶层不应有 {key}"
+            # 渲染结果里必须是嵌套形式
+            out = _render_a3(role, cfg)
+            assert '"ascend_compilation_config": {"fuse_muls_add": true}' in out
+        # decode 必须开启重算调度，且是嵌套写法
+        out_d = _render_a3("decode", cfg)
+        assert '"scheduler_config": {"recompute_scheduler_enable": true}' in out_d
+        # prefill 不开（默认 false，不出现该键）
+        assert "recompute_scheduler_enable" not in _render_a3("prefill", cfg)
 
 
 def test_a3_v030_env_profile():
@@ -647,15 +678,15 @@ def test_a3_1m_additional_config_per_role():
     pd = _gv(GV_FILE_A3, "1m")["pd_cluster"]
     out_p = _render_a3("prefill", "1m")
     assert pd["prefill"]["additional_config"] in out_p
-    for flag in ('"enable_dsa_cp":true', '"enable_sparse_sfa_c8": false',
-                 '"enable_sparse_li_c8": true', '"c8_enable_reshape_optim":true',
-                 '"recompute_scheduler_enable": false'):
+    for flag in ('"enable_dsa_cp": true', '"enable_sparse_sfa_c8": false',
+                 '"enable_sparse_li_c8": true', '"c8_enable_reshape_optim": true',
+                 '"ascend_compilation_config": {"fuse_muls_add": true}'):
         assert flag in out_p, f"prefill additional-config 缺少 {flag}"
 
     out_d = _render_a3("decode", "1m")
     assert pd["decode"]["additional_config"] in out_d
     for flag in ('"enable_sparse_sfa_c8": false', '"enable_sparse_li_c8": true',
-                 '"recompute_scheduler_enable":true', '"multistream_overlap_shared_expert":true'):
+                 '"recompute_scheduler_enable": true', '"multistream_overlap_shared_expert": true'):
         assert flag in out_d, f"decode additional-config 缺少 {flag}"
     assert '"enable_dsa_cp"' not in out_d
     assert '"c8_enable_reshape_optim"' not in out_d
@@ -666,14 +697,14 @@ def test_a3_200k_additional_config_per_role():
     pd = _gv(GV_FILE_A3, "200k")["pd_cluster"]
     out_p = _render_a3("prefill", "200k")
     assert pd["prefill"]["additional_config"] in out_p
-    for flag in ('"enable_dsa_cp":true', '"enable_sparse_sfa_c8": false',
-                 '"enable_sparse_li_c8": true', '"c8_enable_reshape_optim":true',
-                 '"recompute_scheduler_enable": false'):
+    for flag in ('"enable_dsa_cp": true', '"enable_sparse_sfa_c8": false',
+                 '"enable_sparse_li_c8": true', '"c8_enable_reshape_optim": true',
+                 '"ascend_compilation_config": {"fuse_muls_add": true}'):
         assert flag in out_p, f"prefill additional-config 缺少 {flag}"
 
     out_d = _render_a3("decode", "200k")
     assert pd["decode"]["additional_config"] in out_d
-    assert '"recompute_scheduler_enable":true' in out_d
+    assert '"recompute_scheduler_enable": true' in out_d
     assert '"enable_dsa_cp"' not in out_d
 
 

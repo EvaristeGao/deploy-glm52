@@ -221,3 +221,49 @@ v0.30 原文要点：4×A3（64GB × 16）、w8a8c8；prefill **PP2 TP16**（`--
 | `--kv-cache-dtype int8` / `--attention_config.indexer_kv_dtype int8` | ✅ 镜像自带放宽 Literal 的 patch（`vllm_ascend/patch/platform/patch_kv_cache_dtype.py`、`patch_kv_cache_dtype.py`、`patch_indexer_kv_dtype.py`），否则 worker 侧会 `AssertionError: Invalid kv_cache_dtype: int8` |
 | `--safetensors-load-strategy` | ✅ `vllm/engine/arg_utils.py` |
 | `vllm` 版本 | `0.30.0+empty`（`/vllm-workspace/vllm` 源码安装） |
+
+### 4.5 ⚠️ 文档与镜像不一致：`additional-config` 的嵌套层级（实机首次启动踩到）
+
+**现象**：按 §5.2.3 原文把 additional-config 原样写进 `group_vars` 后，prefill 引擎启动即失败：
+
+```
+pydantic_core._pydantic_core.ValidationError: 1 validation error for VllmConfig
+fuse_muls_add
+  Unexpected keyword argument [type=unexpected_keyword_argument, input_value=True, input_type=bool]
+```
+
+**根因**：v0.30.0rc1 镜像里的 `vllm_ascend/ascend_config.py` 把配置拆成了嵌套的
+`@config` pydantic dataclass，且 `AscendConfig` 是 **`extra="forbid"`**——
+不属于 `AscendConfig` 顶层字段的键会被拒。而文档把两个**嵌套字段**写到了顶层：
+
+| 键 | 文档写的位置 | 镜像要求的位置 | 证据 |
+|---|---|---|---|
+| `fuse_muls_add` | additional-config **顶层** | `ascend_compilation_config.fuse_muls_add` | `ascend_config.py` 的 `AscendConfigCompilationConfig`（class 在 115 行，字段 129 行）；AscendConfig 文档串里的完整示例也把它嵌在 `ascend_compilation_config` 下；`graph_fusion_pass_manager.py` 读的是 `self.ascend_compilation_config.fuse_muls_add` |
+| `recompute_scheduler_enable` | additional-config **顶层** | `scheduler_config.recompute_scheduler_enable` | 顶层写法仍被兼容但已 deprecated（`SchedulerConfig.from_additional_config` 会打 warning），字段真正属于 `SchedulerConfig`（ascend_config.py:1622/1634）；`is_pd_decode_recompute_scheduler_enabled()` 读的是 `get_ascend_config().scheduler_config.recompute_scheduler_enable` |
+
+> ⚠️ **§5.2.3 / §5.1.3.1 的 `--additional-config` 不能原样照抄**，必须把上面两个键挪进对应的子配置。
+
+**修复**（已应用，A3 三档共 6 处）：
+
+```json
+// prefill
+{"multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "mega_moe_max_tokens": 8192,
+ "enable_flashcomm1": true, "enable_fused_mc2": 1,
+ "ascend_compilation_config": {"fuse_muls_add": true}}
+// decode
+{"multistream_overlap_shared_expert": true, "enable_fused_mc2": 1, "enable_mlapo": true,
+ "scheduler_config": {"recompute_scheduler_enable": true},
+ "ascend_compilation_config": {"fuse_muls_add": true}}
+```
+
+- prefill 的 `recompute_scheduler_enable` 直接**省略**（`SchedulerConfig` 默认就是 `false`）
+- `enable_flashcomm1` 保留在**顶层**是正确的：它在 `_NON_USER_INPUT_KEYS` 里被 strip 后由
+  `derive_and_validate()` 消费（不是 AscendConfig 字段，但属于受支持的顶层键）
+- `enable_fused_mc2` / `enable_mlapo` / `mega_moe_max_tokens` / `enable_dsa_cp` /
+  `multistream_overlap_shared_expert` / `enable_sparse_sfa_c8` / `enable_sparse_li_c8` /
+  `c8_enable_reshape_optim` 都是**合法顶层字段**，写法不变
+
+新增单测 `test_a3_additional_config_uses_image_required_nesting` 锁死三档都不得再出现顶层写法。
+
+> 注：A2 用的是另一个镜像（`quay.io/ascend/vllm-ascend:v0.23.0`），其 additional-config
+> 仍是老的扁平 schema（且实机验证过），所以 A2 的模板分支未改动。
