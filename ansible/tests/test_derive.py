@@ -592,25 +592,49 @@ def _a3_ctx_with_ha(enable_ha):
     return ctx
 
 
-def test_a3_v030_instance_list_and_proxy_endpoints_headless():
-    """v0.30 档：各 role 只有首节点有 API server（p1/d1 --headless），
-    实例清单与 proxy 端点只取首节点 —— 1 prefill + 2 decode + 1 proxy = 4 个探测目标。"""
+def test_a3_v030_instance_list_and_proxy_endpoints():
+    """v0.30 档：所有节点都对外提供 API（镜像禁止 remote engine --headless），
+    实例清单/proxy 端点列全部节点 —— P 2×1 + D 2×2 + 1 proxy = 7 个探测目标。"""
     il = _render_a3_task_fact("生成实例清单", "1m-v030")["instance_list"]
-    assert len(il) == 4
-    assert [r[0] for r in il].count("prefill") == 1
-    assert [r[0] for r in il].count("decode") == 2
+    assert len(il) == 7
+    assert [r[0] for r in il].count("prefill") == 2      # p0/p1 各 1 引擎
+    assert [r[0] for r in il].count("decode") == 4       # d0/d1 各 2 引擎
     assert il[-1][0] == "proxy"
     pe = _render_a3_task_fact("生成 proxy 端点", "1m-v030", native=False)
     ctx = _a3_ctx_with_ha(False)
-    p0_ip = ctx["hostvars"]["p0"]["ip"]
-    d0_ip = ctx["hostvars"]["d0"]["ip"]
-    assert pe["prefiller_hosts"] == p0_ip
+    p0_ip, p1_ip = ctx["hostvars"]["p0"]["ip"], ctx["hostvars"]["p1"]["ip"]
+    d0_ip, d1_ip = ctx["hostvars"]["d0"]["ip"], ctx["hostvars"]["d1"]["ip"]
+    assert pe["prefiller_hosts"] == f"{p0_ip} {p1_ip}"
+    assert pe["prefiller_ports"] == "9081 9081"
+    assert pe["decoder_hosts"] == f"{d0_ip} {d0_ip} {d1_ip} {d1_ip}"
+    assert pe["decoder_ports"] == "9900 9901 9900 9901"
+
+
+def test_non_master_headless_filters_endpoints():
+    """non_master_headless 机制保留：置 true 时实例清单/proxy 只取各 role 首节点
+    （当前 A3 各档因镜像约束都设 false，故用改过的 ctx 单独验证该分支没坏）。"""
+    gv, groups, hostvars = _a3_ctx("1m-v030")
+    pd = {r: dict(gv["pd_cluster"][r]) for r in ("prefill", "decode")}
+    pd["num_cards"] = gv["pd_cluster"]["num_cards"]
+    for role in ("prefill", "decode"):
+        pd[role]["non_master_headless"] = True
+    ctx = dict(gv, pd_cluster=pd, groups=groups, hostvars=hostvars)
+    env = _new_env(native=True)
+
+    il = env.from_string(str(_playbook_task("生成实例清单")["set_fact"]["instance_list"])).render(**ctx)
+    assert len(il) == 4                      # 1 prefill + 2 decode + 1 proxy
+    assert [r[0] for r in il].count("prefill") == 1
+    assert [r[0] for r in il].count("decode") == 2
+
+    t = _playbook_task("生成 proxy 端点")
+    for k, v in (t.get("vars") or {}).items():
+        ctx[k] = env.from_string(str(v)).render(**ctx)
+    pe = {k: _new_env(native=False).from_string(str(v)).render(**ctx)
+          for k, v in t["set_fact"].items()}
+    assert pe["prefiller_hosts"] == hostvars["p0"]["ip"]
     assert pe["prefiller_ports"] == "9081"
-    assert pe["decoder_hosts"] == f"{d0_ip} {d0_ip}"
+    assert pe["decoder_hosts"] == f'{hostvars["d0"]["ip"]} {hostvars["d0"]["ip"]}'
     assert pe["decoder_ports"] == "9900 9901"
-    # 对照：v0.23 档没有 headless，两个节点全进清单（1m：2×1 + 2×4 + 1 = 11）
-    il_legacy = _render_a3_task_fact("生成实例清单", "1m")["instance_list"]
-    assert len(il_legacy) == 11
 
 
 def test_mooncake_container_certs_bind_only_in_ha_mode():

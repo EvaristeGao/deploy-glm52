@@ -179,7 +179,9 @@ _1m_v030:
       safetensors_prefetch: true
       kv_cache_dtype: int8
       indexer_kv_dtype: int8
-      non_master_headless: true
+      # 镜像约束：external DP LB 模式（用了 --data-parallel-rank）禁止 remote engine 用 --headless，
+      # 故必须 false —— 两个节点各自起 API server，proxy 端点也相应列全部节点
+      non_master_headless: false
       api_server_count: 1
       additional_config: '{"multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"fuse_muls_add": true}}'
     decode:
@@ -200,7 +202,9 @@ _1m_v030:
       safetensors_prefetch: true
       kv_cache_dtype: int8
       indexer_kv_dtype: int8
-      non_master_headless: true
+      # 镜像约束：external DP LB 模式（用了 --data-parallel-rank）禁止 remote engine 用 --headless，
+      # 故必须 false —— 两个节点各自起 API server，proxy 端点也相应列全部节点
+      non_master_headless: false
       api_server_count: 1
       additional_config: '{"multistream_overlap_shared_expert": true, "enable_fused_mc2": 1, "enable_mlapo": true, "scheduler_config": {"recompute_scheduler_enable": true}, "ascend_compilation_config": {"fuse_muls_add": true}}'
 

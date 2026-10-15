@@ -483,15 +483,19 @@ def test_a3_v030_new_args():
             assert "--attention_config.indexer_kv_dtype" not in out
 
 
-def test_a3_v030_headless_api_server_count():
-    """v0.30：各 role 首节点（idx=0）--api-server-count，其余节点（idx>0）--headless。"""
+def test_a3_v030_api_server_count_and_no_headless():
+    """v0.30 档：所有节点都渲染 --api-server-count（文档里 p0/d0 写 1），且**不得出现 --headless**。
+
+    原因：vLLM 在 external/hybrid DP LB 模式（用了 --data-parallel-rank，本项目
+    launch_online_dp.py 正是这种）下要求 remote engine 自己起 API server：
+      RuntimeError: Remote engine N must not use --headless in external or hybrid dp lb mode
+    所以文档 §5.2.3 让 p1/d1 加 --headless 在本项目的启动方式下不可用。
+    """
     for role in ("prefill", "decode"):
-        head = _render_a3(role, "1m-v030", idx=0)
-        assert "--api-server-count 1" in head
-        assert "--headless" not in head
-        worker = _render_a3(role, "1m-v030", idx=1)
-        assert "--headless" in worker
-        assert "--api-server-count" not in worker
+        for idx in (0, 1):
+            out = _render_a3(role, "1m-v030", idx=idx)
+            assert "--api-server-count 1" in out
+            assert "--headless" not in out
     # v0.23 档与 A2 不带这两个参数（回归）
     for cfg in ("1m", "200k"):
         for role in ("prefill", "decode"):
@@ -502,6 +506,19 @@ def test_a3_v030_headless_api_server_count():
         out = _render(role)
         assert "--headless" not in out
         assert "--api-server-count" not in out
+
+
+def test_non_master_headless_mechanism_still_works():
+    """non_master_headless 机制本身保留可用（首节点 --api-server-count、其余 --headless），
+    只是当前 A3 各档因镜像约束都设为 false；用一个临时 ctx 验证渲染逻辑没坏。"""
+    gv = _gv(GV_FILE_A3, "1m-v030")
+    pd = {**gv["pd_cluster"], "prefill": {**gv["pd_cluster"]["prefill"], "non_master_headless": True}}
+    ctx = _ctx("prefill", "a3", True, {**gv, "pd_cluster": pd}, 0)
+    out0 = _env().get_template("run_dp_prefill_template.sh.j2").render(**ctx)
+    assert "--api-server-count 1" in out0 and "--headless" not in out0
+    ctx1 = _ctx("prefill", "a3", True, {**gv, "pd_cluster": pd}, 1)
+    out1 = _env().get_template("run_dp_prefill_template.sh.j2").render(**ctx1)
+    assert "--headless" in out1 and "--api-server-count" not in out1
 
 
 def test_a3_v030_additional_config_and_no_sfa():

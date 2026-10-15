@@ -141,13 +141,19 @@ vllm serve {{ model_path }} \
 {% if pd_cluster.prefill.indexer_kv_dtype is defined %}
     --attention_config.indexer_kv_dtype {{ pd_cluster.prefill.indexer_kv_dtype }} \
 {% endif %}
-{# ---- 对外 API：v0.30 起只有各 role 首节点提供（首节点 --api-server-count，其余 --headless，见 non_master_headless） ---- #}
-{% if pd_cluster.prefill.non_master_headless | default(false) %}
-{% if idx | default(0) | int == 0 %}
-    --api-server-count {{ pd_cluster.prefill.api_server_count | default(1) }} \
-{% else %}
+{# ---- 对外 API ----
+   api_server_count：配了就渲染（v0.30 文档给 p0/d0 写 1；external LB 模式下默认本就是 1）
+   non_master_headless：非首节点加 --headless。**本项目必须保持 false**：
+     vLLM 在 external/hybrid DP LB 模式下（即用了 --data-parallel-rank）要求 remote engine
+     自己起 API server、禁止 --headless
+     （vllm/v1/engine/utils.py: "Remote engine N must not use --headless in external or
+      hybrid dp lb mode"），而 launch_online_dp.py 正是这种模式。 #}
+{# 二者互斥：vLLM 会拒绝 --api-server-count 与 --headless 同时出现 #}
+{% set _headless_here = (pd_cluster.prefill.non_master_headless | default(false)) and (idx | default(0) | int > 0) %}
+{% if _headless_here %}
     --headless \
-{% endif %}
+{% elif pd_cluster.prefill.api_server_count is defined %}
+    --api-server-count {{ pd_cluster.prefill.api_server_count }} \
 {% endif %}
     --enforce-eager \
     --enable-auto-tool-choice \

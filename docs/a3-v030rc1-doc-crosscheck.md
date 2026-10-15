@@ -143,9 +143,9 @@ v0.30 原文要点：4×A3（64GB × 16）、w8a8c8；prefill **PP2 TP16**（`--
 | `--safetensors-load-strategy 'prefetch'` 两侧 | 新键 `safetensors_prefetch: true` ✅ |
 | `--kv-cache-dtype int8` / `--attention_config.indexer_kv_dtype int8` 两侧 | 新键 `kv_cache_dtype` / `indexer_kv_dtype` ✅ |
 | additional-config（prefill 含 `mega_moe_max_tokens: 8192` / `enable_flashcomm1` / `enable_fused_mc2`；decode 含 `enable_fused_mc2` / `enable_mlapo`） | `additional_config` 逐字 ✅ |
-| 各 role 首节点 `--api-server-count`，其余 `--headless` | 新键 `non_master_headless` + `api_server_count`，按 inventory 的 `idx` 渲染 ✅ |
+| 各 role 首节点 `--api-server-count`，其余 `--headless` | **已修正**：所有节点渲染 `--api-server-count 1`，**不渲染 `--headless`**（镜像禁止，见 §4.6） |
 | env：`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000` / `MF_GROUP_JOIN_MAX_TIMEOUT=1200` / `VLLM_USE_FASTOKENS=1` / `HCCL_BUFFSIZE=400` / `HCCL_OP_EXPANSION_MODE=AIV` / `HCCL_IF_IP` / `GLOO`+`TP`+`HCCL_SOCKET_IFNAME` / `PYTORCH_NPU_ALLOC_CONF` / `LD_LIBRARY_PATH`；**不再有** `ACL_OP_INIT_MODE`/`ASCEND_A3_ENABLE`/`TASK_QUEUE_ENABLE`/`VLLM_ASCEND_ENABLE_*`/`HCCL_*_TIMEOUT`/`OMP_*` | 新键 `v030_env: true` 切换 env 集（模板里门控）✅ |
-| proxy：prefiller 只 p0:9081、decoder 只 d0 的 9900/9901 | start.yml 实例清单/proxy 端点按 `non_master_headless` 只取首节点 ✅（模拟出的命令与文档一致） |
+| proxy：prefiller 只 p0:9081、decoder 只 d0 的 9900/9901 | **已修正**：列出全部节点 —— prefiller `p0 p1`、decoder `d0 d0 d1 d1`（因不能用 headless，见 §4.6） |
 | 无 `--hf-overrides` | v030 档不渲染 ✅ |
 
 ### 4.2 有意保留的偏离（需知悉）
@@ -267,3 +267,47 @@ fuse_muls_add
 
 > 注：A2 用的是另一个镜像（`quay.io/ascend/vllm-ascend:v0.23.0`），其 additional-config
 > 仍是老的扁平 schema（且实机验证过），所以 A2 的模板分支未改动。
+
+### 4.6 ⚠️ 文档与镜像不一致（二）：`--headless` 与本项目的 DP 启动方式不兼容
+
+**现象**（修完 §4.5 后的第二次启动）：
+
+```
+RuntimeError: Remote engine 1 must not use --headless in external or hybrid dp lb mode
+  at vllm/v1/engine/utils.py:1352 wait_for_engine_startup
+```
+
+**根因**：本项目由 `launch_online_dp.py` 按 `--data-parallel-size/--data-parallel-rank`
+拉起每个 DP rank，而 vLLM 据此判定为 **external LB 模式**：
+
+```python
+# vllm/entrypoints/cli/serve.py
+is_external_lb = (args.data_parallel_external_lb or args.data_parallel_rank is not None)
+...
+# Remote engines must be headless iff we aren't in hybrid dp lb mode.
+if not local and headless != remote_should_be_headless:
+    raise RuntimeError(f"Remote engine {eng_index} must not use --headless in external or hybrid dp lb mode")
+```
+
+即：**external / hybrid LB 模式下，非本机的 DP rank 必须自己起 API server，不允许 `--headless`**。
+文档 §5.2.3 让 p1/d1 加 `--headless`，在本项目的启动方式下直接抛错。
+
+另外同一段代码显示：external LB 模式下 `api_server_count` **默认就是 1**，所以文档里的
+`--api-server-count 1` 只是个显式 no-op（保留无害）。
+
+**修正**：
+
+| 项 | 文档写法 | 本项目实现 |
+|---|---|---|
+| p1 / d1 | `--headless` | ❌ 不可用 → 与 p0/d0 一样渲染 `--api-server-count 1` |
+| `non_master_headless` | — | A3 三档统一 `false`（模板与 start.yml 的过滤机制保留，便于将来换 LB 模式） |
+| proxy 端点 | prefiller 只 p0:9081；decoder 只 d0 的 9900/9901 | **prefiller `p0 p1`（9081 9081）；decoder `d0 d0 d1 d1`（9900 9901 9900 9901）** |
+| `wait_ready` 探测目标 | 4 | **7**（P 2×1 + D 2×2 + 1 proxy） |
+
+模板里 `--headless` 与 `--api-server-count` 现在是**互斥**渲染（vLLM 会拒绝二者同时出现：
+`--api-server-count=N cannot be used with --headless`）。
+单测：`test_a3_v030_api_server_count_and_no_headless`、`test_non_master_headless_mechanism_still_works`
+（机制本身仍可用）、`test_non_master_headless_filters_endpoints`。
+
+> 汇总：v0.30.0rc1 文档 §5.2.3 有两处与本项目/镜像实际行为冲突 ——
+> additional-config 的嵌套层级（§4.5）与 `--headless`（§4.6）。两处都已按镜像实际行为修正。
