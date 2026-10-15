@@ -117,7 +117,10 @@ vllm serve {{ model_path }} \
 {% endif %}
     --seed 1024 \
     --served-model-name {{ served_model_name }} \
+{# async-scheduling：默认开；layerwise 验证档关掉（官方要求先纯 eager 验证） #}
+{% if pd_cluster.decode.async_scheduling | default(true) %}
     --async-scheduling \
+{% endif %}
     --max-model-len {{ max_model_len }} \
     --max-num-batched-tokens {{ pd_cluster.decode.max_num_batched_tokens | default('192' if cluster_type == "a3" else '256') }} \
     --trust-remote-code \
@@ -183,7 +186,11 @@ vllm serve {{ model_path }} \
                 "kv_connector_extra_config": {
                     "lookup_rpc_port":"0",
                     "load_async": true,
-                    "backend": "mooncake"
+                    "backend": "mooncake"{% if pd_cluster.layerwise is defined and (pd_cluster.layerwise.enabled | default(false)) %},
+                    "use_layerwise": true,
+                    "layerwise_prefetch_layers": {{ pd_cluster.layerwise.prefetch_layers | default(2) }},
+                    "layerwise_max_transfer_blocks": {{ pd_cluster.layerwise.max_transfer_blocks | default(64) }},
+                    "layerwise_max_transfer_bytes": {{ pd_cluster.layerwise.max_transfer_bytes | default(16777216) }}{% endif %}
                 }
             }
         ]
@@ -203,6 +210,11 @@ vllm serve {{ model_path }} \
     }
     }' \
 {% endif %}
+{# ---- 图模式 / eager：默认按集群渲染 compilation-config；
+   pd_cluster.decode.enforce_eager=true 时改纯 eager（layerwise 官方要求先 eager 验证，graph 需另行集成验证） ---- #}
+{% if pd_cluster.decode.enforce_eager | default(false) %}
+    --enforce-eager \
+{% else %}
     --compilation-config \
 {% if cluster_type == "a3" %}
     '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -211,6 +223,7 @@ vllm serve {{ model_path }} \
         "cudagraph_mode": "FULL_DECODE_ONLY",
         "cudagraph_capture_sizes": {{ pd_cluster.decode.capture_sizes | default([4,8,16,24,32,40,48,56,64,96,128,160,192,224,256,298,320,352,384]) }}
     }' \
+{% endif %}
 {% endif %}
 {# ---- hf-overrides（可选；官方 A3 198K 参考需要 use_index_cache/index_topk_freq，1M 参考无） ---- #}
 {% if pd_cluster.decode.hf_overrides is defined %}

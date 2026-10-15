@@ -44,7 +44,12 @@
 additional-config 用 `enable_flashcomm1`/`enable_fused_mc2`/`enable_mlapo`/`mega_moe_max_tokens`）。
 逐项对应与有意偏离见 `a3-v030rc1-vs-official.md` §4。
 
-切换方式：改 `deploy_config`（`200k` / `1m` / `1m-v030`）→ 重跑 `gen`（重渲染节点脚本）→ `start` 生效。
+第四档 **`1m-v030-lw`**（未启用）：`1m-v030` + **Mooncake 分层 KV offload**（`use_layerwise`，即官方
+`mooncake_hybrid_attention` 那条 hybrid 路径）。为满足 layerwise 的三条硬约束，相对 `1m-v030` 改了：
+P/D 都 **TP8**（TP 必须一致）、**不开 CP/DCP**、decode 改**纯 eager**、prefill 开 `--enable-chunked-prefill`。
+前置是 mooncake client 必须带 PR #2881 的 range/session 接口。详见 `a3-layerwise-kv-offload.md`。
+
+切换方式：改 `deploy_config`（`200k` / `1m` / `1m-v030` / `1m-v030-lw`）→ 重跑 `gen`（重渲染节点脚本）→ `start` 生效。
 
 ---
 

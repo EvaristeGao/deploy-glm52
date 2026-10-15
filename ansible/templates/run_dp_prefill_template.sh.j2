@@ -118,8 +118,11 @@ vllm serve {{ model_path }} \
     --no-enable-prefix-caching \
 {% endif %}
     --seed 1024 \
-{% if cluster_type != "a3" %}
+{# chunked-prefill：A3 默认不渲染；pd_cluster.prefill.enable_chunked_prefill=true 时渲染（layerwise 文档示例为开） #}
+{% if cluster_type != "a3" or (pd_cluster.prefill.enable_chunked_prefill | default(false)) %}
     --enable-chunked-prefill \
+{% endif %}
+{% if cluster_type != "a3" %}
     --async-scheduling \
 {% endif %}
     --served-model-name {{ served_model_name }} \
@@ -190,7 +193,11 @@ vllm serve {{ model_path }} \
                 "kv_role": "kv_producer",
                 "kv_connector_extra_config": {
                     "lookup_rpc_port":"0",
-                    "backend": "mooncake"
+                    "backend": "mooncake"{% if pd_cluster.layerwise is defined and (pd_cluster.layerwise.enabled | default(false)) %},
+                    "use_layerwise": true,
+                    "layerwise_prefetch_layers": {{ pd_cluster.layerwise.prefetch_layers | default(2) }},
+                    "layerwise_max_transfer_blocks": {{ pd_cluster.layerwise.max_transfer_blocks | default(64) }},
+                    "layerwise_max_transfer_bytes": {{ pd_cluster.layerwise.max_transfer_bytes | default(16777216) }}{% endif %}
                 }
             }
         ]

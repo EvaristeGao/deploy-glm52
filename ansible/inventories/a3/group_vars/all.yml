@@ -14,7 +14,8 @@ ansible_python_interpreter: /usr/bin/python3
 
 # =============================================================================
 # 部署配置选择器（与 A2 同一套写法）
-#   取值：1m-v030 —— ★ 当前启用，严格按 v0.30.0rc1 文档 §5.2.3（A3 1M PD 分离）
+#   取值：1m-v030-lw —— v0.30 口径 + Mooncake 分层 KV offload（use_layerwise，实验性，见下）
+#        1m-v030    —— ★ 当前启用，严格按 v0.30.0rc1 文档 §5.2.3（A3 1M PD 分离）
 #         1m      —— 按 v0.23.0 文档 §5.2.2 + 集群现网参考（A3 1M PD，DP8TP4/DCP4）
 #         200k    —— 按 v0.23.0 文档 §5.2.1 + 集群现网参考（A3 198K PD；prefill 用 DP 代替 PP）
 # 参考：https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/GLM5.2.html
@@ -209,10 +210,90 @@ _1m_v030:
       additional_config: '{"multistream_overlap_shared_expert": true, "enable_fused_mc2": 1, "enable_mlapo": true, "scheduler_config": {"recompute_scheduler_enable": true}, "ascend_compilation_config": {"fuse_muls_add": true}}'
 
 # =============================================================================
+# 1M-v030-layerwise 配置 —— 在 1m-v030 基础上开 Mooncake 分层 KV offload（use_layerwise）
+#   功能文档：user_guide/feature_guide/mooncake_hybrid_attention.html
+#             user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.html
+#   原理：把一个 block 的**所有层**打包成 1 个远端对象（对象数 B×L×R → B×R），每层算完
+#         只 PUT 该层的 byte range；backend=mooncake + use_layerwise 走 block_key data plane
+#         （镜像里 mooncake_layerwise.py 的 LAYERWISE_DATA_PLANE="block_key"），
+#         即 hybrid 多 KV-group 路径（key 命名空间 model@mooncake_hybrid_v1:<digest>@group:<id>@...）
+#
+#   为满足 layerwise 的三条硬约束，本档相对 1m-v030 改了 4 处：
+#     1) 不开 CP/DCP（镜像 mooncake_layerwise.validate_topology 明确
+#        "supports TP/PP, but not context parallelism"，CP>1 直接 raise）
+#     2) P/D 的 TP 一致（validate_runtime: 不支持 prefill/decode TP mismatch；
+#        且 PD 分离下 producer/consumer 的 dcp/pcp 也必须一致）→ 两边都 TP8
+#     3) decode 改纯 eager（官方要求先 eager 验证，graph mode 需另行集成验证）
+#        → enforce_eager: true + async_scheduling: false，不渲染 --compilation-config
+#     4) prefill 开 chunked-prefill（layerwise 文档的示例配置带 --enable-chunked-prefill，
+#        且 session 的 chunk 续传语义就是为它设计的），chunk 用文档示例的 4096
+#   前置条件（重要）：
+#     · mooncake client 必须带 PR #2881 的 7 个 range/session 接口
+#       （batch_put_session_start / batch_put_from_multi_buffer_ranges / batch_put_session_end /
+#         batch_put_session_revoke / batch_get_session_start /
+#         batch_get_into_multi_buffer_ranges / batch_get_session_end）；
+#       当前镜像的 mooncake 包没有这些接口，启动时会 fail fast 报 "must include Mooncake PR #2881"
+#     · 官方标注 real-NPU E2E 尚未完成（只有 CPU mock 单测），属 developer preview
+#   调试：需要每层审计日志时给引擎容器加 VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1（默认 0）
+# =============================================================================
+_1m_v030_lw:
+  pd_cluster:
+    max_model_len: 1048576
+    num_cards: 16
+    v030_env: true
+    layerwise:
+      enabled: true
+      prefetch_layers: 2              # 文档建议先用 2；首次硬件验证可降到 1
+      max_transfer_blocks: 64
+      max_transfer_bytes: 16777216
+    prefill:
+      dp_size: 4                      # 2 节点 × 每节点 2 引擎
+      tp_size: 8                      # 与 decode 的 TP 保持一致（layerwise 硬约束）
+      dp_size_local: 2
+      base_port: 9081
+      kv_port: 30000
+      rpc_port: 16591
+      engine_id: 0
+      max_num_batched_tokens: 4096     # layerwise 文档示例值（配 chunked prefill）
+      max_num_seqs: 64
+      gpu_memory_utilization: 0.85
+      enable_prefix_caching: true
+      enable_chunked_prefill: true
+      safetensors_prefetch: true
+      kv_cache_dtype: int8
+      indexer_kv_dtype: int8
+      non_master_headless: false
+      api_server_count: 1
+      # 相对 1m-v030 去掉了 enable_dsa_cp（本档 CP/DCP=1，DSA CP 无意义）
+      additional_config: '{"multistream_overlap_shared_expert": true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"fuse_muls_add": true}}'
+    decode:
+      dp_size: 4
+      tp_size: 8                      # 与 prefill 一致（layerwise 硬约束）
+      dp_size_local: 2
+      base_port: 9900
+      kv_port: 30200
+      rpc_port: 16600
+      engine_id: 2
+      max_num_batched_tokens: 192
+      max_num_seqs: 32
+      gpu_memory_utilization: 0.9
+      num_speculative_tokens: 5
+      hccl_buffsize: 400
+      enable_prefix_caching: false
+      enforce_eager: true             # layerwise 先 eager 验证
+      async_scheduling: false
+      safetensors_prefetch: true
+      kv_cache_dtype: int8
+      indexer_kv_dtype: int8
+      non_master_headless: false
+      api_server_count: 1
+      additional_config: '{"multistream_overlap_shared_expert": true, "enable_fused_mc2": 1, "enable_mlapo": true, "scheduler_config": {"recompute_scheduler_enable": true}, "ascend_compilation_config": {"fuse_muls_add": true}}'
+
+# =============================================================================
 # 激活的配置（由 deploy_config 选择；_active 必须先于 pd_cluster 定义，
 #   否则 {{ _active.pd_cluster }} 解析时 _active 还是未展开的字符串）
 # =============================================================================
-_active: "{{ {'200k': _200k, '1m': _1m, '1m-v030': _1m_v030}[deploy_config] }}"
+_active: "{{ {'200k': _200k, '1m': _1m, '1m-v030': _1m_v030, '1m-v030-lw': _1m_v030_lw}[deploy_config] }}"
 pd_cluster: "{{ _active.pd_cluster }}"
 
 # --- 共享字段（与部署配置无关）---

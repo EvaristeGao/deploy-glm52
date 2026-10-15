@@ -16,6 +16,7 @@
 """
 import json
 import os
+import re
 
 import pytest
 import yaml
@@ -432,7 +433,7 @@ def test_a3_deploy_config_selects_matching_block():
     """deploy_config 选中哪一档，pd_cluster 就解析成哪一块（不锁死具体默认值，防止手改后单测变红）。"""
     gv = _gv(GV_FILE_A3)
     cfg = gv["deploy_config"]
-    assert cfg in ("200k", "1m", "1m-v030")
+    assert cfg in ("200k", "1m", "1m-v030", "1m-v030-lw")
     assert gv["pd_cluster"] == gv[f"_{cfg.replace('-', '_')}"]["pd_cluster"]
 
 
@@ -570,6 +571,72 @@ def test_a3_additional_config_uses_image_required_nesting():
         assert '"scheduler_config": {"recompute_scheduler_enable": true}' in out_d
         # prefill 不开（默认 false，不出现该键）
         assert "recompute_scheduler_enable" not in _render_a3("prefill", cfg)
+
+
+# ---- layerwise（Mooncake 分层 KV offload）档：1m-v030-lw ----
+# 约束来自镜像：mooncake_layerwise.validate_topology 拒绝 CP>1、validate_runtime 拒绝 P/D TP 不一致
+
+
+def test_a3_v030_lw_topology_and_no_cp():
+    """layerwise 档：P/D 都 DP4 TP8（TP 必须一致）、每节点 2 引擎、无任何 CP/DCP 键与 flag。"""
+    pd = _gv(GV_FILE_A3, "1m-v030-lw")["pd_cluster"]
+    assert (pd["prefill"]["dp_size"], pd["prefill"]["tp_size"], pd["prefill"]["dp_size_local"]) == (4, 8, 2)
+    assert (pd["decode"]["dp_size"], pd["decode"]["tp_size"], pd["decode"]["dp_size_local"]) == (4, 8, 2)
+    assert pd["prefill"]["tp_size"] == pd["decode"]["tp_size"], "layerwise 要求 P/D TP 一致"
+    for role in ("prefill", "decode"):
+        assert "context_parallel_size" not in pd[role]
+    assert "cp_kv_cache_interleave_size" not in pd
+    for role in ("prefill", "decode"):
+        out = _render_a3(role, "1m-v030-lw")
+        assert "--prefill-context-parallel-size" not in out
+        assert "--decode-context-parallel-size" not in out
+        assert "--cp-kv-cache-interleave-size" not in out
+
+
+def _ascend_store_extra(cfg, role):
+    """渲染后从 --kv-transfer-config 的 JSON 里取出 AscendStoreConnector 的 extra config。"""
+    out = _render_a3(role, cfg)
+    m = re.search(r"--kv-transfer-config \\\n\s*'(\{.*?\})'", out, re.S)
+    assert m, f"{cfg}/{role} 未找到 kv-transfer-config JSON"
+    d = json.loads(m.group(1))
+    return [c for c in d["kv_connector_extra_config"]["connectors"]
+            if c["kv_connector"] == "AscendStoreConnector"][0]["kv_connector_extra_config"]
+
+
+def test_a3_v030_lw_layerwise_kv_transfer():
+    """layerwise 旋钮注入 AscendStoreConnector（两侧都要）；其余档不得出现（回归）。"""
+    lw = _gv(GV_FILE_A3, "1m-v030-lw")["pd_cluster"]["layerwise"]
+    for role in ("prefill", "decode"):
+        e = _ascend_store_extra("1m-v030-lw", role)
+        assert e["use_layerwise"] is True
+        assert e["backend"] == "mooncake"
+        assert e["layerwise_prefetch_layers"] == lw["prefetch_layers"]
+        assert e["layerwise_max_transfer_blocks"] == lw["max_transfer_blocks"]
+        assert e["layerwise_max_transfer_bytes"] == lw["max_transfer_bytes"]
+    for cfg in ("1m-v030", "1m", "200k"):
+        for role in ("prefill", "decode"):
+            e = _ascend_store_extra(cfg, role)
+            assert "use_layerwise" not in e
+            assert not any(k.startswith("layerwise_") for k in e)
+
+
+def test_a3_v030_lw_decode_eager_and_prefill_chunked():
+    """layerwise 档：decode 纯 eager（无 --compilation-config / --async-scheduling）、
+    prefill 开 --enable-chunked-prefill；其余档与 A2 回归不变。"""
+    out_d = _render_a3("decode", "1m-v030-lw")
+    assert "--enforce-eager" in out_d
+    assert "--compilation-config" not in out_d
+    assert "--async-scheduling" not in out_d
+    assert "--enable-chunked-prefill" in _render_a3("prefill", "1m-v030-lw")
+
+    out_d2 = _render_a3("decode", "1m-v030")
+    assert "--compilation-config" in out_d2 and "--async-scheduling" in out_d2
+    assert "--enforce-eager" not in out_d2
+    assert "--enable-chunked-prefill" not in _render_a3("prefill", "1m-v030")
+
+    out_a2p, out_a2d = _render_prefill(), _render_decode()
+    assert "--enable-chunked-prefill" in out_a2p and "--async-scheduling" in out_a2p
+    assert "--compilation-config" in out_a2d and "--async-scheduling" in out_a2d
 
 
 def test_a3_v030_env_profile():
