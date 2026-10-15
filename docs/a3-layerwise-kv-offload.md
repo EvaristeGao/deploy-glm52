@@ -40,9 +40,51 @@ model@mooncake_hybrid_v1:<layout-digest>@group:<id>@block:<size>@<hash>@<head>
 
 | # | 条件 | 现状 |
 |---|---|---|
-| 1 | **mooncake client 必须带 PR #2881 的 7 个接口**：`batch_put_session_start`、`batch_put_from_multi_buffer_ranges`、`batch_put_session_end`、`batch_put_session_revoke`、`batch_get_session_start`、`batch_get_into_multi_buffer_ranges`、`batch_get_session_end` | ❌ **镜像里现有的 mooncake 包没有**（python wrapper 未暴露、`.so` 符号计数为 0）；vllm-ascend 启动时会 fail fast 报 `Mooncake client does not support batch_*`。需要自己打一个带 PR #2881 的镜像 |
+| 1 | **mooncake client 必须带 PR #2881 的 7 个接口**：`batch_put_session_start`、`batch_put_from_multi_buffer_ranges`、`batch_put_session_end`、`batch_put_session_revoke`、`batch_get_session_start`、`batch_get_into_multi_buffer_ranges`、`batch_get_session_end` | ❌ 基础镜像里是 `mooncake-transfer-engine-npu 0.3.11.post1`（2026-06-10，早于该 PR），**没有**这些接口（python wrapper 未暴露、`.so` 符号计数为 0）；vllm-ascend 启动时 fail fast 报 `Mooncake client does not support batch_*`。✅ **解法见 §2.1**（`image_build/Dockerfile_mooncake_layerwise`） |
 | 2 | p0 上有 mooncake_master（本项目 kvpool 单主）+ `mooncake.json` | ✅ 已有（`mooncake-p0` 容器） |
 | 3 | 官方标注 **real-NPU E2E 尚未完成**（只有 CPU mock 285 例 + 静态检查），"No latency or throughput improvement is claimed without hardware measurements" | ⚠️ 属 developer preview，别当生产特性 |
+
+---
+
+## 2.1 换 mooncake：`image_build/Dockerfile_mooncake_layerwise`
+
+**版本对照**（PyPI 包名 `mooncake-transfer-engine-npu`，Ascend NPU 变体，来源
+<https://github.com/kvcache-ai/Mooncake>）：
+
+| 版本 | 发布 | 是否含 PR #2881 |
+|---|---|---|
+| 0.3.11.post1 | 2026-06-10 | ❌ 基础镜像里的版本 |
+| 0.3.12 / 0.3.12.post1 | 2026-07-23 / 07-24 | ❌（早于 PR 合并） |
+| **0.3.13 / 0.3.13.post1** | 2026-08-26 / 08-31 | ✅（PR #2881 于 **2026-08-10** 合入 main，merge commit `78726c5`） |
+
+已实测 `0.3.13.post1` 的 **cp312-manylinux_2_35-aarch64** wheel：7 个 range/session 符号全部存在，
+且仍自带 `mooncake_master`（kvpool 单主需要它）—— 所以只需一次 pip 升级，不必从源码构建。
+
+Dockerfile 做三件事：
+1. `pip install --upgrade --no-deps mooncake-transfer-engine-npu==0.3.13.post1`
+   （`--no-deps`：该 wheel 只依赖 aiohttp / requests，基础镜像已有，避免顺带动 vLLM 相关包）
+2. **构建期自检**：`strings mooncake/*.so | grep` 逐个确认 7 个接口存在，缺一个就让构建失败
+   （用符号检查而非 `import` —— import 需要宿主机挂进来的 Ascend 驱动，构建容器里没有）
+3. 确认 `mooncake_master` 仍在
+
+```bash
+# 必须在 aarch64 上构建（wheel 是 aarch64 + cp312；控制机若是 x86_64 需 buildx --platform linux/arm64）
+# 最省事：直接在 A3 节点上构建（节点已有基础镜像 + 能连 PyPI + 有 docker）
+scp image_build/Dockerfile_mooncake_layerwise root@<node>:/tmp/lwbuild/Dockerfile
+ssh root@<node> 'cd /tmp/lwbuild && docker build -f Dockerfile \
+  -t <你的镜像名>:v0.30.0rc1-a3-mc0.3.13 .'
+# 内网镜像源：--build-arg PIP_INDEX_URL=<你的源>
+```
+
+换镜像后同步改 `group_vars`：
+
+```yaml
+image:          <新镜像>   # 引擎容器（layerwise 的 data plane 在这里）
+mooncake.image: <新镜像>   # kvpool 的 mooncake_master 容器（旧镜像也能跑单主，可不动）
+```
+
+> 若将来 PyPI 上没有含目标 PR 的版本，按官方文档 §5.1 从源码构建：
+> `https://github.com/kvcache-ai/Mooncake`，参考 merge commit `78726c5ca6417f3926c384320728bb7c426e8f22`。
 
 ---
 

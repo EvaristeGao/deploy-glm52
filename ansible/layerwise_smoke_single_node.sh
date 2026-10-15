@@ -16,7 +16,7 @@
 #      range/session 接口。否则启动会 fail fast：
 #        "Mooncake client does not support batch_put_session_start" /
 #        "must include Mooncake PR #2881"
-#      用 IMAGE=<你打好的镜像> 覆盖。
+#      默认用 image_build/Dockerfile_mooncake_layerwise 构建出来的镜像，用 IMAGE=<其它镜像> 覆盖。
 #   2) p0 上已有 mooncake_master（本项目 kvpool 单主），且 mooncake.json 指向它。
 #      下面默认从 ansible/generated/mooncake.json 拷（先跑一次 gen.yml 生成）。
 #   3) 该节点有模型权重（默认 /mnt/sfs_turbo/models/GLM-5.2-w4a8c8）。
@@ -31,7 +31,9 @@
 # =============================================================================
 set -euo pipefail
 
-IMAGE=${IMAGE:-quay.io/ascend/vllm-ascend:v0.30.0rc1-a3}
+# 默认用 image_build/Dockerfile_mooncake_layerwise 构建的新镜像（已实测：mooncake 0.3.13.post1，
+# 含 PR #2881 的 7 个 range/session 接口 + mooncake_master）；用 IMAGE= 覆盖
+IMAGE=${IMAGE:-glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13}
 NAME=${NAME:-glm52-layerwise-smoke}
 MODEL=${MODEL:-/mnt/sfs_turbo/models/GLM-5.2-w4a8c8}
 NIC=${NIC:-enp23s0f3}

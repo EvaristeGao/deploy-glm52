@@ -1,0 +1,102 @@
+# =============================================================================
+# Dockerfile_mooncake_layerwise —— 在现有 vLLM-Ascend 镜像上换装「带 layerwise
+# range/session 接口」的 Mooncake NPU 客户端
+#
+# 为什么需要：
+#   vllm-ascend 的 layerwise（Mooncake 分层 KV offload / hybrid attention，
+#   见 docs/a3-layerwise-kv-offload.md）要求 mooncake client 提供 PR #2881
+#   「[Store] Add put/get session APIs for ranged multi-buffer transfers」
+#   （2026-08-10 合入 main，merge commit 78726c5ca6417f3926c384320728bb7c426e8f22）的
+#   7 个接口：
+#     batch_put_session_start / batch_put_from_multi_buffer_ranges /
+#     batch_put_session_end / batch_put_session_revoke /
+#     batch_get_session_start / batch_get_into_multi_buffer_ranges /
+#     batch_get_session_end
+#   基础镜像里装的是 mooncake-transfer-engine-npu 0.3.11.post1（2026-06-10 发布，
+#   早于该 PR），启动时会 fail fast：
+#     Mooncake client does not support batch_put_session_start
+#
+#   PyPI 上 0.3.13 / 0.3.13.post1（2026-08-26 / 08-31 发布）在 PR 合入之后，
+#   已实测其 cp312-aarch64 wheel 内含上述 7 个符号，且仍自带 mooncake_master
+#   （kvpool 单主要用它），因此本镜像只做这一次 pip 升级即可。
+#
+# 构建（必须在 aarch64 机器上，wheel 是 manylinux_2_35_aarch64 + cp312；
+#       控制机若是 x86_64 需用 buildx --platform linux/arm64，或直接在 A3 节点上构建）：
+#     docker build -f image_build/Dockerfile_mooncake_layerwise \
+#         -t <你的镜像名>:<tag> image_build/
+#   例（在 p0 节点上）：
+#     docker build -f image_build/Dockerfile_mooncake_layerwise \
+#         -t glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13 image_build/
+#
+# 构建完把镜像推到节点可见的 registry，或 docker save | ssh docker load。
+#   ⚠️ 4 节点部署时新镜像要在 p0/p1/d0/d1 **都**有：建议 docker push 到你自己的 registry
+#      （例如 swr.cn-east-4.myhuaweicloud.com/<org>/<repo>:tag），再让各节点 pull；
+#      直接 docker save 21.6GB 会很慢（大部分层与基础镜像相同）。
+#   ⚠️ 实测节点直连 PyPI 只有 ~23 kB/s（15.7MB 的 wheel 下了 14 分钟）：
+#      耗时敏感就加 --build-arg PIP_INDEX_URL=<内网 pypi 源>。
+# 换镜像后记得同步改 group_vars：
+#     image:         <新镜像>      # 引擎容器（layerwise 的 data plane 在这里）
+#     mooncake.image: <新镜像>     # kvpool 的 mooncake_master 容器（可选，旧镜像也能跑单主）
+#
+# 备选（PyPI 上还没有含目标 PR 的版本时，按官方文档从源码构建）：
+#   文档 mooncake_layerwise_adaptation_and_optimization.html §5.1：
+#     "If the currently published wheel does not provide these interfaces,
+#      build Mooncake from source after PR #2881 has been merged."
+#   仓库：https://github.com/kvcache-ai/Mooncake
+#   参考 merge commit：78726c5ca6417f3926c384320728bb7c426e8f22
+# =============================================================================
+
+ARG BASE_IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="vllm-ascend + mooncake layerwise client" \
+      org.opencontainers.image.description="Base vLLM-Ascend image with mooncake-transfer-engine-npu upgraded for layerwise KV offload (PR #2881 range/session APIs)" \
+      mooncake.layerwise.pr="2881" \
+      mooncake.layerwise.merge_commit="78726c5ca6417f3926c384320728bb7c426e8f22"
+
+# 目标 mooncake NPU 客户端版本：>=0.3.13 才含 PR #2881
+ARG MOONCAKE_WHEEL_VERSION=0.3.13.post1
+# 可选：内网镜像源（留空则用默认 PyPI）
+ARG PIP_INDEX_URL=
+
+# ---------------------------------------------------------------------------
+# 1) 升级 mooncake（只动这一个包）
+#    该 wheel 的依赖只有 aiohttp / requests，基础镜像已有，故用 --no-deps
+#    避免 pip 顺带升降级 vLLM 相关的其它包。
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    if [ -n "${PIP_INDEX_URL}" ]; then IDX="--index-url ${PIP_INDEX_URL}"; else IDX=""; fi; \
+    pip install --no-cache-dir --upgrade --no-deps ${IDX} \
+        "mooncake-transfer-engine-npu==${MOONCAKE_WHEEL_VERSION}"; \
+    pip show mooncake-transfer-engine-npu | sed -n '1,3p'
+
+# ---------------------------------------------------------------------------
+# 2) 构建期自检：确认 7 个 layerwise 接口真的在 wheel 里
+#    用符号检查而不是 import —— import mooncake 需要宿主机挂进来的 Ascend 驱动
+#    （libascend_hal.so），构建容器里没有，所以只能查文件。
+#    缺少任一接口就让构建失败，避免做出一个跑起来才报错的镜像。
+# ---------------------------------------------------------------------------
+RUN set -eu; \
+    SP="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    missing=""; \
+    for m in batch_put_session_start batch_put_from_multi_buffer_ranges \
+             batch_put_session_end batch_put_session_revoke \
+             batch_get_session_start batch_get_into_multi_buffer_ranges \
+             batch_get_session_end; do \
+        strings "$SP"/mooncake/*.so | grep -q "$m" || missing="$missing $m"; \
+    done; \
+    if [ -n "$missing" ]; then \
+        echo "构建失败：mooncake 缺少 layerwise 接口:${missing}"; \
+        echo "该版本不含 PR #2881，请换更高版本或按文件头注释从源码构建"; \
+        exit 1; \
+    fi; \
+    echo "OK: mooncake layerwise range/session 接口齐全（版本 ${MOONCAKE_WHEEL_VERSION}）"
+
+# ---------------------------------------------------------------------------
+# 3) 顺带确认 kvpool 单主要的 mooncake_master 还在（新 wheel 自带，防回归）
+# ---------------------------------------------------------------------------
+RUN set -eu; \
+    command -v mooncake_master >/dev/null \
+      || { echo "构建失败：镜像里没有 mooncake_master（kvpool 单主需要）"; exit 1; }; \
+    mooncake_master --help >/dev/null 2>&1 || true; \
+    echo "OK: mooncake_master 存在"
