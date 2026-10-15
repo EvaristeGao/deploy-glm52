@@ -1,0 +1,56 @@
+# =============================================================================
+# Dockerfile_mooncake_layerwise_offline —— 同上，但**离线**安装（不连 PyPI）
+#
+# 适用场景：节点不能直连 PyPI，或嫌 PyPI 太慢（实测节点直连只有 ~23 kB/s，
+#   15.7MB 的 wheel 要下 14 分钟）。
+#
+# 用法：把 wheel 和本 Dockerfile 放进同一个构建上下文目录，然后
+#     docker build -f Dockerfile_mooncake_layerwise_offline \
+#       -t glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13 .
+#
+# wheel 已在共享目录（各节点都能看到）：
+#     /mnt/sfs_turbo/g00832294/mooncake_transfer_engine_npu-0.3.13.post1-cp312-cp312-manylinux_2_35_aarch64.whl
+#   例（在任一 A3 节点上）：
+#     mkdir -p /tmp/lwbuild-off && cd /tmp/lwbuild-off
+#     cp /mnt/sfs_turbo/g00832294/Dockerfile_mooncake_layerwise_offline Dockerfile
+#     cp /mnt/sfs_turbo/g00832294/mooncake_transfer_engine_npu-0.3.13.post1-*.whl .
+#     docker build -f Dockerfile -t glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13 .
+#
+# 背景与自检逻辑同 Dockerfile_mooncake_layerwise（见该文件头注释）。
+# =============================================================================
+
+ARG BASE_IMAGE=quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="vllm-ascend + mooncake layerwise client (offline)" \
+      mooncake.layerwise.pr="2881" \
+      mooncake.layerwise.merge_commit="78726c5ca6417f3926c384320728bb7c426e8f22"
+
+# 把上下文里的 wheel 拷进来（构建上下文需包含该 .whl）
+COPY mooncake_transfer_engine_npu-*.whl /tmp/
+
+RUN set -eux; \
+    pip install --no-cache-dir --upgrade --no-deps /tmp/mooncake_transfer_engine_npu-*.whl; \
+    rm -f /tmp/mooncake_transfer_engine_npu-*.whl; \
+    pip show mooncake-transfer-engine-npu | sed -n '1,3p'
+
+# 构建期自检①：7 个 layerwise range/session 接口（符号检查，不需要设备/驱动）
+RUN set -eu; \
+    SP="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    missing=""; \
+    for m in batch_put_session_start batch_put_from_multi_buffer_ranges \
+             batch_put_session_end batch_put_session_revoke \
+             batch_get_session_start batch_get_into_multi_buffer_ranges \
+             batch_get_session_end; do \
+        strings "$SP"/mooncake/*.so | grep -q "$m" || missing="$missing $m"; \
+    done; \
+    if [ -n "$missing" ]; then \
+        echo "构建失败：mooncake 缺少 layerwise 接口:${missing}"; exit 1; \
+    fi; \
+    echo "OK: mooncake layerwise range/session 接口齐全（离线安装）"
+
+# 构建期自检②：kvpool 单主要的 mooncake_master 仍在
+RUN set -eu; \
+    command -v mooncake_master >/dev/null \
+      || { echo "构建失败：镜像里没有 mooncake_master（kvpool 单主需要）"; exit 1; }; \
+    echo "OK: mooncake_master 存在"
