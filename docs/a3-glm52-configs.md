@@ -42,7 +42,7 @@
 （decode **DP4 TP8** + DCP 8、`--kv-cache-dtype int8`、`--attention_config.indexer_kv_dtype int8`、
 `--safetensors-load-strategy prefetch`、`--api-server-count`/`--headless`、v0.30 精简 env 集、
 additional-config 用 `enable_flashcomm1`/`enable_fused_mc2`/`enable_mlapo`/`mega_moe_max_tokens`）。
-逐项对应与有意偏离见 `a3-v030rc1-doc-crosscheck.md` §4。
+逐项对应与有意偏离见 `a3-v030rc1-vs-official.md` §4。
 
 切换方式：改 `deploy_config`（`200k` / `1m` / `1m-v030`）→ 重跑 `gen`（重渲染节点脚本）→ `start` 生效。
 
@@ -173,7 +173,9 @@ python3 load_balance_proxy_server_example.py --host 0.0.0.0 --port 8000 \
 ```
 
 未做：`gen`/`start` 真跑需 `/dev/shm`（Ansible 多进程队列），当前沙箱拒绝写入，
-故用 `simulate_modes.py`（纯 Jinja2 + `bash -n`）等价验证渲染与命令语法。**A3 未实机部署验证。**
+故用 `simulate_modes.py`（纯 Jinja2 + `bash -n`）等价验证渲染与命令语法。
+
+**实机状态**：`1m-v030` 档已于 2026-10-15 在 4×A3 上跑通（6/6 引擎就绪 + proxy healthcheck + 端到端冒烟 200，见 `a3-v030rc1-vs-official.md` §0）；`1m` / `200k` 两档（v0.23 口径）未实机验证。
 
 ---
 

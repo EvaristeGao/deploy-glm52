@@ -20,7 +20,7 @@ ansible/
 │   │   └── group_vars/all.yml   # A2 集群参数（SSH + 集群级变量，无 config.yaml）
 │   └── a3/
 │       ├── inventory.yaml       # A3 集群节点拓扑（4xA3：2P+2D，IP 待实机填写）
-│       └── group_vars/all.yml   # A3 集群参数（依 A2 蓝本推演，未实机）
+│       └── group_vars/all.yml   # A3 集群参数（1m-v030 档已实机跑通，见 docs/a3-v030rc1-vs-official.md）
 ├── playbooks/
 │   ├── check.yml    # 预检：SSH + docker + 镜像
 │   ├── pull.yml     # 拉镜像
@@ -187,7 +187,7 @@ ansible-playbook -i inventories/a2/inventory.yaml playbooks/start.yml --check
 
 ## 7. 已知事项
 
-- **A3 双档配置（`deploy_config`，当前 `200k`）**：两档拓扑形状相同（P DP2 TP16 每节点 1 引擎 / D DP8 TP4 每节点 4 引擎）。200k 档对齐官方 §5.2.1 198K PD 的 dp/tp（max-model-len 202752、prefill/decode batched-tokens 16384/164、decode MTP spec 3、**两侧 `--hf-overrides`**、decode `HCCL_BUFFSIZE=256`、`enable_sparse_sfa_c8: false`）；1m 档对齐官方 §5.2.2 + 集群现网 1M 参考（max-model-len 1048576、DCP 128、spec 5、`HCCL_BUFFSIZE=400`、prefill gpu-mem 0.9、无 hf-overrides；`enable_sparse_sfa_c8` 两档都保持 false，**有意不跟参考**）。**prefix caching 按 role 可配**：A3 两档 prefill `--enable-`、decode `--no-enable-`（官方 A3 PD 的 decode 脚本一律不带该参数；A2 缺省两侧都开，渲染不变）。**有意偏离**：prefill 用 DP2 TP16 代替官方的 PP2 TP16（`launch_online_dp.py` 是纯 DP 启动器）、权重用 w4a8c8（官方参考是 w8a8c8，官方标注 w4a8c8 的 PD 分离为 experimental）。逐项对照见 `../docs/a3-glm52-configs.md`、`../docs/a3-cluster-reference-comparison.md`。**A3 仍未实机部署验证**
+- **A3 三档配置（`deploy_config`，当前 `1m-v030`）**：**`1m-v030` 档已实机跑通**（2026-10-15：6/6 引擎 `/health` 200 + proxy `{"status":"ok","prefill_instances":2,"decode_instances":4}` + 端到端冒烟 200，`system_fingerprint` = `vllm-0.30.0-tp8-dp4-ep`）—— 严格按 **v0.30.0rc1 文档 §5.2.3**：P DP2 TP16 / D **DP4 TP8**（每节点 2 引擎）+ DCP 8、`--kv-cache-dtype int8` + `--attention_config.indexer_kv_dtype int8`、`--safetensors-load-strategy prefetch`、v0.30 精简 env 集、additional-config 用 `enable_flashcomm1`/`enable_fused_mc2`/`enable_mlapo`/`mega_moe_max_tokens`。另两档是 v0.23 口径：`1m`（P DP2 TP16 / D DP8 TP4 + DCP 4）、`200k`（198K；prefill 用 DP2 TP16 近似官方 PP2，`launch_online_dp.py` 不支持 PP）。**与官方文档的全部差异见 `../docs/a3-v030rc1-vs-official.md`**，其中两处是「照抄文档会启动失败」的坑：①`additional_config` 的嵌套层级（`fuse_muls_add`→`ascend_compilation_config`、`recompute_scheduler_enable`→`scheduler_config`）；②`--headless` 在 external DP LB 模式下非法（`--data-parallel-rank` 启动方式下 p1/d1 必须自己起 API server）。
 - **A3 的 `enable_sparse_sfa_c8` 两档都关（有意不跟参考）**：官方 198K/1M 参考与集群三份 1M 参考都是 `true`，本项目沿用 c3b1d4d「关闭 sfa_c8 防精度问题」保持 `false`。关掉同时规避了官方警告的组合「w4a8c8 权重 + DCP + sfa_c8 同开」（官方：`on the w4a8c8 weights enabling both together has known issues and is not recommended`）——当前权重正是 w4a8c8、1M 档又开着 DCP。将来换 `/mnt/sfs_turbo/models/GLM-5.2-w8a8c8`（集群上已有）并确认精度后可再考虑开 `true`
 - **A3 的 KV 走 mooncake 池化（`mooncake.enabled=true`）**：`1m-v030` 档亦如此（文档 §5.2.3 是直连，本项目有意保留池化）。当前为单主（`ha.enable_ha=false`）：测试阶段不引入 etcd/ha 选主，只起 p0 上的裸 `mooncake_master`，`mooncake.json` 的 `master_server_address` 直连 `<p0_ip>:52050`；etcd/haproxy 相关配置块保留，切回 HA 前需确认 `etcd.certs_dir` 在宿主机真实存在
 - **`model.mounts` 必须写 `host:container`**：单路径写法会被 docker 当匿名卷（容器内是空目录，模型权重看不见）；且 `logs.dir` 与 `model_path` 都要落在 mounts 覆盖范围内，否则引擎日志/权重在容器里不可见（单测已锁）
