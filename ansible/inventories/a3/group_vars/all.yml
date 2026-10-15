@@ -63,6 +63,8 @@ _200k:
       max_num_batched_tokens: 16384
       max_num_seqs: 64
       gpu_memory_utilization: 0.92
+      # 官方口径：prefix cache 命中率 >0 用 --enable-，=0 用 --no-enable-（参考脚本给的是 enable）
+      enable_prefix_caching: true
       hf_overrides: '{"use_index_cache": true, "index_topk_freq": 4}'
       additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
     decode:
@@ -77,16 +79,24 @@ _200k:
       gpu_memory_utilization: 0.92
       num_speculative_tokens: 3
       hccl_buffsize: 256
+      # 官方 A3 PD 参考的 decode 脚本一律不带此参数（默认关），集群 1M/128K 参考也都是关
+      enable_prefix_caching: false
       hf_overrides: '{"use_index_cache": true, "index_topk_freq": 4}'
       additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true}'
-    enable_prefix_caching: true
 
 # =============================================================================
-# 1M 配置（官方 A3 PD 分离 1M 参考：P 2 节点 dp2tp16 每节点 1 引擎；
+# 1M 配置（官方 A3 PD 分离 1M 参考 §5.2.2：P 2 节点 dp2tp16 每节点 1 引擎；
 #   D 2 节点 dp8tp4 每节点 4 引擎；prefill 开 DSA CP，decode 开 DCP=4）
-#   注意：官方参考里 prefill 节点声明 --decode-context-parallel-size 16，
-#         decode 节点声明 4（各自本地口径不同），故 prefill 侧单独给
-#         decode_context_parallel_size。
+#   注意 1：官方参考里 prefill 节点声明 --decode-context-parallel-size 16，
+#          decode 节点声明 4（各自本地口径不同），故 prefill 侧单独给
+#          decode_context_parallel_size。
+#   注意 2：三份集群 1M 参考（yy/GLM5.2-1M、a3-w8a8c8-1MB-nokvpool、didi-1）的
+#          additional_config 里 enable_sparse_sfa_c8 都是 true，此处跟参考对齐（
+#          200K 档保持 false：128K/dspark 参考也是 false）。
+#          官方警告「w4a8c8 下 sfa_c8 + DCP 同开有已知问题」，当前权重恰是 w4a8c8；
+#          集群参考在 w4a8c8 上实测开着，若出现精度问题优先关这里或换 w8a8c8 权重。
+#   注意 3：prefix caching —— prefill 开（官方参考脚本给 enable）、decode 关
+#          （官方 A3 PD 的 decode 脚本一律不带该参数，三份集群参考也都是关）。
 # =============================================================================
 _1m:
   pd_cluster:
@@ -104,8 +114,9 @@ _1m:
       decode_context_parallel_size: 16
       engine_id: 0
       max_num_seqs: 64
-      gpu_memory_utilization: 0.85
-      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
+      gpu_memory_utilization: 0.9
+      enable_prefix_caching: true
+      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
     decode:
       dp_size: 8
       tp_size: 4
@@ -118,8 +129,8 @@ _1m:
       max_num_batched_tokens: 192
       max_num_seqs: 32
       gpu_memory_utilization: 0.92
-      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true}'
-    enable_prefix_caching: true
+      enable_prefix_caching: false
+      additional_config: '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
 
 # =============================================================================
 # 激活的配置（由 deploy_config 选择；_active 必须先于 pd_cluster 定义，

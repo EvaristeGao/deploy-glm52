@@ -493,14 +493,14 @@ def test_a3_1m_additional_config_per_role():
     pd = _gv(GV_FILE_A3, "1m")["pd_cluster"]
     out_p = _render_a3("prefill", "1m")
     assert pd["prefill"]["additional_config"] in out_p
-    for flag in ('"enable_dsa_cp":true', '"enable_sparse_sfa_c8": false',
+    for flag in ('"enable_dsa_cp":true', '"enable_sparse_sfa_c8": true',
                  '"enable_sparse_li_c8": true', '"c8_enable_reshape_optim":true',
                  '"recompute_scheduler_enable": false'):
         assert flag in out_p, f"prefill additional-config 缺少 {flag}"
 
     out_d = _render_a3("decode", "1m")
     assert pd["decode"]["additional_config"] in out_d
-    for flag in ('"enable_sparse_sfa_c8": false', '"enable_sparse_li_c8": true',
+    for flag in ('"enable_sparse_sfa_c8": true', '"enable_sparse_li_c8": true',
                  '"recompute_scheduler_enable":true', '"multistream_overlap_shared_expert":true'):
         assert flag in out_d, f"decode additional-config 缺少 {flag}"
     assert '"enable_dsa_cp"' not in out_d
@@ -523,13 +523,55 @@ def test_a3_200k_additional_config_per_role():
     assert '"enable_dsa_cp"' not in out_d
 
 
-def test_a3_sfa_c8_disabled_for_both_configs():
-    """本项目策略：两档都关闭 enable_sparse_sfa_c8（官方参考为 true；见 c3b1d4d 精度问题）。"""
+def test_a3_sfa_c8_per_config():
+    """sfa_c8 分档：1M 对齐集群三份 1M 参考 = true；200K 保持 false（128K/dspark 参考也是 false）。
+
+    ⚠️ 官方警告「w4a8c8 下 sfa_c8 + DCP 同开有已知问题」——当前权重是 w4a8c8，
+    1M 档同时开了 DCP 与 sfa_c8；集群参考在 w4a8c8 上实测如此，若出精度问题优先关这里。
+    """
+    p1m = _gv(GV_FILE_A3, "1m")["pd_cluster"]
+    for role in ("prefill", "decode"):
+        assert '"enable_sparse_sfa_c8": true' in p1m[role]["additional_config"]
+        assert '"enable_sparse_sfa_c8": true' in _render_a3(role, "1m")
+    p200 = _gv(GV_FILE_A3, "200k")["pd_cluster"]
+    for role in ("prefill", "decode"):
+        assert '"enable_sparse_sfa_c8": false' in p200[role]["additional_config"]
+        assert '"enable_sparse_sfa_c8": true' not in _render_a3(role, "200k")
+
+
+def test_a3_prefix_caching_per_role():
+    """prefix caching 按 role 可配：官方 A3 PD 的 decode 脚本一律不带该参数（默认关），
+    三份集群 1M 参考也都是关；prefill 按命中率开关，参考脚本给的是开。"""
     for cfg in ("200k", "1m"):
         pd = _gv(GV_FILE_A3, cfg)["pd_cluster"]
-        for role in ("prefill", "decode"):
-            assert '"enable_sparse_sfa_c8": false' in pd[role]["additional_config"]
-            assert '"enable_sparse_sfa_c8": true' not in _render_a3(role, cfg)
+        assert pd["prefill"]["enable_prefix_caching"] is True
+        assert pd["decode"]["enable_prefix_caching"] is False
+        out_p = _render_a3("prefill", cfg)
+        assert "--enable-prefix-caching" in out_p
+        assert "--no-enable-prefix-caching" not in out_p
+        out_d = _render_a3("decode", cfg)
+        assert "--no-enable-prefix-caching" in out_d
+        assert "--enable-prefix-caching" not in out_d
+        # 两个 flag 不能同时出现
+        for out in (out_p, out_d):
+            assert out.count("--enable-prefix-caching") + out.count("--no-enable-prefix-caching") == 1
+
+
+def test_prefix_caching_default_keeps_a2_unchanged():
+    """未配置 enable_prefix_caching 时默认开 —— A2 两侧渲染与改造前一致（回归）。"""
+    pd_a2 = _gv()["pd_cluster"]
+    assert "enable_prefix_caching" not in pd_a2["prefill"]
+    assert "enable_prefix_caching" not in pd_a2["decode"]
+    for out in (_render_prefill(), _render_decode()):
+        assert "--enable-prefix-caching" in out
+        assert "--no-enable-prefix-caching" not in out
+
+
+def test_a3_1m_prefill_gpu_mem_matches_reference():
+    """1M prefill gpu-mem 对齐参考（R1/R2=0.9、R3=0.89、官方文档 0.9），不再是 128K/dspark 的 0.85。"""
+    pd = _gv(GV_FILE_A3, "1m")["pd_cluster"]
+    assert pd["prefill"]["gpu_memory_utilization"] == 0.9
+    assert "--gpu-memory-utilization 0.9 \\" in _render_a3("prefill", "1m")
 
 
 def test_a3_hf_overrides_only_in_200k():

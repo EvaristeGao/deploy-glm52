@@ -88,7 +88,13 @@ vllm serve {{ model_path }} \
     --data-parallel-rpc-port $6 \
     --tensor-parallel-size $7 \
     --enable-expert-parallel \
+{# ---- prefix caching：官方 A3 PD 参考的 decode 脚本一律不带此参数（vLLM 默认关，等价 --no-enable-）；
+   默认开以保持 A2 与既有渲染不变，A3 各档在 group_vars 里显式给 false ---- #}
+{% if pd_cluster.decode.enable_prefix_caching | default(true) %}
     --enable-prefix-caching \
+{% else %}
+    --no-enable-prefix-caching \
+{% endif %}
     --seed 1024 \
     --served-model-name {{ served_model_name }} \
     --async-scheduling \

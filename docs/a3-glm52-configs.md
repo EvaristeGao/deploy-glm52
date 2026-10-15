@@ -33,9 +33,10 @@
 | CP / DCP | 无 | prefill CP=1、prefill 侧声明 decode CP=**16**、decode 侧 CP=**4**、interleave 128 |
 | prefill `rpc_port` / `kv_port` | 16591 / 30000 | 16600 / 30000 |
 | decode `rpc_port` / `kv_port` | 16600 / 30200 | 16600 / 30200 |
-| prefill `gpu_memory_utilization` | 0.92 | 0.85（官方 0.9） |
+| prefill `gpu_memory_utilization` | 0.92 | 0.9（对齐集群 1M 参考 0.89~0.9） |
 | decode `gpu_memory_utilization` | 0.92 | 0.92 |
-| `enable_sparse_sfa_c8` | **false**（官方 true） | **false**（官方 true） |
+| prefix caching | prefill `--enable-` / decode `--no-enable-` | 同 |
+| `enable_sparse_sfa_c8` | **false**（128K/dspark 参考也是 false） | **true**（对齐集群三份 1M 参考；官方警告见 §2.4） |
 
 切换方式：改 `deploy_config` → 重跑 `gen`（重渲染节点脚本）→ `start` 生效。
 
@@ -82,13 +83,32 @@
 官方对 w4a8c8 的说明：
 
 - `GLM-5.2-w4a8c8 (experimental) ... has known accuracy issues in Prefill-Decode (PD) disaggregation scenarios`
-- w4a8c8 权重上 **DCP + `enable_sparse_sfa_c8` 同开有已知问题，不推荐**（这也是 1M 档必须关 sfa_c8 的原因）
+- w4a8c8 权重上 **DCP + `enable_sparse_sfa_c8` 同开有已知问题，不推荐**
+  （1M 档现在正是这个组合，见 §2.4）
 
-### 2.4 `enable_sparse_sfa_c8` 两档都关
+### 2.4 `enable_sparse_sfa_c8` 分档
 
-官方两档参考都是 `true`。本项目按 c3b1d4d「关闭 sfa_c8 开关，防止精度问题」的策略，
-两档 prefill/decode 都取 **false**（`enable_sparse_li_c8` / `c8_enable_reshape_optim` 保持官方值）。
-单测 `test_a3_sfa_c8_disabled_for_both_configs` 锁住该策略。
+| 档 | 取值 | 依据 |
+|---|---|---|
+| `1m` | **true** | 集群三份 1M 参考（`yy/GLM5.2-1M`、`a3-w8a8c8-1MB-nokvpool`、`didi-1`）的 additional-config 一致为 true；官方 1M 参考也是 true |
+| `200k` | **false** | 128K/dspark 参考为 false；官方 198K 参考为 true，此处沿用 c3b1d4d「关闭 sfa_c8 防精度问题」的策略 |
+
+> ⚠️ 1M 档开了 sfa_c8 后，就是官方明确警告的「w4a8c8 + DCP + sfa_c8 同开」：
+> 官方原文 `on the w4a8c8 weights enabling both together has known issues and is not recommended`。
+> 集群参考 R2/R3 在 w4a8c8 上实测如此（R1 用的是 w8a8c8）。**若出现精度问题**：
+> 优先把 `_1m` 两处 `enable_sparse_sfa_c8` 关回 `false`，或把权重换成
+> `/mnt/sfs_turbo/models/GLM-5.2-w8a8c8`（集群上已有）。
+> 单测 `test_a3_sfa_c8_per_config` 锁住分档。
+
+### 2.5 prefix caching 按 role 分
+
+官方规则（写在 A2 PD / A2 8 节点 / A3 198K / A3 1M / §9.1 共 5 处）：
+**prefix cache 命中率 > 0 时用 `--enable-prefix-caching`，= 0 时换成 `--no-enable-prefix-caching`**；
+而且官方所有 **A3 PD 的 decode 脚本一律不带该参数**（vLLM 默认即关）。
+
+本项目实现：`pd_cluster.<role>.enable_prefix_caching`（缺省 `true`，保证 A2 渲染不变），
+A3 两档 prefill=`true`、decode=`false`。单测 `test_a3_prefix_caching_per_role` +
+`test_prefix_caching_default_keeps_a2_unchanged`。
 
 ### 2.5 官方文档内部不一致处（按本项目口径处理）
 
@@ -106,6 +126,7 @@
 | 配置键 | 作用 | 未配置时 |
 |---|---|---|
 | `pd_cluster.<role>.additional_config` | `--additional-config` 整串（分档差异最大的一项） | 回落按 `cluster_type` 的集群默认值 |
+| `pd_cluster.<role>.enable_prefix_caching` | `--enable-prefix-caching` / `--no-enable-prefix-caching`（按 role） | `true`（A2 两侧都开，渲染不变） |
 | `pd_cluster.<role>.hf_overrides` | `--hf-overrides` | 不渲染（1M / A2 都没有） |
 | `pd_cluster.prefill.max_num_batched_tokens` | `--max-num-batched-tokens` | `8192` |
 | `pd_cluster.decode.max_num_batched_tokens` | 同上（decode） | a3=`192` / a2=`256` |
@@ -119,13 +140,14 @@
 ## 4. 验证
 
 ```bash
-cd ansible && .venv/bin/python -m pytest tests/ -q        # 59 passed
+cd ansible && .venv/bin/python -m pytest tests/ -q        # 64 passed
 .venv/bin/python simulate_modes.py                        # a2（4 模式，0 语法失败）
 .venv/bin/python simulate_modes.py --inv a3               # a3 当前档
 .venv/bin/python simulate_modes.py --inv a3 --deploy-config 1m
 ```
 
-覆盖点：两档拓扑/端口/CP/additional-config/hf-overrides/batched-tokens/spec tokens/HCCL_BUFFSIZE、
+覆盖点：两档拓扑/端口/CP/additional-config/hf-overrides/batched-tokens/spec tokens/HCCL_BUFFSIZE/
+prefix caching 按 role（A3 prefill 开 decode 关、A2 两侧开）、sfa_c8 分档、
 `deploy_config` 选块行为、kvpool MultiConnector、A3 环境变量、渲染换行干净、
 挂载与日志目录在容器内可见（`test_a3_mounts_and_logs_dir_are_container_visible`）、
 以及 A2 全量回归。
@@ -162,4 +184,4 @@ python3 load_balance_proxy_server_example.py --host 0.0.0.0 --port 8000 \
 | ⚪ | **单主模式的 KV 池是单点** | p0 的 `mooncake_master` 挂了则整个 KV 池不可用；测试够用，上生产需切回 HA（并先备好证书） |
 | ⚪ | **切回 HA 前** | 确认 `etcd.certs_dir`（当前 `/ce-efs-hd2-01/g00832294/certs`）在宿主机真实存在且有 `ca.crt`/`server.crt`/`server.key`；单主模式下不挂它，不会报错 |
 | ⚪ | **首次启动耗时** | 202752/1048576 上下文模型加载 + 图捕获较慢；`runtime.ready_timeout`（2400s）不够时上调 |
-| ⚪ | **死配置** | `mooncake.port`、`pd_cluster.enable_prefix_caching` 目前没有任何 playbook/模板引用 |
+| ⚪ | **死配置** | `mooncake.port` 目前没有任何 playbook/模板引用（参考配置里它是 mooncake master 的 rpc 端口 50088，本项目用 `mooncake.ha.rpc_port`） |
