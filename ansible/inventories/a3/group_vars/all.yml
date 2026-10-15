@@ -14,17 +14,18 @@ ansible_python_interpreter: /usr/bin/python3
 
 # =============================================================================
 # 部署配置选择器（与 A2 同一套写法）
-#   取值：1m-v030-lw —— v0.30 口径 + Mooncake 分层 KV offload（use_layerwise，实验性，见下）
-#        1m-v030    —— ★ 当前启用，严格按 v0.30.0rc1 文档 §5.2.3（A3 1M PD 分离）
+#   取值：1m-v030-lw —— ★ 当前启用，v0.30 口径 + Mooncake 分层 KV offload（use_layerwise，实验性，见下）
+#        1m-v030    —— v0.30 口径，严格按官方文档 §5.2.3（已实机跑通的对照档）
 #         1m      —— 按 v0.23.0 文档 §5.2.2 + 集群现网参考（A3 1M PD，DP8TP4/DCP4）
 #         200k    —— 按 v0.23.0 文档 §5.2.1 + 集群现网参考（A3 198K PD；prefill 用 DP 代替 PP）
 # 参考：https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/GLM5.2.html
 #       https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html
 # =============================================================================
-deploy_config: 1m-v030
+deploy_config: 1m-v030-lw
 
 cluster_type: a3
-image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+image: glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13   # layerwise 需要带 PR #2881 range/session 接口的 mooncake client
+#                               # （image_build/Dockerfile_mooncake_layerwise 构建；4 台节点本地都已构建）
 image_tar: ""                 # 非空则 pull.yml 改从该 tar docker load（需节点可见路径，如共享目录）；留空则 docker pull image
 
 # =============================================================================
