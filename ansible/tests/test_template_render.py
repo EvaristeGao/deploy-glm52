@@ -433,7 +433,7 @@ def test_a3_deploy_config_selects_matching_block():
     """deploy_config 选中哪一档，pd_cluster 就解析成哪一块（不锁死具体默认值，防止手改后单测变红）。"""
     gv = _gv(GV_FILE_A3)
     cfg = gv["deploy_config"]
-    assert cfg in ("200k", "1m", "1m-v030", "1m-v030-lw")
+    assert cfg in ("200k", "1m", "1m-v030", "1m-v030-lw", "1m-v030-hyb", "1m-v030-poff")
     assert gv["pd_cluster"] == gv[f"_{cfg.replace('-', '_')}"]["pd_cluster"]
 
 
@@ -445,7 +445,8 @@ def test_a3_v030_topology_and_cp():
     """v0.30 §5.2.3 拓扑：prefill DP2 TP16（每节点 1 引擎）+ decode DP4 TP8（每节点 2 引擎）；
     prefill 侧声明 decode CP 16、decode 侧 CP 8，interleave 128。"""
     pd = _gv(GV_FILE_A3, "1m-v030")["pd_cluster"]
-    assert pd["max_model_len"] == 1048576
+    # 实机调参档：已跑通的 1m-v030 当前用 64K（1M 值在 group_vars 里以注释保留）；拓扑/CP 断言不变
+    assert pd["max_model_len"] == 65536
     assert (pd["prefill"]["dp_size"], pd["prefill"]["tp_size"], pd["prefill"]["dp_size_local"]) == (2, 16, 1)
     assert (pd["decode"]["dp_size"], pd["decode"]["tp_size"], pd["decode"]["dp_size_local"]) == (4, 8, 2)
     assert pd["prefill"]["context_parallel_size"] == 1
@@ -987,3 +988,200 @@ def test_a3_mounts_and_logs_dir_are_container_visible():
             f"logs.dir={log_dir} 不在 mounts 覆盖范围内（{mounts}）")
     # 模型权重也必须在 mounts 覆盖范围内，否则容器里看不到权重
     assert gv["model_path"].startswith(tuple(m.split(":")[0].rstrip("/") for m in mounts))
+
+# ---- prefill KV offload（官方《Layerwise and Sparse KV Cache Offloading》§2+§3）档：1m-v030-poff ----
+# 文档：https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.html
+# §2 prefill 把每层 KV 缓冲 offload 到远端 store，并经 SfaRemoteD2H 暴露给 decode 直读；
+# §3 decode 用单 SfaRemoteD2H(consumer) + sparse_kv_offload_config（KV 落 host DRAM）。
+# 本档按需求把 §2 的 offload 后端从 memcache 换成 mooncake（差异与待确认项见 docs/a3-prefill-kv-offload.md）。
+
+
+def _kv_transfer_json(cfg, role):
+    """渲染后从 --kv-transfer-config 里取出 JSON（poff 档 prefill 是 MultiConnector，decode 是单 connector）。"""
+    out = _render_a3(role, cfg)
+    m = re.search(r"--kv-transfer-config \\\n\s*'(\{.*?\})'", out, re.S)
+    assert m, f"{cfg}/{role} 未找到 kv-transfer-config JSON"
+    return json.loads(m.group(1))
+
+
+def test_a3_v030_poff_prefill_doc2_connectors():
+    """doc §2：prefill = MultiConnector[SfaRemoteD2H(producer), AscendStore(producer, mooncake+layerwise)]，
+    不再挂 MooncakeConnectorV1；共享 buffer 参数按 group_vars 注入。"""
+    off = _gv(GV_FILE_A3, "1m-v030-poff")["pd_cluster"]["prefill_kv_offload"]
+    d = _kv_transfer_json("1m-v030-poff", "prefill")
+    assert d["kv_connector"] == "MultiConnector"
+    assert d["kv_role"] == "kv_producer"
+    children = d["kv_connector_extra_config"]["connectors"]
+    assert [c["kv_connector"] for c in children] == ["SfaRemoteD2HConnector", "AscendStoreConnector"]
+    d2h = children[0]
+    assert d2h["kv_role"] == "kv_producer"
+    # MultiConnector 的子 connector 只拿到自己那份 dict（不继承 root）⇒ kv_port 必须显式给
+    assert d2h["kv_port"] == str(off["kv_port"])
+    assert d2h["kv_connector_extra_config"]["transfer_backend"] == "memfabric"
+    assert d2h["kv_connector_extra_config"]["memfabric_transfer_protocol"] == off["memfabric_transfer_protocol"]
+    store = children[1]["kv_connector_extra_config"]
+    assert store["backend"] == "mooncake"
+    assert store["use_layerwise"] is True
+    assert store["layerwise_num_shared_buffers"] == off["shared_buffers"]
+    assert store["layerwise_independent_layers"] == off["independent_layers"]
+    # doc §2：prefill 绝不能带 sparse_kv_offload_config（镜像 connector.py producer 侧 assert 会直接挂）
+    assert "sparse_kv_offload_config" not in _render_a3("prefill", "1m-v030-poff")
+
+
+def test_a3_v030_poff_decode_doc3_single_connector_and_bf16():
+    """doc §3：decode = 单 SfaRemoteD2HConnector(kv_consumer) + sparse_kv_offload_config.enabled=true；
+    主 KV 必须 BF16 ⇒ 不渲染 --kv-cache-dtype；indexer 仍 int8；无任何 mooncake store connector。"""
+    off = _gv(GV_FILE_A3, "1m-v030-poff")["pd_cluster"]["decode_kv_offload"]
+    out = _render_a3("decode", "1m-v030-poff")
+    d = _kv_transfer_json("1m-v030-poff", "decode")
+    assert d["kv_connector"] == "SfaRemoteD2HConnector"
+    assert d["kv_role"] == "kv_consumer"
+    assert d["kv_port"] == str(off["kv_port"])
+    assert d["kv_connector_extra_config"]["transfer_backend"] == "memfabric"
+    assert '"AscendStoreConnector"' not in out
+    assert '"MooncakeConnectorV1"' not in out
+    assert '"sparse_kv_offload_config": {"enabled": true' in out
+    # 稀疏 offload 要求主 KV 是 BF16（镜像 _validate_preconditions 会拒 int8）；key 不配 ⇒ 不渲染 flag
+    assert "--kv-cache-dtype" not in out
+    assert "kv_cache_dtype" not in _gv(GV_FILE_A3, "1m-v030-poff")["pd_cluster"]["decode"]
+    assert "--attention_config.indexer_kv_dtype int8" in out
+
+
+def test_a3_v030_poff_topology_and_no_cp():
+    """poff 档沿用 1M + P/D TP16（文档：prefill TP ≥ decode TP 且能整除），每节点 1 引擎；
+    文档 §5：稀疏 offload / layerwise offload 都不支持 CP ⇒ 无任何 CP 键与 flag。"""
+    pd = _gv(GV_FILE_A3, "1m-v030-poff")["pd_cluster"]
+    # 实机调参档：poff 当前用 200K（1M 值在 group_vars 里以注释保留）
+    assert pd["max_model_len"] == 204800
+    for role in ("prefill", "decode"):
+        assert (pd[role]["dp_size"], pd[role]["tp_size"], pd[role]["dp_size_local"]) == (2, 16, 1)
+        assert pd[role]["dp_size_local"] * pd[role]["tp_size"] == pd["num_cards"]
+        assert "context_parallel_size" not in pd[role]
+    assert pd["prefill"]["tp_size"] % pd["decode"]["tp_size"] == 0
+    assert "cp_kv_cache_interleave_size" not in pd
+    out_p = _render_a3("prefill", "1m-v030-poff")
+    out_d = _render_a3("decode", "1m-v030-poff")
+    for out in (out_p, out_d):
+        assert "--prefill-context-parallel-size" not in out
+        assert "--decode-context-parallel-size" not in out
+        assert "--cp-kv-cache-interleave-size" not in out
+    # doc §2 要求 prefill eager（本项目 prefill 模板恒渲染 --enforce-eager）
+    assert "--enforce-eager" in out_p
+    assert "--enable-chunked-prefill" in out_p
+
+
+def test_a3_v030_poff_not_leaked_into_other_configs():
+    """其它档不得出现 SfaRemoteD2H / sparse_kv_offload / 共享 buffer 参数（回归）。"""
+    for cfg in ("200k", "1m", "1m-v030", "1m-v030-lw"):
+        for role in ("prefill", "decode"):
+            out = _render_a3(role, cfg)
+            assert "SfaRemoteD2HConnector" not in out, f"{cfg}/{role} 泄漏了 SfaRemoteD2HConnector"
+            assert "sparse_kv_offload_config" not in out, f"{cfg}/{role} 泄漏了 sparse_kv_offload_config"
+            assert "layerwise_num_shared_buffers" not in out, f"{cfg}/{role} 泄漏了共享 buffer 参数"
+
+
+# ---- hybrid attention（官方《Mooncake Layerwise Hybrid Attention》§Configuration）档：1m-v030-hyb ----
+# 文档：https://docs.vllm.ai/projects/ascend/zh-cn/v0.30.0rc1/user_guide/feature_guide/mooncake_hybrid_attention.html
+# 文档给的是单实例命令（单 AscendStoreConnector + kv_role=kv_both + use_layerwise + 三个旋钮）；
+# 本档把它落到 2P+2D，底子是已实机跑通的 1m-v030（故必须按文档 §Scope 去掉 DCP、P/D TP 取一致）。
+
+
+def test_a3_v030_hyb_matches_doc_configuration():
+    """P/D 两侧都渲染文档 §Configuration 的那份 kv-transfer-config（单 AscendStoreConnector +
+    use_layerwise + 三个旋钮）；kv_role 按 P/D 分离拆成 producer/consumer。"""
+    lw = _gv(GV_FILE_A3, "1m-v030-hyb")["pd_cluster"]["layerwise"]
+    # 文档的单实例配置是 kv_both；本项目是 P/D 分离 ⇒ 按角色拆成 producer / consumer
+    expected_role = {"prefill": "kv_producer", "decode": "kv_consumer"}
+    for role in ("prefill", "decode"):
+        out = _render_a3(role, "1m-v030-hyb")
+        d = _kv_transfer_json("1m-v030-hyb", role)
+        assert d["kv_connector"] == "AscendStoreConnector"
+        assert d["kv_role"] == expected_role[role]
+        assert d["kv_load_failure_policy"] == "recompute"   # 项目既有约定键
+        e = d["kv_connector_extra_config"]
+        assert e["backend"] == "mooncake"
+        assert e["use_layerwise"] is True
+        assert e["layerwise_prefetch_layers"] == lw["prefetch_layers"]
+        assert e["layerwise_max_transfer_blocks"] == lw["max_transfer_blocks"]
+        assert e["layerwise_max_transfer_bytes"] == lw["max_transfer_bytes"]
+        # 文档明说 cross-layer cache-buffer reuse 不属于该实现 ⇒ 不得出现复用旋钮
+        assert "layerwise_num_shared_buffers" not in e
+        assert "layerwise_independent_layers" not in e
+        # 不再是 MultiConnector / 不再挂 P-D 直连 connector
+        assert '"kv_connector": "MultiConnector"' not in out
+        assert "MooncakeConnectorV1" not in out
+
+
+def test_a3_v030_hyb_flags_and_topology_per_doc_prereqs():
+    """文档 §Configuration 的 flag（eager / prefix caching / chunked prefill 4096）要有；
+    文档 §Scope 的硬约束（不支持 DCP/PCP、不支持 P/D TP mismatch）要满足。"""
+    pd = _gv(GV_FILE_A3, "1m-v030-hyb")["pd_cluster"]
+    # max_model_len 是实机调参项（写过 1M / 64K / 200K）⇒ 只断言渲染与配置一致，不锁具体值
+    assert pd["prefill"]["tp_size"] == pd["decode"]["tp_size"] == 16
+    for role in ("prefill", "decode"):
+        assert (pd[role]["dp_size"], pd[role]["dp_size_local"]) == (2, 1)
+        assert "context_parallel_size" not in pd[role]
+    assert "cp_kv_cache_interleave_size" not in pd
+
+    out_p = _render_a3("prefill", "1m-v030-hyb")
+    out_d = _render_a3("decode", "1m-v030-hyb")
+    assert "--enable-chunked-prefill" in out_p
+    assert "--max-num-batched-tokens 4096" in out_p
+    assert "--enable-prefix-caching" in out_p
+    assert "--enforce-eager" in out_p
+    assert "--enforce-eager" in out_d           # 文档：Start validation in eager mode
+    assert "--compilation-config" not in out_d  # eager 档不渲染图模式
+    for out in (out_p, out_d):
+        assert "--prefill-context-parallel-size" not in out
+        assert "--decode-context-parallel-size" not in out
+        assert "use_layerwise" in out
+
+
+def test_a3_v030_hyb_not_leaked_into_other_configs():
+    """其它档不得出现 single_store_connector 的 kv_both 形态（回归）。"""
+    for cfg in ("200k", "1m", "1m-v030", "1m-v030-lw", "1m-v030-poff"):
+        for role in ("prefill", "decode"):
+            out = _render_a3(role, cfg)
+            assert '"kv_role": "kv_both"' not in out, f"{cfg}/{role} 泄漏了 kv_both（单实例口径，不适用于 P/D）"
+
+
+# ---- kvpool 分层 range 审计日志开关（pd_cluster.range_debug） ----
+# 镜像 envs.VLLM_ASCEND_KVPOOL_RANGE_DEBUG ⇒ kv_transfer.py 的 [KVPOOL_RANGE_DEBUG] range/commit 事件。
+
+
+def test_range_debug_env_gated_by_config():
+    """range_debug=true 才渲染 export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1；其它档不得出现。"""
+    for role in ("prefill", "decode"):
+        lines = _render_a3(role, "1m-v030-hyb").splitlines()
+        assert "export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1" in lines
+        # 默认关：不带该键的档不能渲染
+        for cfg in ("200k", "1m", "1m-v030", "1m-v030-lw", "1m-v030-poff"):
+            assert "export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1" not in _render_a3(role, cfg).splitlines(), (
+                f"{cfg}/{role} 不应渲染 range debug")
+    # 位置在 PYTHONHASHSEED 之后、MOONCAKE_CONFIG_PATH 之前（纯顺序回归）
+    lines = _render_a3("prefill", "1m-v030-hyb").splitlines()
+    i_ph = lines.index("export PYTHONHASHSEED=0")
+    i_dbg = lines.index("export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1")
+    i_mc = next(i for i, ln in enumerate(lines) if ln.startswith("export MOONCAKE_CONFIG_PATH"))
+    assert i_ph < i_dbg < i_mc
+
+
+# ---- 档位可配的额外 env（pd_cluster.extra_env） ----
+
+
+def test_extra_env_rendered_only_when_configured():
+    """extra_env 里的 k/v 渲染成 export；未配置的档不得出现。
+    用合成键做机制测试（ASCEND_A3_ENABLE 在 v0.23 env 集里也会被渲染，不能用来判"泄漏"）。"""
+    import copy as _copy
+
+    for role in ("prefill", "decode"):
+        gv = _copy.deepcopy(_gv(GV_FILE_A3, "1m-v030-lw"))
+        gv["pd_cluster"]["extra_env"] = {"PROBE_ONLY_ENV": "1"}
+        assert "export PROBE_ONLY_ENV=1" in _render(role, cluster_type="a3", gv=gv).splitlines()
+        plain = _copy.deepcopy(_gv(GV_FILE_A3, "1m-v030-lw"))
+        plain["pd_cluster"].pop("extra_env", None)
+        assert "export PROBE_ONLY_ENV=1" not in _render(role, cluster_type="a3", gv=plain).splitlines()
+    # 当前启用的 hyb 档**不再**配 extra_env（两轮 env 规避都失败，见 group_vars 记录）
+    for role in ("prefill", "decode"):
+        gv = _gv(GV_FILE_A3, "1m-v030-hyb")
+        assert "extra_env" not in gv["pd_cluster"]

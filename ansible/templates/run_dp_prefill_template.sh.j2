@@ -76,6 +76,24 @@ export VLLM_USE_FASTOKENS=1
 {% endif %}
 
 export PYTHONHASHSEED=0
+{# ---- 档位可配的额外 env（排查/规避用）：pd_cluster.extra_env 里每个 k/v 渲染成 export。
+   已经用它试过：MC_STORE_MEMCPY=1（强制 store 走 memcpy，绕开 NPU P2P）、
+   ASCEND_A3_ENABLE=1（v0.23 env 集里有、v0.30 集里没有）。 #}
+{% if pd_cluster.extra_env is defined %}
+{% for _k, _v in (pd_cluster.extra_env | default({})).items() %}
+export {{ _k }}={{ _v }}
+{% endfor %}
+{% endif %}
+{# ---- kvpool 分层 range 审计日志（默认关）：pd_cluster.range_debug=true 时打开
+   VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1 ⇒ 每个 (direction, layer) 一行 [KVPOOL_RANGE_DEBUG] JSON：
+     {"event":"range","direction":"save|load","layer_id":N,"key_count":K,
+      "requested_bytes":[...],"sizes":[[...]],"object_offsets":[[...]],"results":[...]}
+     {"event":"commit","layer_id":N,"key_count":K,"results":[...]}
+   results<0 = 该 key 的 range put/get 失败（save 侧随后会 revoke）；没有 commit 行 = 会话没提交。
+   只在排查时开；跑性能/基准要关掉。 #}
+{% if pd_cluster.range_debug | default(false) %}
+export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1
+{% endif %}
 {% if mooncake.enabled %}
 export MOONCAKE_CONFIG_PATH="{{ mooncake_config_path }}"
 {% endif %}
@@ -170,8 +188,81 @@ vllm serve {{ model_path }} \
     --decode-context-parallel-size {{ pd_cluster.prefill.decode_context_parallel_size | default(pd_cluster.decode.context_parallel_size) }} \
     --cp-kv-cache-interleave-size {{ pd_cluster.cp_kv_cache_interleave_size }} \
 {% endif %}
-{# ---- kv-transfer-config：enabled=true → MultiConnector(Ascend Store KV 池)；false → 直连 MooncakeConnectorV1 ---- #}
-{% if mooncake.enabled %}
+{# ---- kv-transfer-config：四态
+   0) pd_cluster.single_store_connector=true → 官方《Mooncake Layerwise Hybrid Attention》§Configuration
+      那套**单个 AscendStoreConnector**（backend=mooncake + use_layerwise + 三个旋钮；文档单实例给 kv_both）。
+      文档给的是**单实例**口径（`kv_role: kv_both`）；本项目是 **P/D 分离**，故按角色拆：
+      prefill → `kv_producer`（只写池），decode → `kv_consumer`（只读池）。
+      交接由 KV 池承担：P 把 block 写进池，D 按同一套 layerwise block key 查池读。
+      文档 §Scope 明确 "cross-layer cache-buffer reuse are not part of this hybrid implementation"，
+      故这里不带 layerwise_num_shared_buffers / layerwise_independent_layers。
+      （不带 load_async：镜像 pool_scheduler.py:768/820 `load_async and not use_layerwise` ⇒ 层wise 下自动失效）
+   1) pd_cluster.prefill_kv_offload.sfa_remote_d2h=true → 官方《Layerwise and Sparse KV Cache
+      Offloading》§2（prefill 层缓冲 offload）：MultiConnector = [SfaRemoteD2HConnector(producer),
+      AscendStoreConnector(producer, backend=mooncake, use_layerwise + 共享 buffer 参数)]
+      · 不带 MooncakeConnectorV1（文档 §2 的连接器列表里没有它；P/D 交接改由 D 侧 memfabric 直读）
+      · 共享 buffer 参数（layerwise_num_shared_buffers / layerwise_independent_layers）在
+        backend=mooncake 下会被 kernel 静默忽略（mooncake_layerwise.extract_layout_config() → None），
+        见 group_vars 该档注释与 docs/a3-prefill-kv-offload.md
+      · MultiConnector 的子 connector 只拿到自己那份 dict（vLLM multi_connector.py:
+        KVTransferConfig(**ktc)，不继承 root），而 SfaRemoteD2H 的 side-channel 端口读的是
+        vllm_config.kv_transfer_config.kv_port ⇒ 子项里必须显式给 kv_port
+   2) mooncake.enabled=true → MultiConnector(Ascend Store KV 池 + MooncakeConnectorV1)
+   3) 其余 → 直连 MooncakeConnectorV1 ---- #}
+{% if pd_cluster.single_store_connector | default(false) %}
+{% set lw = pd_cluster.layerwise | default({}) %}
+    --kv-transfer-config \
+    '{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_producer",
+    "kv_load_failure_policy": "recompute",
+    "kv_connector_extra_config": {
+        "lookup_rpc_port":"0",
+        "backend": "mooncake",
+        "use_layerwise": true,
+        "layerwise_prefetch_layers": {{ lw.prefetch_layers | default(2) }},
+        "layerwise_max_transfer_blocks": {{ lw.max_transfer_blocks | default(64) }},
+        "layerwise_max_transfer_bytes": {{ lw.max_transfer_bytes | default(16777216) }}
+    }
+    }' \
+{% elif pd_cluster.prefill_kv_offload is defined and (pd_cluster.prefill_kv_offload.sfa_remote_d2h | default(false)) %}
+{% set lw = pd_cluster.layerwise | default({}) %}
+    --kv-transfer-config \
+    '{
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_producer",
+    "kv_load_failure_policy": "recompute",
+    "kv_port": "{{ pd_cluster.prefill_kv_offload.kv_port | default(20050) }}",
+    "kv_connector_extra_config": {
+        "connectors": [
+            {
+                "kv_connector": "SfaRemoteD2HConnector",
+                "kv_role": "kv_producer",
+                "kv_port": "{{ pd_cluster.prefill_kv_offload.kv_port | default(20050) }}",
+                "kv_connector_extra_config": {
+                    "transfer_backend": "memfabric",
+                    "memfabric_transfer_protocol": "{{ pd_cluster.prefill_kv_offload.memfabric_transfer_protocol | default('sdma') }}",
+                    "use_layerwise": true
+                }
+            },
+            {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_producer",
+                "kv_connector_extra_config": {
+                    "lookup_rpc_port":"0",
+                    "backend": "mooncake",
+                    "use_layerwise": true,
+                    "layerwise_prefetch_layers": {{ lw.prefetch_layers | default(2) }},
+                    "layerwise_max_transfer_blocks": {{ lw.max_transfer_blocks | default(64) }},
+                    "layerwise_max_transfer_bytes": {{ lw.max_transfer_bytes | default(16777216) }},
+                    "layerwise_num_shared_buffers": {{ pd_cluster.prefill_kv_offload.shared_buffers | default(3) }},
+                    "layerwise_independent_layers": {{ (pd_cluster.prefill_kv_offload.independent_layers | default([0])) | tojson }}
+                }
+            }
+        ]
+    }
+    }' \
+{% elif mooncake.enabled %}
     --kv-transfer-config \
     '{
     "kv_connector": "MultiConnector",

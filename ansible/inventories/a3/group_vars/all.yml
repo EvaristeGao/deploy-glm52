@@ -14,14 +14,18 @@ ansible_python_interpreter: /usr/bin/python3
 
 # =============================================================================
 # 部署配置选择器（与 A2 同一套写法）
-#   取值：1m-v030-lw —— ★ 当前启用，v0.30 口径 + Mooncake 分层 KV offload（use_layerwise，实验性，见下）
+#   取值：1m-v030-hyb —— ★ 当前启用，已跑通的 1m-v030 为底 + 官方《Mooncake Layerwise Hybrid Attention》
+#                        §Configuration 那套 connector（单 AscendStoreConnector + use_layerwise；kv_role 按 P/D 拆，见下）
+#        1m-v030-poff —— 官方《Layerwise and Sparse KV Cache Offloading》§2+§3 组合部署
+#                        （prefill 层缓冲 offload + decode 稀疏 offload；offload 后端换 mooncake，见下）
+#        1m-v030-lw —— v0.30 口径 + Mooncake 分层 KV offload（MultiConnector 形态，实验性，见下）
 #        1m-v030    —— v0.30 口径，严格按官方文档 §5.2.3（已实机跑通的对照档）
 #         1m      —— 按 v0.23.0 文档 §5.2.2 + 集群现网参考（A3 1M PD，DP8TP4/DCP4）
 #         200k    —— 按 v0.23.0 文档 §5.2.1 + 集群现网参考（A3 198K PD；prefill 用 DP 代替 PP）
 # 参考：https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/GLM5.2.html
 #       https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html
 # =============================================================================
-deploy_config: 1m-v030-lw
+deploy_config: 1m-v030-hyb
 
 cluster_type: a3
 image: glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13   # layerwise 需要带 PR #2881 range/session 接口的 mooncake client
@@ -160,7 +164,8 @@ _1m:
 # =============================================================================
 _1m_v030:
   pd_cluster:
-    max_model_len: 1048576
+    # max_model_len: 1048576
+    max_model_len: 65536
     num_cards: 16
     cp_kv_cache_interleave_size: 128
     v030_env: true              # 渲染 v0.30 §5.2.3 的精简 env 集（见模板）
@@ -235,7 +240,8 @@ _1m_v030:
 #         batch_get_into_multi_buffer_ranges / batch_get_session_end）；
 #       当前镜像的 mooncake 包没有这些接口，启动时会 fail fast 报 "must include Mooncake PR #2881"
 #     · 官方标注 real-NPU E2E 尚未完成（只有 CPU mock 单测），属 developer preview
-#   调试：需要每层审计日志时给引擎容器加 VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1（默认 0）
+#   调试：需要每层 range/commit 审计日志时给该档加 `range_debug: true`（模板渲染
+#         VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1，打 [KVPOOL_RANGE_DEBUG] 事件；默认关，见 docs §5.1）
 # =============================================================================
 _1m_v030_lw:
   pd_cluster:
@@ -292,10 +298,244 @@ _1m_v030_lw:
       additional_config: '{"multistream_overlap_shared_expert": true, "enable_fused_mc2": 1, "enable_mlapo": true, "scheduler_config": {"recompute_scheduler_enable": true}, "ascend_compilation_config": {"fuse_muls_add": true}}'
 
 # =============================================================================
+# 1M-v030-hyb 配置 —— 官方《Mooncake Layerwise Hybrid Attention》§Configuration 在 2P+2D 上的落地
+#   文档：user_guide/feature_guide/mooncake_hybrid_attention.html（v0.30.0rc1；中文页内容同源，
+#         英文正文 = docs/source/user_guide/feature_guide/mooncake_hybrid_attention.md，
+#         中文是 docs/source/locale/zh_CN/LC_MESSAGES/...po 的翻译）
+#
+#   文档 §Configuration 给的是**单实例**命令：
+#     export MOONCAKE_CONFIG_PATH=/path/to/mooncake.json
+#     vllm serve <model> --tensor-parallel-size 8 --enforce-eager --enable-prefix-caching \
+#       --enable-chunked-prefill --max-num-batched-tokens 4096 \
+#       --kv-transfer-config '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both",
+#         "kv_connector_extra_config": {"backend": "mooncake", "use_layerwise": true,
+#           "layerwise_prefetch_layers": 2, "layerwise_max_transfer_blocks": 64,
+#           "layerwise_max_transfer_bytes": 16777216}}'
+#
+#   本档 = **已实机跑通的 1m-v030 为底** + 上面这套 connector 配置，落到 2P+2D：
+#     · kv-transfer-config 换成**单个 AscendStoreConnector**（不再是 MultiConnector，也不再挂
+#       MooncakeConnectorV1）—— 这就是文档的形状；P/D 交接改由 KV 池承担（P 写池、D 查池读）
+#     · **kv_role 不照抄文档的 "kv_both"**：那个是单实例口径（同一份既写又读）。本项目是 **P/D 分离**，
+#       故按角色拆：prefill → "kv_producer"（只写池）、decode → "kv_consumer"（只读池）。
+#       交接靠 KV 池：P 把 block 写进池，D 用同一套 layerwise block key 查池读
+#       （两侧 TP / KV-group 一致才查得到 —— 这也是文档要求 P/D TP 一致的实际原因）。
+#       另：decode 不带 load_async —— 镜像 pool_scheduler.py:768/820 是
+#       `load_async and not use_layerwise`，layerwise 下该键自动失效。
+#     · 文档的三个 layerwise 旋钮原样：prefetch_layers=2 / max_transfer_blocks=64 / max_transfer_bytes=16MiB
+#     · 另加两个项目既有约定键：kv_load_failure_policy=recompute、lookup_rpc_port=0（不影响文档语义）
+#
+#   相对 1m-v030 必须一起改的（文档 §Scope and prerequisites 的硬约束，不是可选项）：
+#     · "DCP, PCP and prefill/decode TP mismatch remain unsupported"
+#       ⇒ 去掉 1m-v030 的 DCP8、P/D TP 取一致 ⇒ 两侧都 DP2 TP16（与 1m-v030-lw 同，TP16 也是 1M
+#         KV 容量所必需：TP8 时每 rank 需 54.14 GiB > 可用 33 GiB）
+#     · "Start validation in eager mode" ⇒ decode 也 --enforce-eager（prefill 模板本就恒 eager）
+#     · "cross-layer cache-buffer reuse are not part of this hybrid implementation"
+#       ⇒ 本档**不配** layerwise_num_shared_buffers / layerwise_independent_layers（文档明说不属于本实现）
+#
+#   与文档示例的唯一有意差异：**decode 侧 prefix caching 保持关**（--no-enable-prefix-caching）。
+#   文档那个示例是单实例（它是开的）；P/D 部署下官方 A3 参考脚本一律关 decode 侧，本项目沿用。
+#   要完全照文档，把 decode.enable_prefix_caching 改成 true 即可。
+# =============================================================================
+_1m_v030_hyb:
+  pd_cluster:
+    # 实机调参项：当前 200K（202752）；历史上用过 1M（1048576）与 64K（65536），改这行即可
+    max_model_len: 202752
+    num_cards: 16
+    v030_env: true
+    single_store_connector: true       # ★ 模板分支：文档那套单 AscendStoreConnector + use_layerwise（kv_role 按 P/D 拆 producer/consumer）
+    # ★ 排查开关：KV 池分层 range 审计日志。true ⇒ 渲染 `export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1`，
+    #   每个 (direction, layer) 打一行 `[KVPOOL_RANGE_DEBUG] {...}`：
+    #     {"event":"range","direction":"save|load","layer_id":N,"key_count":K,
+    #      "requested_bytes":[...],"sizes":[[...]],"object_offsets":[[...]],"results":[...]}
+    #     {"event":"commit","layer_id":N,"key_count":K,"results":[...]}
+    #   results<0 ⇒ 该 key 的 range put/get 失败（save 侧随后 revoke）；没有 commit 行 ⇒ 会话没提交。
+    #   跑性能/基准时必须关回 false（每层一行 JSON 很吵）。
+    range_debug: true
+    # ★ 排查记录（2026-10-19 实机两轮，结论：env 规避不了，属传输层/驱动问题，已提给开发）：
+    #   · 默认 env：range put 走 NPU→NPU HCCS P2P，通道建不起来
+    #     （halDeviceDisableP2P drvRetCode=17 / aclrtIpcMemImportByKey 107000）→
+    #     client_service `Range write failed error=-800` → put session 全 revoke、永不 commit。
+    #   · 第一轮 MC_STORE_MEMCPY=1：memcpy 路径解析不到目标 endpoint
+    #     （`Dest buffer device_id=1 >= endpoint count 1, falling back to ...:20176` + `Retry transfer`）→
+    #     `!!!!!!! Segfault encountered !!!!!!!`，P worker 被杀、p1 跟着 gloo 断（EngineDead）⇒ 不可用。
+    #   · 第二轮 ASCEND_A3_ENABLE=1：**有进展** —— put_start 成功且 16 个对象真分配了
+    #     （master_key_count=16 / allocated≈108MiB、无 revoke），但第一个 range put 仍在
+    #     `Dest buffer device_id=8 >= endpoint count 1` → `Retry transfer` 后 **Segfault**，
+    #     engine 当场死 ⇒ 同样不可用（且比默认 env 更糟：进程崩，不是优雅失败）。
+    #   ⇒ 两轮都回退，不再加 extra_env；要复现/继续试就临时往下面这块里加键。
+    # extra_env:
+    #   MC_STORE_MEMCPY: "1"
+    #   ASCEND_A3_ENABLE: "1"
+    layerwise:
+      enabled: true
+      prefetch_layers: 2               # 文档 §Configuration 原值
+      max_transfer_blocks: 64
+      max_transfer_bytes: 16777216
+    prefill:
+      dp_size: 2                       # 2 节点 × 每节点 1 引擎（TP16）
+      tp_size: 16                      # 与 decode 一致（layerwise 硬约束：不支持 P/D TP mismatch）
+      dp_size_local: 1
+      base_port: 9081
+      kv_port: 30000                   # （单 store connector 用不到，保留不影响）
+      rpc_port: 16591
+      engine_id: 0
+      max_num_batched_tokens: 4096     # 文档示例值（配 chunked prefill）
+      max_num_seqs: 64
+      gpu_memory_utilization: 0.85     # 跟随已跑通的 1m-v030（1m-v030-lw 当时给的是 0.9）
+      enable_prefix_caching: true      # 文档示例带 --enable-prefix-caching
+      enable_chunked_prefill: true     # 文档示例带 --enable-chunked-prefill
+      safetensors_prefetch: true
+      kv_cache_dtype: int8
+      indexer_kv_dtype: int8
+      non_master_headless: false
+      api_server_count: 1
+      additional_config: '{"multistream_overlap_shared_expert": true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"fuse_muls_add": true}}'
+    decode:
+      dp_size: 2
+      tp_size: 16                      # 与 prefill 一致（layerwise 硬约束）
+      dp_size_local: 1
+      base_port: 9900
+      kv_port: 30200
+      rpc_port: 16600
+      engine_id: 2
+      max_num_batched_tokens: 192
+      max_num_seqs: 32
+      gpu_memory_utilization: 0.9      # 跟随已跑通的 1m-v030（1m-v030-lw 当时给的是 0.92）
+      num_speculative_tokens: 5
+      hccl_buffsize: 400
+      enable_prefix_caching: false     # 见上：与文档示例的唯一有意差异（P/D 惯例）
+      enforce_eager: true              # 文档："Start validation in eager mode"
+      async_scheduling: false
+      safetensors_prefetch: true
+      kv_cache_dtype: int8
+      indexer_kv_dtype: int8
+      non_master_headless: false
+      api_server_count: 1
+      additional_config: '{"multistream_overlap_shared_expert": true, "enable_fused_mc2": 1, "enable_mlapo": true, "scheduler_config": {"recompute_scheduler_enable": true}, "ascend_compilation_config": {"fuse_muls_add": true}}'
+
+# =============================================================================
+# 1M-v030-poff 配置 —— 官方《Layerwise and Sparse KV Cache Offloading Guide》§2+§3 的 P/D 组合部署
+#   文档：user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.html（v0.30.0rc1）
+#         设计文档：developer_guide/Design_Documents/layerwise_and_sparse_kv_cache_offloading.html
+#
+#   目标：prefill 把「每层 KV 缓冲」offload 到远端存储，并通过 SfaRemoteD2HConnector
+#         把同一批 buffer 暴露给 decode 直读（MemFabric pull：D 读 P 的 HBM，P 不 push）。
+#         文档 §2 的 offload 后端是 memcache；本档按需求换成 mooncake（我们集群只有 mooncake）。
+#
+#   prefill（doc §2）：
+#     MultiConnector = [ SfaRemoteD2HConnector(kv_producer),
+#                        AscendStoreConnector(kv_producer, backend=mooncake, use_layerwise=true,
+#                          layerwise_num_shared_buffers / layerwise_independent_layers) ]
+#     · 不再挂 MooncakeConnectorV1 —— 文档 §2 的连接器列表里没有它，P/D 交接由 D 侧直读完成
+#     · --enforce-eager：文档明确「共享 buffer 的 layerwise prefill offload 必须 eager」
+#       （本项目 prefill 模板本来就恒渲染 --enforce-eager）
+#     · 不设 sparse_kv_offload_config：镜像 connector.py 里 producer 侧 assert 禁止
+#   decode（doc §3）：
+#     · 只用 SfaRemoteD2HConnector(kv_consumer, kv_port=20050)
+#     · additional_config.sparse_kv_offload_config.enabled=true（KV 落 host DRAM 池，
+#       keep_device_kv_cache 默认 false ⇒ 设备侧不再按 max_model_len 分配整份主 KV）
+#     · **不给 --kv-cache-dtype**：稀疏 offload 要求主 KV 是 BF16（int8 会被 _validate_preconditions 拒）
+#     · indexer 仍可 int8（Sparse LI C8）
+#   proxy：
+#     · 必须用镜像自带的 load_balance_proxy_layerwise_server_example.py
+#       （我们的 load_balance_proxy_server_example.py 是旧版，不认 memfabric/metaserver 会合）
+#     · --host 不能是 0.0.0.0：D 要回调 proxy 的 /v1/metaserver 做 rendezvous
+#     这两点已由 proxy.layerwise / proxy.script 自动跟随本档（见文件底部 proxy 段）
+#
+#   ★ 与文档的有意偏差（就是要拿这些去问开发确认，见 docs/a3-prefill-kv-offload.md）：
+#     1) offload 后端 memcache → mooncake：镜像里 mooncake_layerwise.extract_layout_config()
+#        直接 `return None`（注释原文 "Block-key transfer does not opt into GVA-backed
+#        physical reuse"），而 layerwise_cache_layout.get_layerwise_reuse_config() 只有拿到
+#        非 None 才会建 reuse plan ⇒ layerwise_num_shared_buffers / layerwise_independent_layers
+#        在本档会被**静默忽略**（不报错、也不省 HBM）。
+#        文档 §5 写的是「buffer reuse 目前不能和 MooncakeLayerwiseConnector 组合」——
+#        代码里没有任何 fail-fast，这点必须找开发确认。
+#     2) 文档说 fused LIM + Copy-SFA 是「默认选中」，但 rc1 的 SparseKVOffloadConfig.fused_op_type
+#        默认是 "none"（文档对应的是 PR #16640 之后的 main）。本档按 rc1 默认走非 fused 路径；
+#        要试 fused 就往 decode 的 sparse_kv_offload_config 里加
+#        "fused_op_type": "fused_copy_sfa"，并把 topk_buffer_size 设成 256 对齐且
+#        ≥ (1+num_speculative_tokens)*2048（MTP5 → 12288），否则 _validate_fused_copy_sfa_config 直接 raise。
+#     3) 文档 §1 的路径（/usr/local/memfabric_hybrid/...、python3.11.10）对不上本镜像：
+#        镜像里是 pip 包 memfabric_hybrid 1.2.0 + memcache_hybrid 1.2.0，python3.12，
+#        没有 set_env.sh，也不需要 source（__init__.py 自己 ctypes 预加载 lib/ 下的 .so）。
+# =============================================================================
+_1m_v030_poff:
+  pd_cluster:
+    # max_model_len: 1048576
+    max_model_len: 204800
+    num_cards: 16
+    v030_env: true
+    layerwise:
+      enabled: true
+      prefetch_layers: 2
+      max_transfer_blocks: 64
+      max_transfer_bytes: 16777216
+    # ---- prefill 侧 offload（doc §2）----
+    prefill_kv_offload:
+      sfa_remote_d2h: true              # 渲染 SfaRemoteD2HConnector(producer) 并去掉 MooncakeConnectorV1
+      kv_port: 20050                    # SfaRemoteD2H 的 side-channel 基址（子 connector 读自己的 kv_port）
+      memfabric_transfer_protocol: sdma  # A3 用 sdma/device_rdma；950 系用 device_urma（两侧必须一致）
+      shared_buffers: 3                 # → layerwise_num_shared_buffers（文档建议 2~4）
+      independent_layers: [0]           # → layerwise_independent_layers（文档默认 [0]；"all" 等于不复用）
+    # ---- decode 侧 offload（doc §3）----
+    decode_kv_offload:
+      sfa_remote_d2h: true              # decode 只用 SfaRemoteD2HConnector(kv_consumer)
+      kv_port: 20050                    # 文档：decode 侧要预留 dp*tp 个连续端口（本档 2*16=32）
+      memfabric_transfer_protocol: sdma
+    prefill:
+      dp_size: 2                        # 2 节点 × 每节点 1 引擎（TP16）
+      tp_size: 16                       # 文档：prefill TP ≥ decode TP 且能整除（本档两侧相等）
+      dp_size_local: 1
+      base_port: 9081
+      kv_port: 30000                    # （本档不渲染 MooncakeConnectorV1，此键保留不影响）
+      rpc_port: 16591
+      engine_id: 0
+      max_num_batched_tokens: 4096
+      max_num_seqs: 64
+      gpu_memory_utilization: 0.9
+      enable_prefix_caching: true
+      enable_chunked_prefill: true
+      safetensors_prefetch: true
+      kv_cache_dtype: int8              # prefill 主 KV 仍可 int8（BF16 只对 decode 稀疏 offload 有要求）
+      indexer_kv_dtype: int8
+      non_master_headless: false
+      api_server_count: 1
+      additional_config: '{"multistream_overlap_shared_expert": true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"fuse_muls_add": true}}'
+    decode:
+      dp_size: 2
+      tp_size: 16
+      dp_size_local: 1
+      base_port: 9900
+      kv_port: 30200                    # （本档不渲染 MooncakeConnectorV1，此键保留不影响）
+      rpc_port: 16600
+      engine_id: 2
+      max_num_batched_tokens: 192
+      max_num_seqs: 32
+      gpu_memory_utilization: 0.92
+      num_speculative_tokens: 5
+      hccl_buffsize: 400
+      enable_prefix_caching: false
+      async_scheduling: false           # 文档 §3 的 decode 示例不带 --async-scheduling（vLLM 默认关）
+      safetensors_prefetch: true
+      # 注意：本档**不设** kv_cache_dtype（主 KV 必须 BF16）；indexer 仍可 int8
+      indexer_kv_dtype: int8
+      non_master_headless: false
+      api_server_count: 1
+      # sparse_kv_offload_config 直接并进 additional-config（模板优先取本键，不再二次拼装）
+      #   · topk_buffer_size：设备侧热 buffer 的每请求 token 预算。文档口径 = (1+num_speculative_tokens)*2048
+      #     （MTP5 ⇒ 6*2048 = 12288）；rc1 的默认值是 4096（< 12288），对 MTP5 偏小，故显式给足。
+      #   · dram_size_per_dp_GB：host KV 池预算（每个 DP rank 一份，TP ranks 共享）。
+      #     文档默认 128 GiB 是按 max-model-len 131072 的例子给的；本档 1M + 主 KV 必须 BF16，
+      #     整份 KV 远大于 128 GiB，故先给 512 GiB（节点总内存约 2 TB、每节点 1 个 DP rank）。
+      #     若日志出现 "host DRAM budget allows only ... / consider increasing dram_size_per_dp_GB"
+      #     或 "planned CPU pool exceeds DRAM limit"，就继续往上调（容器 --shm-size 1024g 是参考上限）。
+      additional_config: '{"multistream_overlap_shared_expert": true, "enable_fused_mc2": 1, "enable_mlapo": true, "scheduler_config": {"recompute_scheduler_enable": true}, "ascend_compilation_config": {"fuse_muls_add": true}, "sparse_kv_offload_config": {"enabled": true, "topk_buffer_size": 12288, "dram_size_per_dp_GB": 512}}'
+
+# =============================================================================
 # 激活的配置（由 deploy_config 选择；_active 必须先于 pd_cluster 定义，
 #   否则 {{ _active.pd_cluster }} 解析时 _active 还是未展开的字符串）
 # =============================================================================
-_active: "{{ {'200k': _200k, '1m': _1m, '1m-v030': _1m_v030, '1m-v030-lw': _1m_v030_lw}[deploy_config] }}"
+_active: "{{ {'200k': _200k, '1m': _1m, '1m-v030': _1m_v030, '1m-v030-lw': _1m_v030_lw, '1m-v030-hyb': _1m_v030_hyb, '1m-v030-poff': _1m_v030_poff}[deploy_config] }}"
 pd_cluster: "{{ _active.pd_cluster }}"
 
 # --- 共享字段（与部署配置无关）---
@@ -305,6 +545,18 @@ runtime:
 
 proxy:
   port: 8000
+  # ---- proxy 脚本选择（v0.30 P/D remote-D2H offload 专用）----
+  # layerwise 档（pd_cluster.decode_kv_offload.sfa_remote_d2h=true，即 1m-v030-poff）必须用镜像自带的
+  #   load_balance_proxy_layerwise_server_example.py：它会把 do_remote_prefill/metaserver 塞进
+  #   kv_transfer_params，并暴露 POST /v1/metaserver 给 decode 做 rendezvous。
+  #   我们仓库里的 load_balance_proxy_server_example.py 是旧版，没有这套逻辑。
+  # 同时该脚本禁止 --host 0.0.0.0（decode 要按 host:port 回调），故启动时绑定 proxy 节点真实 IP。
+  # 默认跟随部署档自动切换，可手工覆盖。
+  layerwise: "{{ pd_cluster.decode_kv_offload is defined and (pd_cluster.decode_kv_offload.sfa_remote_d2h | default(false)) }}"
+  # 说明：这里刻意不引用 proxy.layerwise、也不用 | bool / | ternary —— 单测/模拟器用纯 Jinja 环境解析
+  #   group_vars（无 Ansible 专有 filter），表达式需自包含且只用 Jinja 内置 filter。
+  script: "{{ 'load_balance_proxy_layerwise_server_example.py' if (pd_cluster.decode_kv_offload is defined and (pd_cluster.decode_kv_offload.sfa_remote_d2h | default(false))) else 'load_balance_proxy_server_example.py' }}"
+  layerwise_image_dir: "/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1"   # layerwise 脚本在镜像内的目录（直接容器内起，不落盘到控制机）
   # 接入 proxy 的节点白名单（inventory 节点名）；空/未配置 = 全部接入
   prefill_nodes: []          # 例: [p0]
   decode_nodes: []           # 例: [d0] —— 模拟 decode 排队
@@ -321,7 +573,11 @@ mooncake:
   global_segment_size: 40GB
   default_kv_lease_ttl: 11000
   # image: vllm-ascend-ha-gwh-test:v2.0   # TODO: mooncake 容器镜像（含 mooncake_master+haproxy+nc），用户填
-  image: quay.io/ascend/vllm-ascend:v0.30.0rc1-a3
+  # ⚠️ mooncake_master 必须与引擎里的 client 同版本（否则 master 对 mount_segment RPC 回 "invalid rpc arg"，
+  #    引擎侧表现为 RuntimeError: Initialize mooncake failed. —— mooncake_backend.py:297）。
+  #    引擎镜像是 mc0.3.13（layerwise 要 PR #2881 的 range/session 接口），故 master 也用同一个镜像。
+  #    2026-10-17 实机踩过：master 用 quay.io/ascend/vllm-ascend:v0.30.0rc1-a3（0.3.11.post1）+ 引擎 0.3.13.post1 ⇒ 起不来。
+  image: glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13
   ha:
     enable_ha: false         # ha+etcd 开关（前提 enabled: true）；false=单 master 直连 p0（当前）
     nodes: [p0, p1, d0]      # 3 个 mooncake_master 节点；仅 enable_ha=true 生效（单主时 master 固定落 proxy 节点 p0）

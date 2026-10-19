@@ -211,6 +211,9 @@
       when: mooncake.enabled and inventory_hostname in mooncake_master_nodes
       shell: |
         docker exec mooncake-{{ inventory_hostname }} mkdir -p {{ mooncake_log | dirname }} 2>/dev/null || true
+        # glog 的 -log_dir 默认 /var/log/mooncake_master，镜像里没有该目录 ⇒ 会刷
+        # "COULD NOT CREATE A LOGGINGFILE ... No such file or directory"。先建出来（幂等）。
+        docker exec mooncake-{{ inventory_hostname }} mkdir -p {{ mooncake.ha.log_dir }} 2>/dev/null || true
         docker exec mooncake-{{ inventory_hostname }} pkill -x mooncake_master 2>/dev/null || true
         docker exec -d mooncake-{{ inventory_hostname }} bash -c \
           'mooncake_master {% if mooncake.ha.enable_ha %}-enable_ha=true \
@@ -374,22 +377,34 @@
         proxy_log: "{{ (logs.dir | default('')) or '/root' }}/{{ logs.proxy | default('proxy.log') }}"
       tags: proxy
 
-    - name: 分发 proxy 脚本到节点 /tmp（对照 deploy.sh 的 scpn）
+    - name: 分发 proxy 脚本到节点 /tmp（对照 deploy.sh 的 scpn；layerwise 档脚本在镜像里，不落盘）
       copy:
-        src: "../load_balance_proxy_server_example.py"
-        dest: "/tmp/load_balance_proxy_server_example.py"
-      when: inventory_hostname == 'p0'
+        src: "../{{ proxy.script }}"
+        dest: "/tmp/{{ proxy.script }}"
+      when: inventory_hostname == 'p0' and not (proxy.layerwise | default(false) | bool)
       tags: proxy
 
-    - name: docker cp proxy 脚本进容器并启动（对照 deploy.sh start_proxy，pkill 锚定 ^python3）
-      when: inventory_hostname == 'p0'
+    - name: docker cp proxy 脚本进容器（仅 plain 档；layerwise 档脚本镜像自带，无需 cp）
+      when: inventory_hostname == 'p0' and not (proxy.layerwise | default(false) | bool)
       shell: |
         docker exec {{ container.name }} mkdir -p /root/pd 2>/dev/null || true
-        docker cp /tmp/load_balance_proxy_server_example.py {{ container.name }}:/root/pd/
-        docker exec {{ container.name }} chmod +x /root/pd/load_balance_proxy_server_example.py
-        docker exec {{ container.name }} pkill -f '^python3 .*load_balance_proxy_server_example' 2>/dev/null || true
-        docker exec -d {{ container.name }} bash -c 'unset http_proxy https_proxy; python3 /root/pd/load_balance_proxy_server_example.py \
-          --host 0.0.0.0 --port {{ proxy_port }} \
+        docker cp /tmp/{{ proxy.script }} {{ container.name }}:/root/pd/
+        docker exec {{ container.name }} chmod +x /root/pd/{{ proxy.script }}
+      tags: proxy
+
+    - name: 启动 proxy（对照 deploy.sh start_proxy，pkill 锚定 ^python3）
+      when: inventory_hostname == 'p0'
+      vars:
+        # layerwise（P/D remote-D2H offload）：直接跑镜像示例目录里的脚本；
+        #   plain：跑上面 docker cp 进 /root/pd 的那份
+        proxy_script_path: "{{ (proxy.layerwise | default(false) | bool) | ternary(proxy.layerwise_image_dir ~ '/' ~ proxy.script, '/root/pd/' ~ proxy.script) }}"
+        # layerwise 脚本禁止 --host 0.0.0.0（decode 要按 host:port 回调 proxy 的 /v1/metaserver），
+        #   故绑定 proxy 节点真实 IP；plain 档保持原来的 0.0.0.0
+        proxy_bind: "{{ (proxy.layerwise | default(false) | bool) | ternary(proxy_host, '0.0.0.0') }}"
+      shell: |
+        docker exec {{ container.name }} pkill -f '^python3 .*{{ proxy.script }}' 2>/dev/null || true
+        docker exec -d {{ container.name }} bash -c 'unset http_proxy https_proxy; python3 {{ proxy_script_path }} \
+          --host {{ proxy_bind }} --port {{ proxy_port }} \
           --prefiller-hosts {{ prefiller_hosts }} --prefiller-ports {{ prefiller_ports }} \
           --decoder-hosts {{ decoder_hosts }} --decoder-ports {{ decoder_ports }} >> {{ proxy_log }} 2>&1'
       tags: proxy

@@ -44,12 +44,28 @@
 additional-config 用 `enable_flashcomm1`/`enable_fused_mc2`/`enable_mlapo`/`mega_moe_max_tokens`）。
 逐项对应与有意偏离见 `a3-v030rc1-vs-official.md` §4。
 
-第四档 **`1m-v030-lw`**（未启用）：`1m-v030` + **Mooncake 分层 KV offload**（`use_layerwise`，即官方
-`mooncake_hybrid_attention` 那条 hybrid 路径）。为满足 layerwise 的三条硬约束，相对 `1m-v030` 改了：
-P/D 都 **TP8**（TP 必须一致）、**不开 CP/DCP**、decode 改**纯 eager**、prefill 开 `--enable-chunked-prefill`。
-前置是 mooncake client 必须带 PR #2881 的 range/session 接口。详见 `a3-layerwise-kv-offload.md`。
+第四档 **`1m-v030-lw`**（未启用）：`1m-v030` + **Mooncake 分层 KV offload**（`use_layerwise`），
+用 `MultiConnector[MooncakeConnectorV1, AscendStoreConnector]` 形态。为满足 layerwise 硬约束，相对 `1m-v030`：
+P/D 都 **TP16**（TP 必须一致；TP16 也是 1M KV 容量所必需）、**不开 CP/DCP**、decode 改**纯 eager**、
+prefill 开 `--enable-chunked-prefill`。详见 `a3-layerwise-kv-offload.md`。
 
-切换方式：改 `deploy_config`（`200k` / `1m` / `1m-v030` / `1m-v030-lw`）→ 重跑 `gen`（重渲染节点脚本）→ `start` 生效。
+第五档 **`1m-v030-hyb`**（★ 当前启用）：官方
+[Mooncake Layerwise Hybrid Attention](https://docs.vllm.ai/projects/ascend/zh-cn/v0.30.0rc1/user_guide/feature_guide/mooncake_hybrid_attention.html)
+**§Configuration 那套连接器**（**单个** `AscendStoreConnector` + `backend: mooncake` +
+`use_layerwise` + `layerwise_prefetch_layers/max_transfer_blocks/max_transfer_bytes`），底子是已跑通的
+`1m-v030`，按文档 §Scope 去掉 DCP、P/D 取同 TP16、decode 开 eager。文档 §Scope 明确
+「cross-layer cache-buffer reuse are not part of this hybrid implementation」，故本档不配复用旋钮。
+详见 `a3-layerwise-kv-offload.md` §3.1。
+
+第六档 **`1m-v030-poff`**（未启用）：官方
+[《Layerwise and Sparse KV Cache Offloading》](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.html)
+**§2 + §3 的 P/D 组合部署** —— prefill 把每层 KV 缓冲 offload 到远端 store，并经 `SfaRemoteD2HConnector`
+把同一批 buffer 暴露给 decode 直读（MemFabric pull）；decode 开 `sparse_kv_offload_config`
+（主 KV 必须 **BF16**，KV 落 host DRAM 池）。文档 §2 的 offload 后端是 **memcache**，本档按我们的环境
+换成 **mooncake**，并且需要 **layerwise proxy**（`proxy.layerwise` 自动跟随）。差异、预期报错与待确认问题
+清单见 `a3-prefill-kv-offload.md`。
+
+切换方式：改 `deploy_config`（`200k` / `1m` / `1m-v030` / `1m-v030-lw` / `1m-v030-hyb` / `1m-v030-poff`）→ 重跑 `gen`（重渲染节点脚本）→ `start` 生效。
 
 ---
 

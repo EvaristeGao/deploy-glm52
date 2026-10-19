@@ -19,6 +19,7 @@ import tempfile
 import yaml
 from jinja2 import Environment, FileSystemLoader, Undefined
 from jinja2.nativetypes import NativeEnvironment
+import json
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
@@ -119,6 +120,11 @@ env.filters["difference"] = lambda a, b: [x for x in a if x not in b]
 env.filters["intersect"] = lambda a, b: [x for x in a if x in b]
 env.filters["union"] = lambda a, b: list(a) + [x for x in b if x not in a]
 env.filters["unique"] = lambda a: list(dict.fromkeys(a))
+# Ansible 专有 filter 的近似实现（playbook 的 when/vars 里会用到；纯 jinja2 没有）
+env.filters["bool"] = lambda v: str(v).strip().lower() in ("true", "1", "yes", "on")
+env.filters["ternary"] = lambda cond, a, b=None: a if cond else ("" if b is None else b)
+env.filters["to_json"] = json.dumps
+env.filters["regex_replace"] = lambda s, pat, repl: __import__("re").sub(pat, repl, str(s))
 
 MODES = [
     ("HA_per_container", dict(enabled=True, enable_ha=True, haproxy_mode="per_container"), "kvpool HA · 内嵌 haproxy（默认）"),

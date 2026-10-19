@@ -16,9 +16,9 @@
   tasks:
     # 对照 deploy.sh cmd_stop(): $pnode=$(...proxy.node) 上停 proxy
     # proxy 节点 = inventory 的 proxy 组首成员（group_vars 无 proxy.node 平铺字段）
-    - name: 停 proxy（proxy 节点；--pid=host 锚定 ^python3）
+    - name: 停 proxy（proxy 节点；--pid=host 锚定 ^python3；脚本名跟随档位，plain/layerwise 都覆盖）
       when: inventory_hostname == groups['proxy'][0]
-      shell: docker exec {{ container.name }} pkill -f '^python3 .*load_balance_proxy_server_example' 2>/dev/null || true
+      shell: docker exec {{ container.name }} pkill -f '^python3 .*{{ proxy.script }}' 2>/dev/null || true
 
     # 对照 deploy.sh cmd_stop(): 停 mooncake_master（pkill -x 精确进程名）。
     # HA 后 mooncake_master 跑在 mooncake.ha.nodes 各节点的 mooncake-<node> 容器内，
