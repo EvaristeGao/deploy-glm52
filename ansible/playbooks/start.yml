@@ -27,7 +27,21 @@
       tags: always
 
     - name: 删除旧容器（幂等，对照 deploy.sh 的 docker rm -f $CONTAINER_NAME）
-      shell: docker rm -f {{ container.name }} 2>/dev/null || true
+      # 2026-10-19 实机踩到：docker rm -f 返回 0 但容器仍在（exit 137 的残留），紧接着
+      # docker run 撞名（Conflict / rc=125）⇒ 该节点没有引擎容器，P 的 DP rendezvous 白等 600s。
+      # 这里 rm 后轮询确认名字真的释放，最多重试 10 次，仍存在则 fail-fast。
+      shell: |
+        docker rm -f {{ container.name }} >/dev/null 2>&1 || true
+        for i in $(seq 1 10); do
+          if ! docker inspect {{ container.name }} >/dev/null 2>&1; then exit 0; fi
+          sleep 1
+          docker rm -f {{ container.name }} >/dev/null 2>&1 || true
+        done
+        if docker inspect {{ container.name }} >/dev/null 2>&1; then
+          echo "container {{ container.name }} still exists after rm -f retries" >&2
+          docker ps -a --filter name=^{{ container.name }}$ >&2 || true
+          exit 1
+        fi
       tags: container
 
     - name: 起容器（对照 deploy.sh start_node 的 docker run，无遗漏）
