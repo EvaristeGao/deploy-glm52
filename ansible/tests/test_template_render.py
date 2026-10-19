@@ -433,7 +433,7 @@ def test_a3_deploy_config_selects_matching_block():
     """deploy_config 选中哪一档，pd_cluster 就解析成哪一块（不锁死具体默认值，防止手改后单测变红）。"""
     gv = _gv(GV_FILE_A3)
     cfg = gv["deploy_config"]
-    assert cfg in ("200k", "1m", "1m-v030", "1m-v030-lw", "1m-v030-hyb", "1m-v030-poff")
+    assert cfg in ("200k", "1m", "1m-v030", "1m-v030-lw", "1m-v030-hyb", "1m-v030-hyb-tp8", "1m-v030-poff")
     assert gv["pd_cluster"] == gv[f"_{cfg.replace('-', '_')}"]["pd_cluster"]
 
 
@@ -1185,3 +1185,25 @@ def test_extra_env_rendered_only_when_configured():
     for role in ("prefill", "decode"):
         gv = _gv(GV_FILE_A3, "1m-v030-hyb")
         assert "extra_env" not in gv["pd_cluster"]
+
+
+# ---- TP8 诊断档：1m-v030-hyb-tp8（定位 range 写入失败的 TP 对照） ----
+
+
+def test_a3_v030_hyb_tp8_shape():
+    """TP8 诊断档：P/D 都 TP8 / 每节点 1 引擎 / 64K；connector 形状与 hyb 完全一致。"""
+    pd = _gv(GV_FILE_A3, "1m-v030-hyb-tp8")["pd_cluster"]
+    assert pd["max_model_len"] == 65536
+    assert pd["prefill"]["tp_size"] == pd["decode"]["tp_size"] == 8
+    for role in ("prefill", "decode"):
+        assert (pd[role]["dp_size"], pd[role]["dp_size_local"]) == (2, 1)
+        d = _kv_transfer_json("1m-v030-hyb-tp8", role)
+        assert d["kv_connector"] == "AscendStoreConnector"
+        assert d["kv_connector_extra_config"]["use_layerwise"] is True
+        assert d["kv_connector_extra_config"]["backend"] == "mooncake"
+    assert _kv_transfer_json("1m-v030-hyb-tp8", "prefill")["kv_role"] == "kv_producer"
+    assert _kv_transfer_json("1m-v030-hyb-tp8", "decode")["kv_role"] == "kv_consumer"
+    assert _kv_transfer_json("1m-v030-hyb-tp8", "decode")["kv_connector_extra_config"]["consumer_is_to_load"] is True
+    for role in ("prefill", "decode"):
+        lines = _render_a3(role, "1m-v030-hyb-tp8").splitlines()
+        assert "export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1" in lines

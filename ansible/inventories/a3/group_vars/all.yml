@@ -414,6 +414,70 @@ _1m_v030_hyb:
       additional_config: '{"multistream_overlap_shared_expert": true, "enable_fused_mc2": 1, "enable_mlapo": true, "scheduler_config": {"recompute_scheduler_enable": true}, "ascend_compilation_config": {"fuse_muls_add": true}}'
 
 # =============================================================================
+# 1M-v030-hyb-tp8 配置 —— 定位"range 写入失败"的 TP8 对照档（诊断用，不要当生产档）
+#   背景（docs/a3-layerwise-kv-offload.md §5.2）：TP16 / 单机 16 卡时 range put 在
+#     `transfer_executor_base.cpp:64 Dest buffer device_id=N >= endpoint count 1` → fallback
+#     → `Retry transfer` → **Segfault**；默认 env 则是 HCCS P2P 建链失败 → `-800` + 全 revoke。
+#   本档把 P/D 都降到 **TP8**（每节点只用卡 0~7，dp_size_local=1），max_model_len 降到 64K
+#   （TP8 下 1M 的 KV 装不下，见 commit 8d2e320），其余与 1m-v030-hyb 完全一致。
+#   判读：TP8 下 range put 成功（出现 `event:"commit"`、master key_count 涨）⇒ 问题与单机
+#         设备/客户端数量相关；若同样 fallback/segfault ⇒ 与 TP 无关，是 endpoint 注册本身的问题。
+# =============================================================================
+_1m_v030_hyb_tp8:
+  pd_cluster:
+    max_model_len: 65536              # TP8 下 1M KV 装不下（TP8 每 rank 需 54.14 GiB）
+    num_cards: 16
+    v030_env: true
+    single_store_connector: true
+    range_debug: true                 # 诊断档：保留每层 range/commit 审计日志
+    layerwise:
+      enabled: true
+      prefetch_layers: 2
+      max_transfer_blocks: 64
+      max_transfer_bytes: 16777216
+    prefill:
+      dp_size: 2                      # 2 节点 × 每节点 1 引擎（TP8，用卡 0~7）
+      tp_size: 8
+      dp_size_local: 1
+      base_port: 9081
+      kv_port: 30000
+      rpc_port: 16591
+      engine_id: 0
+      max_num_batched_tokens: 4096
+      max_num_seqs: 64
+      gpu_memory_utilization: 0.85
+      enable_prefix_caching: true
+      enable_chunked_prefill: true
+      safetensors_prefetch: true
+      kv_cache_dtype: int8
+      indexer_kv_dtype: int8
+      non_master_headless: false
+      api_server_count: 1
+      additional_config: '{"multistream_overlap_shared_expert": true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"fuse_muls_add": true}}'
+    decode:
+      dp_size: 2
+      tp_size: 8
+      dp_size_local: 1
+      base_port: 9900
+      kv_port: 30200
+      rpc_port: 16600
+      engine_id: 2
+      max_num_batched_tokens: 192
+      max_num_seqs: 32
+      gpu_memory_utilization: 0.9
+      num_speculative_tokens: 5
+      hccl_buffsize: 400
+      enable_prefix_caching: false
+      enforce_eager: true
+      async_scheduling: false
+      safetensors_prefetch: true
+      kv_cache_dtype: int8
+      indexer_kv_dtype: int8
+      non_master_headless: false
+      api_server_count: 1
+      additional_config: '{"multistream_overlap_shared_expert": true, "enable_fused_mc2": 1, "enable_mlapo": true, "scheduler_config": {"recompute_scheduler_enable": true}, "ascend_compilation_config": {"fuse_muls_add": true}}'
+
+# =============================================================================
 # 1M-v030-poff 配置 —— 官方《Layerwise and Sparse KV Cache Offloading Guide》§2+§3 的 P/D 组合部署
 #   文档：user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.html（v0.30.0rc1）
 #         设计文档：developer_guide/Design_Documents/layerwise_and_sparse_kv_cache_offloading.html
@@ -535,7 +599,7 @@ _1m_v030_poff:
 # 激活的配置（由 deploy_config 选择；_active 必须先于 pd_cluster 定义，
 #   否则 {{ _active.pd_cluster }} 解析时 _active 还是未展开的字符串）
 # =============================================================================
-_active: "{{ {'200k': _200k, '1m': _1m, '1m-v030': _1m_v030, '1m-v030-lw': _1m_v030_lw, '1m-v030-hyb': _1m_v030_hyb, '1m-v030-poff': _1m_v030_poff}[deploy_config] }}"
+_active: "{{ {'200k': _200k, '1m': _1m, '1m-v030': _1m_v030, '1m-v030-lw': _1m_v030_lw, '1m-v030-hyb': _1m_v030_hyb, '1m-v030-hyb-tp8': _1m_v030_hyb_tp8, '1m-v030-poff': _1m_v030_poff}[deploy_config] }}"
 pd_cluster: "{{ _active.pd_cluster }}"
 
 # --- 共享字段（与部署配置无关）---

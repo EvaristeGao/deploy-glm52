@@ -273,10 +273,32 @@ I Retry transfer to:172.168.4.237:20802
 
 ⇒ 两轮 env 规避都回退（group_vars 里只留排查记录，不再加 `extra_env`）。
 
+**第三轮：TP 降到 8（`1m-v030-hyb-tp8` 档，P/D 都 TP8、每节点用卡 0~7、64K）** —— 结果与 TP16 的默认 env 完全一样，
+说明**与 TP/设备数量无关**：
+
+```
+probe 2098 tokens → 请求正常返回 200
+[KVPOOL_RANGE_DEBUG] layer 0, key_count=16, results=[-800 ×16]
+Range write failed ×16 → BatchPutRevoke 1 req/16 items → BatchPutEnd 0 → master_key_count 0
+eventlog: device_id=4 >= endpoint count 1, falling back to 172.168.4.237:20429 (×34)
+          aclrtIpcMemImportByKey failed[107000] / rtsIpcMemImportByKey: driver error:invalid value
+          [HixlEngine] Failed to auto connect local(...:20041) → remote(...:20429)
+```
+
+四轮汇总：
+
+| 轮 | TP | env | put_start | 写入 | commit | 引擎 |
+|---|---|---|---|---|---|---|
+| 1 | 16 | 默认 | ✅ 16 items | ❌ `-800` ×16（HCCS P2P 建链失败） | 0 | 存活（优雅失败） |
+| 2 | 16 | `MC_STORE_MEMCPY=1` | ✅ | ❌ endpoint fallback(dev=1) → Retry | 0 | **Segfault** |
+| 3 | 16 | `ASCEND_A3_ENABLE=1` | ✅ 且对象已分配（key_count=16 / 108MiB） | ❌ endpoint fallback(dev=8) → Retry | 0 | **Segfault** |
+| 4 | **8** | 默认 | ✅ 16 items | ❌ `-800` ×16（同样 IPC import 失败） | 0 | 存活（优雅失败） |
+
 **结论（给开发）**：`Dest buffer device_id=N >= endpoint count 1` 说明目标 segment 只有 **1 个 endpoint**，
-`device_id >= 1` 一律落到 fallback，随后 `Retry transfer` → segfault。也就是单机 **16 卡 TP16** 时
-"源 NPU 设备 → 目标 segment 端点"的映射不成立；要么 segment 需要按设备注册多个 endpoint，要么
-range put 应直接写本 client 的 host segment（而不是走 NPU D2D/HCCS）。
+`device_id >= 1` 一律落到 fallback；底层是 `aclrtIpcMemImportByKey` 107000 / `rtsIpcMemImportByKey:
+driver error:invalid value` 导致 HCCS P2P 建链失败。TP8 与 TP16 表现一致 ⇒ **不是规模问题，是
+"源 NPU 设备 → 目标 segment 端点"的注册/映射在该版本不成立**；要么 segment 需要按设备注册多个 endpoint，
+要么 range put 应直接写本 client 的 host segment（而不是走 NPU D2D/HCCS）。
 排查入口：`transfer_executor_base.cpp:64 / :689`、`client_service.cpp:4458`、`hixl_engine.cc:196/379`。
 
 ---
