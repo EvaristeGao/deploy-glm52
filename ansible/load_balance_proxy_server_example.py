@@ -908,6 +908,10 @@ class InstanceInfo:
 
 async def _handle_completions(api: str, request: Request):
     request_counted = False
+    # 必须在 try 之前初始化：流式分支在 try 内 return（第 ~1050 行），非流式分支才把它置 True。
+    # 之前只在非流式路径赋值 ⇒ 请求在 P/D 阶段抛错时 except 里引用未绑定变量，真正的错误被
+    # UnboundLocalError 盖掉（2026-10-19 实机排查时踩到，500 里只剩这条，看不到上游错误）。
+    generator_owns_request_lifecycle = False
     try:
         req_data = await request.json()
         req_body = await request.body()
