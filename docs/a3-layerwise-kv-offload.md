@@ -374,6 +374,34 @@ docker exec -e MOONCAKE_CONFIG_PATH=/root/pd/mooncake.json <ctr> \
 **待验证**：关掉本地前缀缓存（`ENABLE_PREFIX_CACHING=0`）后再发同一 prompt，
 确认是**从池里 load**（日志出现 `"direction":"load"` 且 results 为正数），而不是本地 prefix cache 兜住。
 
+### 5.5 协议层验证（roce / ubmem / fabric 三档，2026-10-20）
+
+背景：默认（`compat`）日志是 `roce_mode=false, use_fabric_mem=false, GlobalResourceConfig unset`
+—— 既不是官方"方案一 RoCE"，也不是"方案三 FabricMem"，走的是默认 HCCS 直连 + IPC import。
+按官方 [HIXL 接口](https://gitcode.com/cann/hixl/blob/master/docs/zh/api/cpp/HIXL-interface.md)
+的 `GlobalResourceConfig` 字段表，给 hyb 档加了 `hixl_preset`（compat/roce/ubmem/fabric 四选一），
+一轮只改一个变量。
+
+| preset | 注入的 env | 结果 |
+|---|---|---|
+| `compat` | 无 | 引擎正常；2K 冷请求 range put 全 `-800`（`endpoint count 1` → fallback → IPC import 107000 → 有时 segfault） |
+| `roce` | `ASCEND_GLOBAL_RESOURCE_CONFIG={"comm_resource_config":{"protocol_desc":"roce:device"}}` | `roce_mode=true` 生效，引擎能起；但请求 500：`Endpoint CreateChannel failed` → `HixlClient Connect failed(172.168.4.237:20419)` → `IpcMemImportByKey`×26 → **Segfault**；master `key_count=15/allocated=106MB` 但无 commit |
+| `ubmem` | `...{"protocol_desc":"ubmem"}` | 同上：`conn_fail=45` / `ipc=18` / `endpoint_fb=43` → **Segfault**；master `key_count=16/allocated=113MB`、无 commit |
+| `fabric` | `ASCEND_ENABLE_USE_FABRIC_MEM=1` + `{"protocol_desc":"ubmem","fabric_memory":{"max_capacity":1,"task_stream_num":4}}` | 传输层**真的进了 fabric 模式**（`use_fabric_mem=true`、`Fabric mem mode is enabled`），但 `store.setup` 返回 **-600** → `Initialize mooncake failed`，引擎起不来 |
+
+两个配置坑（都能从报错直接读出）：
+- `fabric_memory.max_capacity` 单位是 **TB**，范围 **(0,1024]**（写 `"16GB"` 或 `17179869184` 都会
+  `ParseGlobalResourceConfig` 失败，报错原文 `must be in (0, 1024] TB, got 17179869184`）；
+- 设了 `ASCEND_GLOBAL_RESOURCE_CONFIG` 会同时把 vllm-ascend 的 store 切到"store 独立 TE"路径
+  （缓冲区走 `store.register_buffer`）。
+
+**结论**：
+1. `protocol_desc` 只改"设备侧协议"，**没有改变目标 segment 的内存映射方式**（日志里 `endpoint count 1`
+   与 `IpcMemImportByKey` 依旧），所以 RoCE/ubmem 两档都还是在跨进程建链处失败；
+2. FabricMem 是最有希望的一条（传输层 adxl 已经支持），卡点在 **mooncake store client 的 `setup()` 返回 -600**；
+3. RoCE/ubmem 两轮都在传输失败后踩到 `transfer_executor_base.cpp:699` 的 **segfault**（引擎被打死）——
+   这条必须单独报给厂商，否则任何一次网络抖动都会崩引擎。
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑

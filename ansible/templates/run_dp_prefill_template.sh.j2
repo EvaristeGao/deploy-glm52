@@ -84,6 +84,16 @@ export PYTHONHASHSEED=0
 export {{ _k }}={{ _v }}
 {% endfor %}
 {% endif %}
+{# ---- HIXL 协议/全局资源预设（pd_cluster.hixl_preset -> hixl_presets 里的 k/v）。
+   取值来自官方 docs/zh/api/cpp/HIXL-interface.md：protocol_desc 可配 roce:device / hccs:device /
+   ubmem / ub_ctp:device ...；FabricMem 用 ASCEND_ENABLE_USE_FABRIC_MEM=1 + fabric_memory 池。
+   值里带 JSON 的双引号，所以这里用单引号包住，避免 shell 把引号吃掉。 #}
+{% set _pname = pd_cluster.hixl_preset | default('compat') %}
+{% set _presets = pd_cluster.hixl_presets | default({}) %}
+{% set _preset = _presets[_pname] | default({}) %}
+{% for _k, _v in _preset.items() %}
+export {{ _k }}='{{ _v }}'
+{% endfor %}
 {# ---- kvpool 分层 range 审计日志（默认关）：pd_cluster.range_debug=true 时打开
    VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1 ⇒ 每个 (direction, layer) 一行 [KVPOOL_RANGE_DEBUG] JSON：
      {"event":"range","direction":"save|load","layer_id":N,"key_count":K,

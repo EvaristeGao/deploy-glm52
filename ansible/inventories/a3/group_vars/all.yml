@@ -370,6 +370,28 @@ _1m_v030_hyb:
     #   只保留 ASCEND_AUTO_CONNECT=0 —— 它把 fallback 路径的 segfault 变成干净的 -800（引擎不再被打死）。
     extra_env:
       ASCEND_AUTO_CONNECT: "0"
+    # ---- HIXL 全局资源/协议选择（ASCEND_GLOBAL_RESOURCE_CONFIG，见官方
+    #      docs/zh/api/cpp/HIXL-interface.md 的 GlobalResourceConfig 字段表）----
+    #   compat：不注入（默认走 HCCS 直连 + IPC import —— 实测跨进程 range 传输会
+    #           aclrtIpcMemImportByKey[107000] / DisableP2P=17 → -800）
+    #   roce  ：方案一 RDMA over Ethernet（protocol_desc=roce:device，约 20GB/s）
+    #   ubmem ：超节点内 UB 内存直传（protocol_desc=ubmem，仅 A3 超节点内）
+    #   fabric：方案三 FabricMem（EnableUseFabricMem=1 + fabric_memory 池，
+    #           D2RH/RH2D 单边、百 GB/s；仅 A3 + CANN≥9.0 + HDK≥25.5）
+    # 注意：设置 ASCEND_GLOBAL_RESOURCE_CONFIG 会同时把 vllm-ascend 的 store 切到
+    #       “store 独立 TE” 路径（register_buffer 走 store.register_buffer）。
+    hixl_preset: compat
+    hixl_presets:
+      roce:
+        ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config":{"protocol_desc":"roce:device"}}'
+      ubmem:
+        ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config":{"protocol_desc":"ubmem"}}'
+      fabric:
+        ASCEND_ENABLE_USE_FABRIC_MEM: "1"
+        # fabric_memory.max_capacity 的单位是 **TB**，取值范围 (0, 1024]（实机报错原文：
+        # "fabric_memory.max_capacity must be in (0, 1024] TB, got 17179869184"）。
+        # 先给 1（=1 TB 虚拟池）；task_stream_num 是单任务流数量。
+        ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config":{"protocol_desc":"ubmem"},"fabric_memory":{"max_capacity":1,"task_stream_num":4}}'
     layerwise:
       enabled: true
       prefetch_layers: 2               # 文档 §Configuration 原值
