@@ -468,6 +468,41 @@ aclrtIpcMemImportByKey(ptr, name, 0UL);                          // = ACL_RT_IPC
    一行改成 `ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION` 即可（hixl 的 ubmem 路径
    `hixl/src/hixl/cs/ubmem/ubmem_allocator.cc:258` 正是这么写的）。
 
+### 5.8 自编 hcomm 验证「关掉白名单」：能编、但全局关会把 HCCL 初始化搞挂
+
+**构建（可复现）**：hcomm 用 **tag `v9.1.0`（`4ca1db9`，2026-07-30）**，与容器内 CANN 9.1.0
+（`V100R001C11SPC001B243`，构建时间 `20260730_231653901`）ABI 对齐；branch `9.1.0` 最新（`afb5dfa`）
+编出来的产物加载时报 `undefined symbol _ZN4hccl6Stream14SetInvalidFlagEv`（比安装版新）。
+
+一次性构建容器（不动运行环境）里需要：`pkg-config libnl-3-dev libnl-route-3-dev libudev-dev
+python3-setuptools python3-wheel python3-pip`，且 `PATH=/usr/bin:$PATH` 用 **cmake 3.22**（默认 4.4.4
+会卡在 rdma-core 的老 CMakeLists）。首次 ~15 分钟，增量 ~90 秒：
+
+```bash
+cd hcomm-src && export PATH=/usr/bin:$PATH && bash build.sh --noclean
+# 产物：build/src/legacy/ascend910/framework/libhcomm.so
+```
+
+**两个关键坑（都实测）**：
+1. `adapter_rts.cc` 被编进的是 **`libhccl_plf.so`**（不是 `libhcomm.so`）——只放 `libhcomm.so`
+   到 `LD_LIBRARY_PATH` 完全没效果（`strings libhcomm.so | grep PROBE` = 0，`libhccl_plf.so` 才有）；
+2. 把打了 `DISABLE_PID_VALIDATION` 的 `libhccl_plf.so` 也放上去后，引擎**起不来**：
+   ```
+   HcclAllreduce ... rtSetIpcMemPid execution failed, reason=driver error:operation no permitted
+   ```
+   原因：hcomm 在 `LocalIpcRmaBufferImpl::Grant()` 里固定调 `hrtIpcSetMemoryPid` 给对端授白名单；
+   导出端一旦关掉 PID 校验，这个 Grant 调用就变成非法（operation not permitted），
+   **把 HCCL 集合通信的初始化一起带崩**。
+
+**结论**：
+- 「完全不用白名单」在 **ACL 原语层**成立（§5.7 的 V8：DISABLE_PID_VALIDATION + 普通 import = PASS），
+  但在 **hcomm/HCCL 这一层不成立**：HCCL 自己的 IPC 依赖白名单（Grant），全局关闭不可行；
+- 要修只能**把范围收窄**：只在 hixl 的一侧传输（`RmaType::IPC_RMA` 的 export，`HcclMemExport`）
+  用 DISABLE_PID_VALIDATION，集合通信保持原样；或者**修 Grant**（确保传输 buffer 的 peer pid
+  被正确授白名单）；
+- 另一个观察：引擎日志里导入报错是 `aclrtIpcMemImportByKey failed. return[107000], name[]`
+  （key 看起来是空），下一步可以用「只在导出/导入处加日志」的窄补丁确认 key 是否真的没填上。
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑

@@ -370,6 +370,9 @@ _1m_v030_hyb:
     #   只保留 ASCEND_AUTO_CONNECT=0 —— 它把 fallback 路径的 segfault 变成干净的 -800（引擎不再被打死）。
     extra_env:
       ASCEND_AUTO_CONNECT: "0"
+      # 2026-10-20：优先加载自编补丁版 libhcomm.so（改 aclrtIpcMemGetExportKey 的 flags 为
+      # DISABLE_PID_VALIDATION）。只加 LD_LIBRARY_PATH，不改系统/镜像里任何文件。
+      LD_LIBRARY_PATH: "/mnt/sfs_turbo/g00832294/probe/out:$LD_LIBRARY_PATH"
     # ---- HIXL 全局资源/协议选择（ASCEND_GLOBAL_RESOURCE_CONFIG，见官方
     #      docs/zh/api/cpp/HIXL-interface.md 的 GlobalResourceConfig 字段表）----
     #   compat：不注入（默认走 HCCS 直连 + IPC import —— 实测跨进程 range 传输会
@@ -673,7 +676,9 @@ mooncake:
   # 实测线索（10-20）：跨进程写对端 device 内存会走 IPC import 并失败（107000 + DisableP2P 17），
   # 钉在自己 segment 上时写入是自写自有（离线探针已验证 PASS）⇒ 先把 preferred_segment 打开验证。
   prefer_alloc_in_same_node: true
-  preferred_segment: true
+  # 2026-10-20 本轮：关掉（true 时 mooncake 走 local_copy 快路径，根本不会走 hcomm 的跨进程 IPC，
+  # 测不到补丁是否生效）；false 让对象按 prefer_alloc_in_same_node 落到别的 rank 的 segment。
+  preferred_segment: false
   # image: vllm-ascend-ha-gwh-test:v2.0   # TODO: mooncake 容器镜像（含 mooncake_master+haproxy+nc），用户填
   # ⚠️ mooncake_master 必须与引擎里的 client 同版本（否则 master 对 mount_segment RPC 回 "invalid rpc arg"，
   #    引擎侧表现为 RuntimeError: Initialize mooncake failed. —— mooncake_backend.py:297）。
