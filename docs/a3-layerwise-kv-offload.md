@@ -303,6 +303,43 @@ driver error:invalid value` 导致 HCCS P2P 建链失败。TP8 与 TP16 表现�
 
 ---
 
+### 5.3 离线探针：把 range put 从 vLLM 里剥出来（已定位到「跨节点」）
+
+脚本：`ansible/repros/mooncake_put_probe.py`（不启 vLLM，wiring 与
+`MooncakeBackend._setup_store()` 完全一致，30 秒一次）。用法：
+
+```bash
+docker cp ansible/repros/mooncake_put_probe.py <ctr>:/root/pd/
+docker exec -e MOONCAKE_CONFIG_PATH=/root/pd/mooncake.json <ctr> \
+  python3 -u /root/pd/mooncake_put_probe.py --device 0 --blocks 2 [--seg-gb 2] [--prefer-local|--prefer-same-node]
+```
+
+判定：`range_put` 的返回值是**写入字节数**，负数才是失败（vllm-ascend 用 `result < 0` 判失败）。
+
+实测矩阵（2026-10-20，d0 空闲卡 dev0）：
+
+| 场景 | 结果 |
+|---|---|
+| 对象在**本进程**的 segment（`--seg-gb 2 --prefer-local`） | ✅ `range_put=[116736,116736]` → `put_session_end=[0,0]` → `is_exist=[1,1]` |
+| 对象在**同机其它进程**的 segment（`--seg-gb 2 --prefer-same-node`，不带 preferred_segment） | ✅ 同上 |
+| 对象在**其它节点**的 segment（默认 `ReplicateConfig()`，落到 p0 的 segment） | ❌ `Transfer failed to: 172.168.4.237:<port>, errmsg: Invalid_Argument(EL0003)` → `rtsIpcMemImportByKey: driver error:invalid value` → `aclrtIpcMemImportByKey return[107000]` → `range_put=[-800,-800]`，且默认 env 下还会在 fallback/Retry 后 **Segfault** |
+| `ASCEND_ENABLE_USE_FABRIC_MEM=1` 或 `ASCEND_GLOBAL_RESOURCE_CONFIG={"fabric_memory": true}` | ⚠️ 不再崩，但 `store.register_buffer` 返回 **-600**，range_put 仍 -800 ⇒ 该路径在当前 client 上不可用 |
+| `ASCEND_AUTO_CONNECT=0` | ✅ 把 segfault 变成干净的 `-800`（排查/兜底用） |
+
+**结论**：layerwise range/session 协议本身在本机是通的（能 commit、能 `is_exist`）；
+失败点全部出现在 **跨节点 segment 的访问方式**上 —— 它用 `aclrtIpcMemImportByKey`
+（同机跨进程的 IPC 映射）去访问**另一台机器**的 device VA，必然 `Invalid_Argument`；
+叠加 `Dest buffer device_id=N >= endpoint count 1`（对端 segment 只暴露 1 个 endpoint）
+导致先 fallback、再重试、最后段错误。**与 HCCS 物理链路无关**（用户侧 Ascend C demo 已证明链路正常）。
+
+给厂商的三个具体问题：
+1. 跨节点 segment 的传输为什么走 `aclrtIpcMemImportByKey`？是否应改走 RDMA/HCCS 网络通道，
+   或先把数据落到本机再走 IPC？
+2. `endpoint count` 为什么是 1？是否应按 device 扇出（每个 NPU 一个 endpoint），
+   好让 `device_id>0` 的写入不必 fallback？
+3. `ASCEND_ENABLE_USE_FABRIC_MEM=1`（A3 统一地址直传）下 `store.register_buffer` 为什么返回 -600？
+   这条路径是否就是为跨节点直传准备的、需要 master/segment 也以 fabric 模式创建？
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑
