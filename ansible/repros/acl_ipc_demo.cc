@@ -92,6 +92,22 @@ int main(int argc, char** argv) {
                                ? ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION
                                : ACL_RT_IPC_MEM_EXPORT_FLAG_DEFAULT;
     ACK(aclrtIpcMemGetExportKey(local, size, key.data(), key.size(), flags));
+    // 可选：导出端把对端 PID 加白名单（验证 ACL_RT_IPC_MEM_EXPORT_FLAG_DEFAULT 的白名单路径是否可用）
+    const std::string allow_pid_file = Arg(argc, argv, "--allow-pid-file");
+    if (!allow_pid_file.empty()) {
+      int32_t peer_pid = 0;
+      for (int i = 0; i < 100 && peer_pid == 0; ++i) {
+        std::ifstream in(allow_pid_file);
+        if (in) in >> peer_pid;
+        if (peer_pid == 0) usleep(200 * 1000);
+      }
+      if (peer_pid > 0) {
+        aclError prc = aclrtIpcMemSetImportPid(key.data(), &peer_pid, 1);
+        std::printf("[export] SetImportPid(peer=%d) rc=%d\n", peer_pid, static_cast<int>(prc));
+      } else {
+        std::printf("[export] allow-pid-file %s not ready, skip whitelist\n", allow_pid_file.c_str());
+      }
+    }
     std::ofstream out(key_file);
     out << key.data() << "\n";
     out.close();
@@ -109,9 +125,20 @@ int main(int argc, char** argv) {
   }
 
   if (mode == "import") {
-    std::ifstream in(key_file);
+    const std::string announce = Arg(argc, argv, "--announce-pid-file");
+    if (!announce.empty()) {
+      std::ofstream out(announce);
+      out << getpid() << "\n";
+      out.close();
+      std::printf("[import] announced pid=%d to %s\n", static_cast<int>(getpid()), announce.c_str());
+    }
     std::string key;
-    std::getline(in, key);
+    for (int i = 0; i < 150; ++i) {
+      std::ifstream in(key_file);
+      if (in) std::getline(in, key);
+      if (!key.empty()) break;
+      usleep(200 * 1000);
+    }
     if (key.empty()) {
       std::printf("[import] key file empty: %s\n", key_file.c_str());
       return 2;

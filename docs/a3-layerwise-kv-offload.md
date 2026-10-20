@@ -435,6 +435,39 @@ g++ -std=c++17 -O2 acl_ipc_demo.cc \
 3. 引擎里 mooncake 报的是 **107000（参数非法）**而不是 507899，说明它传给 driver 的 key/参数
    与 export 方式不匹配 ⇒ 问题收窄为"**mooncake 用错了 flags / 没用 ACL 的 export-key 机制**"这一条。
 
+### 5.7 根因定位到 hcomm 源码（开源）：`aclrtIpcMemGetExportKey` 的 flags 写死 0
+
+`hcomm` 已 clone 到 `/mnt/sfs_turbo/g00832294/probe/hcomm-src`（gitcode `cann/hcomm`）。
+跨进程导入的实现就在：
+
+```cpp
+// hcomm-src/src/legacy/ascend910/platform/common/adapter/adapter_rts.cc
+// 导出（hrtIpcSetMemoryName，约 1257 行）：
+//   flag 预留字段填 0
+aclrtIpcMemGetExportKey(ptr, ptrMaxLen, name, nameMaxLen, 0UL);   // = ACL_RT_IPC_MEM_EXPORT_FLAG_DEFAULT
+// 导入（hrtIpcOpenMemory，约 1331 行）：
+aclrtIpcMemImportByKey(ptr, name, 0UL);                          // = ACL_RT_IPC_MEM_IMPORT_FLAG_DEFAULT
+```
+
+而 `ansible/repros/acl_ipc_demo.cc` 的实测（同一设备、两个进程）说明：**只要导出端用 DEFAULT flags，
+跨进程导入必失败**：
+
+| 变体 | export flags | 导出端做白名单 | import flags | 结果 |
+|---|---|---|---|---|
+| V1 | DEFAULT | 否（导入端 SetImportPid 自己） | DEFAULT | ❌ 507899 |
+| V6 | DEFAULT | **是**（导出端 `aclrtIpcMemSetImportPid(peer)`，rc=**0**） | DEFAULT | ❌ 507899 |
+| V7 | DEFAULT | 是（同上） | ENABLE_PEER_ACCESS | ❌ 507899 |
+| **V8** | **DISABLE_PID_VALIDATION** | 否 | **DEFAULT** | ✅ `rc=0`，读回校验 PASS |
+
+结论：
+1. 分水岭**只在导出端的 flag**；导入端的 `ENABLE_PEER_ACCESS` 可有可无；
+2. 白名单路径（`aclrtIpcMemSetImportPid`）在 HDK 26.0.rc1 上是坏的：导出端调用返回 0，
+   导入端仍然 507899（DRV_INTERNAL_ERROR）；
+3. hcomm 里那句注释 **"flag 预留字段填 0"** 说明这段代码写在 flag 还是“预留位”的年代；
+   HDK 26.0 下 0 已经变成“开启 PID 校验”，而校验路径本身不可用 ⇒ **前向兼容 bug**，
+   一行改成 `ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION` 即可（hixl 的 ubmem 路径
+   `hixl/src/hixl/cs/ubmem/ubmem_allocator.cc:258` 正是这么写的）。
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑
