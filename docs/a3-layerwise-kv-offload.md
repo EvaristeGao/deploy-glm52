@@ -340,6 +340,40 @@ docker exec -e MOONCAKE_CONFIG_PATH=/root/pd/mooncake.json <ctr> \
 3. `ASCEND_ENABLE_USE_FABRIC_MEM=1`（A3 统一地址直传）下 `store.register_buffer` 为什么返回 -600？
    这条路径是否就是为跨节点直传准备的、需要 master/segment 也以 fabric 模式创建？
 
+### 5.4 突破：`preferred_segment: true` 让 C1 通过（2026-10-20）
+
+**先纠正 5.3 的一个判断**：单机单实例（TP16，全部进程在同一节点）**同样失败** ——
+日志与 4 节点时一模一样（`Dest buffer device_id=1 >= endpoint count 1` → fallback →
+`aclrtIpcMemImportByKey[107000]` → `halDeviceDisableP2P drvRetCode=17`）。所以问题不是"跨节点"，
+而是 **跨进程/跨 device 访问对端 NPU 内存**。离线探针里 `--prefer-local` 能过、`--prefer-same-node`
+能过，是因为对象恰好落在本进程自己的 segment 上；一旦落到别的 rank 进程的 segment 就必败。
+
+**解法（本版本可用）**：在 `mooncake.json` 里打开
+`"preferred_segment": true` —— vllm-ascend 的 `_build_replicate_config()` 会把
+`preferred_segment` 填成 `self.local_seg`，于是**每个 rank 把对象钉在自己的 segment 上**，
+写入变成"自写自有"，不再需要跨进程 IPC。
+
+实测（单节点 TP16 co-located，`layerwise_smoke_single_node.sh`，202752，range_debug=1）：
+
+| 指标 | 默认（preferred_segment=false） | 打开 preferred_segment |
+|---|---|---|
+| `[KVPOOL_RANGE_DEBUG]` save 事件 | 78 层，`results=[-800 ×16]` | 78 层，`results=[180224 ×16]`（正数=写入字节数） |
+| `Range write failed` | 32 次 | **0** |
+| `event:"commit"` | 0 | **1** |
+| master `BatchPutEnd` / `key_count` / `allocated` | 0 / 0 / 0 | **1 / 16 / 195,035,136 B** |
+| 第二次同 prompt 的 `hit check` | `0/16` | **`16/16`** |
+| Segfault | 0（本轮） | 0 |
+
+**当前结论**：
+1. **C1 通过**（写入 + commit + master 有 key），机制本身可用；
+2. 只验证到"**自己写、自己读**"（单实例 `kv_both`，同进程）；P/D 分离（跨进程）仍被堵：
+   D 必须从 P 的 segment 读，而那正是跨进程访问对端 device 内存；
+3. 所以 `preferred_segment: true` 是**验证/兜底**配置（同实例 kv offload 可用），
+   不是 P/D 分离的解法；P/D 分离仍需厂商修 IPC/endpoint 或让 fabric 路径可用。
+
+**待验证**：关掉本地前缀缓存（`ENABLE_PREFIX_CACHING=0`）后再发同一 prompt，
+确认是**从池里 load**（日志出现 `"direction":"load"` 且 results 为正数），而不是本地 prefix cache 兜住。
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑

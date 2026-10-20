@@ -58,7 +58,9 @@
             "device_name": "",
             "master_server_address": "{{ mooncake_etcd_addr }}",
             "global_segment_size": "{{ mooncake.global_segment_size }}",
-            "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }}
+            "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }},
+            "prefer_alloc_in_same_node": {{ mooncake.prefer_alloc_in_same_node | default(true) | to_json }},
+            "preferred_segment": {{ mooncake.preferred_segment | default(false) | to_json }}
           }
 
     - name: 渲染 mooncake.json（kvpool 单主：master 直连 p0 rpc 端口，待实机确认）
@@ -72,5 +74,7 @@
             "device_name": "",
             "master_server_address": "{{ hostvars[groups['proxy'][0]].ip }}:{{ mooncake.ha.rpc_port }}",
             "global_segment_size": "{{ mooncake.global_segment_size }}",
-            "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }}
+            "default_kv_lease_ttl": {{ mooncake.default_kv_lease_ttl }},
+            "prefer_alloc_in_same_node": {{ mooncake.prefer_alloc_in_same_node | default(true) | to_json }},
+            "preferred_segment": {{ mooncake.preferred_segment | default(false) | to_json }}
           }

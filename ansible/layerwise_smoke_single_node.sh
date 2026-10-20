@@ -39,6 +39,9 @@ MODEL=${MODEL:-/mnt/sfs_turbo/models/GLM-5.2-w4a8c8}
 NIC=${NIC:-enp23s0f3}
 PORT=${PORT:-9088}
 TP=${TP:-8}
+# 容器内可见设备：按 TP 推导（TP8 用 0-7，TP16 用 0-15）。单节点 TP8 放不下 GLM-5.2
+# 的权重（实测 KV 只剩 ~2 GiB，64K 都不够），所以单节点验证默认应按 TP16 跑。
+VISIBLE=${VISIBLE:-$(seq -s, 0 $((TP-1)))}  # 例：TP=16 -> 0,1,...,15
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-131072}
 MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-4096}
 GPU_MEM=${GPU_MEM:-0.85}
@@ -46,6 +49,7 @@ GPU_MEM=${GPU_MEM:-0.85}
 MOONCAKE_JSON=${MOONCAKE_JSON:-}
 LOGS_DIR=${LOGS_DIR:-/mnt/sfs_turbo/g00832294/logs}
 RANGE_DEBUG=${RANGE_DEBUG:-0}     # 1 = 打每层 range/commit 的 JSON 审计日志（排查用）
+ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-1}  # 0 = 关本地前缀缓存，逼请求走池（验证 load 路径）
 
 LOCAL_IP=$(ip -4 addr show "$NIC" | grep -oP 'inet \K[0-9.]+' | head -1)
 [ -n "$LOCAL_IP" ] || { echo "无法从 $NIC 取到 IP"; exit 1; }
@@ -62,9 +66,9 @@ echo "== layerwise smoke =="
 echo "  image      : $IMAGE"
 echo "  model      : $MODEL"
 echo "  本机 nic/ip: $NIC / $LOCAL_IP"
-echo "  port       : $PORT   tp: $TP   max-model-len: $MAX_MODEL_LEN"
+echo "  port       : $PORT   tp: $TP   visible: $VISIBLE   max-model-len: $MAX_MODEL_LEN"
 echo "  mooncake   : $MOONCAKE_JSON"
-echo "  range debug: $RANGE_DEBUG"
+echo "  range debug: $RANGE_DEBUG   prefix-caching: $ENABLE_PREFIX_CACHING"
 
 # ---------- 1) 起容器（与 start.yml 的引擎容器保持一致） ----------
 docker rm -f "$NAME" 2>/dev/null || true
@@ -108,7 +112,7 @@ export ACL_OP_INIT_MODE=1
 export ASCEND_A3_ENABLE=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export ASCEND_RT_VISIBLE_DEVICES=$VISIBLE
 export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/usr/local/lib
 export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=$RANGE_DEBUG
 vllm serve $MODEL \
@@ -116,7 +120,7 @@ vllm serve $MODEL \
   --tensor-parallel-size $TP \
   --enable-expert-parallel \
   --enforce-eager \
-  --enable-prefix-caching \
+  $([ "$ENABLE_PREFIX_CACHING" = "1" ] && echo --enable-prefix-caching || echo --no-enable-prefix-caching) \
   --enable-chunked-prefill \
   --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
   --served-model-name glm-52 \

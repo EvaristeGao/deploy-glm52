@@ -644,6 +644,14 @@ mooncake:
   # （`Initialize mooncake failed`），假设证伪 ⇒ 保持 40GB。
   global_segment_size: 40GB
   default_kv_lease_ttl: 11000
+  # 对象分配偏好（对应 mooncake store 的 ReplicateConfig）：
+  # prefer_alloc_in_same_node：优先分配在同节点 client 的 segment；
+  # preferred_segment：true = 每个 client 把对象**钉在自己的 segment** 上
+  #   （vllm-ascend 的 _build_replicate_config 会填 self.local_seg）。
+  # 实测线索（10-20）：跨进程写对端 device 内存会走 IPC import 并失败（107000 + DisableP2P 17），
+  # 钉在自己 segment 上时写入是自写自有（离线探针已验证 PASS）⇒ 先把 preferred_segment 打开验证。
+  prefer_alloc_in_same_node: true
+  preferred_segment: true
   # image: vllm-ascend-ha-gwh-test:v2.0   # TODO: mooncake 容器镜像（含 mooncake_master+haproxy+nc），用户填
   # ⚠️ mooncake_master 必须与引擎里的 client 同版本（否则 master 对 mount_segment RPC 回 "invalid rpc arg"，
   #    引擎侧表现为 RuntimeError: Initialize mooncake failed. —— mooncake_backend.py:297）。
