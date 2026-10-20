@@ -48,6 +48,10 @@ def main() -> int:
     ap.add_argument("--blocks", type=int, default=4, help="how many keys (blocks) per put")
     ap.add_argument("--block-bytes", type=int, default=116736, help="per-block object size (production: 116736)")
     ap.add_argument("--key-prefix", default="probe")
+    ap.add_argument("--read-back", action="store_true",
+                    help="commit 之后再用另一个 buffer 读回（验证 range read 路径）")
+    ap.add_argument("--init-hccl", action="store_true",
+                    help="先初始化一个 world_size=1 的 HCCL 进程组，用来验证 HCCL 与 mooncake 的共存问题")
     ap.add_argument("--prefer-local", action="store_true",
                     help="让对象优先分配在本进程的 segment（验证本地写 vs 跨进程/跨节点写）")
     ap.add_argument("--prefer-same-node", action="store_true",
@@ -70,6 +74,12 @@ def main() -> int:
     from mooncake.store import MooncakeDistributedStore, ReplicateConfig
 
     torch.npu.set_device(args.device)
+    if args.init_hccl:
+        import torch.distributed as dist
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", "29591")
+        dist.init_process_group("hccl", rank=0, world_size=1)
+        print("[probe] HCCL process group initialized (world_size=1)")
 
     use_fabric = os.environ.get("ASCEND_ENABLE_USE_FABRIC_MEM") == "1"
     use_indep = bool(os.environ.get("ASCEND_GLOBAL_RESOURCE_CONFIG")) and not use_fabric
@@ -158,6 +168,25 @@ def main() -> int:
         exist = store.batch_is_exist(keys)
         print(f"[probe] batch_is_exist -> {exist}")
         ok = len(end) == n and all(r == 0 for r in end) and all(e == 1 for e in exist)
+        if ok and args.read_back:
+            # 用另一块新 buffer 读回，验证 batch_get_into_multi_buffer_ranges
+            buf2 = torch.zeros(args.block_bytes, dtype=torch.int8, device=f"npu:{args.device}")
+            ptr2 = buf2.data_ptr()
+            if wiring == "fabric-indep":
+                store.register_buffer(ptr2, args.block_bytes)
+            else:
+                global_te.register_buffer([ptr2], [args.block_bytes])
+            gstart = store.batch_get_session_start(keys)
+            print(f"[probe] get_session_start -> {gstart}")
+            try:
+                gres = store.batch_get_into_multi_buffer_ranges(
+                    keys, [[ptr2]] * n, [[args.block_bytes]] * n, [[0]] * n
+                )
+                print(f"[probe] range_get results={gres}")
+                ok = ok and len(gres) == n and all(r >= 0 for r in gres)
+            except Exception as exc:
+                print(f"[probe] range_get raised: {type(exc).__name__}: {exc}")
+                ok = False
         if ok:
             try:
                 store.remove(keys)

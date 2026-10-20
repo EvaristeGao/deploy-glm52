@@ -50,6 +50,7 @@ MOONCAKE_JSON=${MOONCAKE_JSON:-}
 LOGS_DIR=${LOGS_DIR:-/mnt/sfs_turbo/g00832294/logs}
 RANGE_DEBUG=${RANGE_DEBUG:-0}     # 1 = 打每层 range/commit 的 JSON 审计日志（排查用）
 ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-1}  # 0 = 关本地前缀缓存，逼请求走池（验证 load 路径）
+PREFETCH_LAYERS=${PREFETCH_LAYERS:-1}              # layerwise_prefetch_layers；0 = 同步 load（排查读路径用）
 
 LOCAL_IP=$(ip -4 addr show "$NIC" | grep -oP 'inet \K[0-9.]+' | head -1)
 [ -n "$LOCAL_IP" ] || { echo "无法从 $NIC 取到 IP"; exit 1; }
@@ -68,7 +69,7 @@ echo "  model      : $MODEL"
 echo "  本机 nic/ip: $NIC / $LOCAL_IP"
 echo "  port       : $PORT   tp: $TP   visible: $VISIBLE   max-model-len: $MAX_MODEL_LEN"
 echo "  mooncake   : $MOONCAKE_JSON"
-echo "  range debug: $RANGE_DEBUG   prefix-caching: $ENABLE_PREFIX_CACHING"
+echo "  range debug: $RANGE_DEBUG   prefix-caching: $ENABLE_PREFIX_CACHING   prefetch_layers: $PREFETCH_LAYERS"
 
 # ---------- 1) 起容器（与 start.yml 的引擎容器保持一致） ----------
 docker rm -f "$NAME" 2>/dev/null || true
@@ -134,7 +135,7 @@ vllm serve $MODEL \
     \"kv_connector_extra_config\": {
       \"backend\": \"mooncake\",
       \"use_layerwise\": true,
-      \"layerwise_prefetch_layers\": 1,
+      \"layerwise_prefetch_layers\": $PREFETCH_LAYERS,
       \"layerwise_max_transfer_blocks\": 64,
       \"layerwise_max_transfer_bytes\": 16777216
     }
