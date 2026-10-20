@@ -402,6 +402,39 @@ docker exec -e MOONCAKE_CONFIG_PATH=/root/pd/mooncake.json <ctr> \
 3. RoCE/ubmem 两轮都在传输失败后踩到 `transfer_executor_base.cpp:699` 的 **segfault**（引擎被打死）——
    这条必须单独报给厂商，否则任何一次网络抖动都会崩引擎。
 
+### 5.6 最小复现：ACL 跨进程 IPC 显存导入（60 行 C++）
+
+源码/产物放在 `/mnt/sfs_turbo/g00832294/probe/`（`acl_ipc_demo.cc` + 编译好的 `acl_ipc_demo` + `README.md`），
+仓库里也有同一份：`ansible/repros/acl_ipc_demo.cc`。
+
+编译（容器内，CANN 9.1.0 自带 adxl/hixl 头与 `libllm_datadist.so`，只依赖 ACL，不碰 HIXL/mooncake/vLLM）：
+
+```bash
+g++ -std=c++17 -O2 acl_ipc_demo.cc \
+    -I/usr/local/Ascend/cann-9.1.0/aarch64-linux/include \
+    -L/usr/local/Ascend/cann-9.1.0/aarch64-linux/lib64 -lascendcl -o acl_ipc_demo
+```
+
+实测（2026-10-20，p0 容器内，同一设备、两个进程）：
+
+| 变体 | export flags | import | 结果 |
+|---|---|---|---|
+| V1 | DEFAULT（PID 校验） | DEFAULT + `aclrtIpcMemSetImportPid(self)` | ❌ `507899`（连 SetImportPid 都失败） |
+| V4 | DEFAULT | ENABLE_PEER_ACCESS | ❌ `507899` |
+| V5 | DEFAULT | DEFAULT | ❌ `507899` |
+| **V2** | **DISABLE_PID_VALIDATION** | ENABLE_PEER_ACCESS | ✅ `rc=0`，读回 `0xab` 校验通过 |
+| **V3** | **DISABLE_PID_VALIDATION**（export dev0 → import dev1，**跨 device**） | ENABLE_PEER_ACCESS | ✅ `rc=0`，PASS |
+
+错误码含义：`507899 = ACL_ERROR_RT_DRV_INTERNAL_ERROR`、`107000 = ACL_ERROR_RT_PARAM_INVALID`。
+
+**结论（可直接给厂商）**：
+1. 跨进程 / 跨 device 的 NPU 显存 IPC 导入在本机**完全可用**，前提是导出端用
+   `ACL_RT_IPC_MEM_EXPORT_FLAG_DISABLE_PID_VALIDATION`；
+2. **默认的 PID 校验路径本身是坏的**（`aclrtIpcMemSetImportPid` 直接 507899 driver internal error），
+   任何走默认 flags 的跨进程导入都必然失败；
+3. 引擎里 mooncake 报的是 **107000（参数非法）**而不是 507899，说明它传给 driver 的 key/参数
+   与 export 方式不匹配 ⇒ 问题收窄为"**mooncake 用错了 flags / 没用 ACL 的 export-key 机制**"这一条。
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑
