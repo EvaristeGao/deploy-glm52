@@ -6,3 +6,6 @@ __pycache__/
 uv.lock
 .claude/settings.local.json*
 tmp.tar.gz
+
+# ansible 本地临时目录（ANSIBLE_LOCAL_TEMP）
+ansible/.ansible-tmp/

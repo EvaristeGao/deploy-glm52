@@ -1181,10 +1181,12 @@ def test_extra_env_rendered_only_when_configured():
         plain = _copy.deepcopy(_gv(GV_FILE_A3, "1m-v030-lw"))
         plain["pd_cluster"].pop("extra_env", None)
         assert "export PROBE_ONLY_ENV=1" not in _render(role, cluster_type="a3", gv=plain).splitlines()
-    # 当前启用的 hyb 档**不再**配 extra_env（两轮 env 规避都失败，见 group_vars 记录）
+    # 当前启用的 hyb 档只留 ASCEND_AUTO_CONNECT=0（把 fallback 的 segfault 变成干净 -800）；
+    # fabric-mem 实验已证伪（store.setup 失败），不再出现在活跃配置里。
     for role in ("prefill", "decode"):
-        gv = _gv(GV_FILE_A3, "1m-v030-hyb")
-        assert "extra_env" not in gv["pd_cluster"]
+        lines = _render_a3(role, "1m-v030-hyb").splitlines()
+        assert "export ASCEND_AUTO_CONNECT=0" in lines
+        assert not any("ASCEND_ENABLE_USE_FABRIC_MEM" in ln for ln in lines)
 
 
 # ---- TP8 诊断档：1m-v030-hyb-tp8（定位 range 写入失败的 TP 对照） ----

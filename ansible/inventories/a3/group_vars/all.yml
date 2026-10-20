@@ -25,7 +25,7 @@ ansible_python_interpreter: /usr/bin/python3
 # 参考：https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/GLM5.2.html
 #       https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html
 # =============================================================================
-deploy_config: 1m-v030
+deploy_config: 1m-v030-hyb
 
 cluster_type: a3
 image: glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13   # layerwise 需要带 PR #2881 range/session 接口的 mooncake client
@@ -363,9 +363,13 @@ _1m_v030_hyb:
     #     `Dest buffer device_id=8 >= endpoint count 1` → `Retry transfer` 后 **Segfault**，
     #     engine 当场死 ⇒ 同样不可用（且比默认 env 更糟：进程崩，不是优雅失败）。
     #   ⇒ 两轮都回退，不再加 extra_env；要复现/继续试就临时往下面这块里加键。
-    # extra_env:
-    #   MC_STORE_MEMCPY: "1"
-    #   ASCEND_A3_ENABLE: "1"
+    #   第三轮（10-20，离线探针定位后）：跨节点 segment 走的是 aclrtIpcMemImportByKey（同机 IPC），
+    #   必然 107000；A3 官方的「统一地址直传」开关是 ASCEND_ENABLE_USE_FABRIC_MEM（ubshmem），
+    #   单独用 store 探针时该模式下 store.register_buffer 返回 -600，所以这里试整集群都打开它。
+    #   第四轮（10-20）：ASCEND_ENABLE_USE_FABRIC_MEM=1 直接起不来（store.setup 失败，见 §5.3/§5.4），
+    #   只保留 ASCEND_AUTO_CONNECT=0 —— 它把 fallback 路径的 segfault 变成干净的 -800（引擎不再被打死）。
+    extra_env:
+      ASCEND_AUTO_CONNECT: "0"
     layerwise:
       enabled: true
       prefetch_layers: 2               # 文档 §Configuration 原值
@@ -634,6 +638,10 @@ mooncake:
   enabled: true              # kvpool(Ascend Store KV 池)开关；false=直连 MooncakeConnectorV1（无池/无 master/无 etcd/haproxy）
   port: 50088                # （当前无任何 playbook/模板引用，保留待用）
   evict: 0.9
+  # 每个 client 贡献的 host segment（对象就落在这些 segment 里）。
+  # 2026-10-20 实验记录：曾试过置 0 配合 ASCEND_ENABLE_USE_FABRIC_MEM=1（假设 fabric 直传不需要 segment），
+  # 结果 client 打出 `Global segment size is 0, skip mounting segment` 后 store.setup 仍然失败
+  # （`Initialize mooncake failed`），假设证伪 ⇒ 保持 40GB。
   global_segment_size: 40GB
   default_kv_lease_ttl: 11000
   # image: vllm-ascend-ha-gwh-test:v2.0   # TODO: mooncake 容器镜像（含 mooncake_master+haproxy+nc），用户填
