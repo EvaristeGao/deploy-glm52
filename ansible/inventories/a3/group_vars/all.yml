@@ -416,6 +416,10 @@ _1m_v030_hyb:
     layerwise:
       enabled: true
       prefetch_layers: 2               # 文档 §Configuration 原值
+      # 2026-10-21 已验证：mooncake 后端不 opt-in reuse，传 num_shared_buffers 被静默忽略
+      #   （设 8 后 P 仍 33.12 GiB / 641,408 tokens、D 仍 36.05 GiB / 697,984 tokens，与基线一致）。
+      #   要 reuse 必须换 memcache(GVA) 后端（其 extract_layout_config 会在 use_layerwise=true 时返回 extra_config）。
+      # num_shared_buffers: 8
       max_transfer_blocks: 64
       max_transfer_bytes: 16777216
     prefill:

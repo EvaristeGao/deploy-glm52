@@ -570,6 +570,46 @@ warm 也只有 1.3x）。怀疑原因：chunked prefill（P 的 `max_num_batched
 - `layerwise_prefetch_layers` 2 → 4（长 prompt 预取更深）；
 - P 的 `max_num_batched_tokens` 4096 → 8192/16384（减少 chunk 数）。
 
+### 5.11 关于 reuse：机制存在，但 mooncake 后端不 opt-in（已实测）
+
+**代码层**（我们镜像 0.30.0rc1）：
+
+```python
+# backend/mooncake_layerwise.py:27,77-80
+LAYERWISE_DATA_PLANE = "block_key"
+def extract_layout_config(extra_config):
+    """Block-key transfer does not opt into GVA-backed physical reuse."""
+    del extra_config
+    return None                       # ← 永远不 opt-in
+
+# backend/memcache_backend.py:83,104-114
+LAYERWISE_DATA_PLANE = "gva"
+def extract_layout_config(extra_config):
+    if extra_config.get("use_layerwise", False):
+        return extra_config          # ← memcache/GVA 才 opt-in
+    return None
+```
+
+通用 reuse 机制（`build_layerwise_reuse_layout`、`layerwise_num_shared_buffers`、
+`layerwise_independent_layers`、`has_layer_reuse`）在 `layerwise_cache_layout.py` 里，通过后端注册表
+`get_layerwise_reuse_config()` 决定是否启用；**是否 opt-in 由后端协议决定**。
+
+**实机对照**（2026-10-21，hyb 档加 `layerwise_num_shared_buffers: 8` 后重启）：
+
+| | 基线（不传） | 传 `num_shared_buffers: 8` |
+|---|---|---|
+| P `Available KV cache memory` | 33.12 GiB | **33.12 GiB**（一致） |
+| P `NPU KV cache size` | 641,408 tokens | **641,408 tokens**（一致） |
+| D `Available KV cache memory` | 36.05 GiB | **36.04 GiB**（噪声级） |
+| D `NPU KV cache size` | 697,984 tokens | **697,984 tokens**（一致） |
+| 日志告警 | — | 无任何 shared_buffers 相关告警（**静默忽略**） |
+
+**结论**：
+1. mooncake/block_key 这条平面上 `layerwise_num_shared_buffers` / `layerwise_independent_layers`
+   **传了也没用**（不会省 HBM，也不会报错）；
+2. 想要 cross-layer buffer reuse，必须换 **memcache(GVA) 后端**（另一条完整验证路线，需要 MemFabric/Memcache 服务）；
+3. 与官方 hybrid 文档 §Scope「cross-layer cache-buffer reuse are not part of this hybrid implementation」一致。
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑

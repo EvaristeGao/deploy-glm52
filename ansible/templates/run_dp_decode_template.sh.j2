@@ -218,7 +218,9 @@ vllm serve {{ model_path }} \
         "consumer_is_to_load": true,
         "layerwise_prefetch_layers": {{ lw.prefetch_layers | default(2) }},
         "layerwise_max_transfer_blocks": {{ lw.max_transfer_blocks | default(64) }},
-        "layerwise_max_transfer_bytes": {{ lw.max_transfer_bytes | default(16777216) }}
+        "layerwise_max_transfer_bytes": {{ lw.max_transfer_bytes | default(16777216) }}{% if lw.num_shared_buffers is defined %},
+        "layerwise_num_shared_buffers": {{ lw.num_shared_buffers }}{% endif %}{% if lw.independent_layers is defined %},
+        "layerwise_independent_layers": {{ lw.independent_layers | to_json }}{% endif %}
     }
     }' \
 {% elif pd_cluster.decode_kv_offload is defined and (pd_cluster.decode_kv_offload.sfa_remote_d2h | default(false)) %}
@@ -261,7 +263,9 @@ vllm serve {{ model_path }} \
                     "use_layerwise": true,
                     "layerwise_prefetch_layers": {{ pd_cluster.layerwise.prefetch_layers | default(2) }},
                     "layerwise_max_transfer_blocks": {{ pd_cluster.layerwise.max_transfer_blocks | default(64) }},
-                    "layerwise_max_transfer_bytes": {{ pd_cluster.layerwise.max_transfer_bytes | default(16777216) }}{% endif %}
+                    "layerwise_max_transfer_bytes": {{ pd_cluster.layerwise.max_transfer_bytes | default(16777216) }}{% if pd_cluster.layerwise.num_shared_buffers is defined %},
+                    "layerwise_num_shared_buffers": {{ pd_cluster.layerwise.num_shared_buffers }}{% endif %}{% if pd_cluster.layerwise.independent_layers is defined %},
+                    "layerwise_independent_layers": {{ pd_cluster.layerwise.independent_layers | to_json }}{% endif %}{% endif %}
                 }
             }
         ]
