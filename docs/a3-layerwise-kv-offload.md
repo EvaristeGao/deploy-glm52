@@ -503,6 +503,41 @@ cd hcomm-src && export PATH=/usr/bin:$PATH && bash build.sh --noclean
 - 另一个观察：引擎日志里导入报错是 `aclrtIpcMemImportByKey failed. return[107000], name[]`
   （key 看起来是空），下一步可以用「只在导出/导入处加日志」的窄补丁确认 key 是否真的没填上。
 
+### 5.9 突破：打开 RoCE（`HCCL_INTRA_ROCE_ENABLE=1` + `HCCL_INTRA_PCIE_ENABLE=0` + `hixl_preset: roce`）后端到端跑通
+
+2026-10-21 实机（4 节点 2P+2D，GLM-5.2，`1m-v030-hyb`，200K）：
+
+```
+extra_env:
+  HCCL_INTRA_ROCE_ENABLE: "1"      # A3 模板从来没设过（只在 a2 分支里有）
+  HCCL_INTRA_PCIE_ENABLE: "0"
+  ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'   # 对齐 A5 脚本；修掉 endpoint 只有 1 个的问题
+  HCCL_BUFFSIZE: "1024"
+  ACL_OP_INIT_MODE: "1"
+  PYTHONHASHSEED: "0"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+hixl_preset: roce                 # protocol_desc = roce:device
+```
+
+TE 初始化变成 `roce_mode=true`（之前是 `false`），效果：
+
+| 指标 | RoCE 之前 | RoCE 之后 |
+|---|---|---|
+| 2K 冷请求 | HTTP 500 | **OK（31.1s，含首发编译）** |
+| 2K 热请求（同 prompt） | HTTP 500 | **OK（1.6s）** |
+| 8K（跨 chunked prefill） | HTTP 500 | **OK（4.4s，prompt_tokens=8075）** |
+| `Range write/read failed` | 16 / 数百 | **0 / 0** |
+| `aclrtIpcMemImportByKey 107000` | 有 | **0** |
+| `Segfault` / worker 死 | 有 | **0** |
+| master `key_count` | 0（全 revoke） | **79**（16 + 63），`allocated=560 MB` |
+| D 侧 `External prefix cache hit rate` | 0.0% | **97.7%** |
+| 剩余噪音 | — | 只有 `Dest buffer device_id=N >= endpoint count 1, falling back to ...` 警告（无害） |
+
+结论：**A3 上这个特性是能跑的，前提是走 RoCE**。之前所有的 `-800` / segfault / 空 key，本质是默认路径
+（`roce_mode=false, use_fabric_mem=false`）退到了 ACL IPC（`aclrtIpcMemImportByKey`），而那条路在 A3 +
+HDK 26.0 上不可用。
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑

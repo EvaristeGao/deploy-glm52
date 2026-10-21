@@ -60,6 +60,7 @@
         {% if mooncake.enabled and mooncake.ha.enable_ha %}-v {{ etcd.certs_dir }}:/etc/pki/etcd/certs {% endif %}\
         {% for m in model.mounts %}-v {{ m }} {% endfor %}\
         {% if model.dir_host %}-v {{ model.dir_host }}:/root/.cache {% endif %}\
+        {% if pd_cluster.debug_mounts is defined %}{% for _h, _c in pd_cluster.debug_mounts.items() %}-v {{ _h }}:{{ _c }}:ro {% endfor %}{% endif %}\
         {{ image }} bash
       tags: container
 

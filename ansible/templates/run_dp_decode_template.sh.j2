@@ -75,7 +75,7 @@ export PYTHONHASHSEED=0
    ASCEND_A3_ENABLE=1（v0.23 env 集里有、v0.30 集里没有）。 #}
 {% if pd_cluster.extra_env is defined %}
 {% for _k, _v in (pd_cluster.extra_env | default({})).items() %}
-export {{ _k }}={{ _v }}
+export {{ _k }}='{{ _v }}'
 {% endfor %}
 {% endif %}
 {# ---- HIXL 协议/全局资源预设（pd_cluster.hixl_preset -> hixl_presets 里的 k/v）。

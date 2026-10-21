@@ -1177,17 +1177,20 @@ def test_extra_env_rendered_only_when_configured():
     for role in ("prefill", "decode"):
         gv = _copy.deepcopy(_gv(GV_FILE_A3, "1m-v030-lw"))
         gv["pd_cluster"]["extra_env"] = {"PROBE_ONLY_ENV": "1"}
-        assert "export PROBE_ONLY_ENV=1" in _render(role, cluster_type="a3", gv=gv).splitlines()
+        assert "export PROBE_ONLY_ENV='1'" in _render(role, cluster_type="a3", gv=gv).splitlines()
         plain = _copy.deepcopy(_gv(GV_FILE_A3, "1m-v030-lw"))
         plain["pd_cluster"].pop("extra_env", None)
-        assert "export PROBE_ONLY_ENV=1" not in _render(role, cluster_type="a3", gv=plain).splitlines()
+        assert not any("PROBE_ONLY_ENV" in ln for ln in _render(role, cluster_type="a3", gv=plain).splitlines())
     # hyb 档的 hixl_preset 机制：compat 不注入 ASCEND_GLOBAL_RESOURCE_CONFIG；
     # roce/ubmem/fabric 各自注入对应 JSON（fabric 还要 ASCEND_ENABLE_USE_FABRIC_MEM=1）。
     import copy as _copy2
 
     for role in ("prefill", "decode"):
         base = _copy2.deepcopy(_gv(GV_FILE_A3, "1m-v030-hyb"))
-        assert "export ASCEND_AUTO_CONNECT=0" in _render(role, cluster_type="a3", gv=base).splitlines()
+        # 干净 hyb：不带任何 extra_env（实验项已清理），因此不应出现 AUTO_CONNECT / LD_LIBRARY_PATH
+        lines0 = _render(role, cluster_type="a3", gv=base).splitlines()
+        assert not any("ASCEND_AUTO_CONNECT" in ln for ln in lines0)
+        assert not any("probe/out" in ln for ln in lines0)
 
         base["pd_cluster"]["hixl_preset"] = "compat"
         lines = _render(role, cluster_type="a3", gv=base).splitlines()
