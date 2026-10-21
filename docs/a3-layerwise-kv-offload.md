@@ -610,6 +610,30 @@ def extract_layout_config(extra_config):
 2. 想要 cross-layer buffer reuse，必须换 **memcache(GVA) 后端**（另一条完整验证路线，需要 MemFabric/Memcache 服务）；
 3. 与官方 hybrid 文档 §Scope「cross-layer cache-buffer reuse are not part of this hybrid implementation」一致。
 
+### 5.12 A/B 对照：layerwise vs 普通 mooncake 池化（`use_layerwise: false`）
+
+2026-10-21 实机，环境完全一致（4 节点 2P+2D、GLM-5.2、200K、RoCE env、`preferred_segment: true`、
+`range_debug: false`），只切 `use_layerwise`：
+
+| 长度 | A: layerwise cold | A warm | B: 普通池化 cold | B warm | 说明 |
+|---|---|---|---|---|---|
+| 2K | 1.9s（1105 tok/s） | 1.45~1.77s | 2.24s（935 tok/s） | 1.83s | 差异在噪声内 |
+| 32K | 14.7s（2189） | 4.2s（7612） | 14.1s（2285） | 4.1s（7866） | 基本持平 |
+| 64K | 30.6s（2109） | 7.8s（8253） | 28.6s（2256） | **6.46s（9972）** | B 略优 |
+| **128K** | **246.9s（522）** | **183.5s（702）** | **60.5s（2131）** | **11.1s（11644）** | **A 慢 4x（cold）/ 16x（warm）** |
+
+对象数（master `key_count` 增量）：A 2K=16、8K=63；B 2K=16、32K=251、64K=503、128K=1006 ——
+**两者都≈ block 数**，文档 §2 说的「B×L×R → B×R」在这版实现的 master 计数上没有体现（需要再看 key 命名：
+这版的非 layerwise 路径看起来也是 block-major key）。
+
+**结论**：
+1. **短/中 prompt（≤64K）：layerwise 没有净收益**（差异在噪声内，2K cold 略好、64K warm 略差）；
+2. **长 prompt（128K）：layerwise 明显更差**（cold 4x、warm 16x），原因很可能是
+   chunked prefill（4096 切 32 chunk）× 79 层 range 调用（每层一次，还受 `max_transfer_blocks=64` 拆批）
+   —— 调用次数比整块 put/get 多两三个数量级；
+3. 所以**当前配置相比普通 mooncake 池化没有可测量的收益**；只有在把
+   `max_num_batched_tokens` / `max_transfer_blocks` / `prefetch_layers` 调到合适值后才可能翻盘（待验证）。
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑

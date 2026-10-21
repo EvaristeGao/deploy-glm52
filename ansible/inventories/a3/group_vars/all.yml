@@ -414,7 +414,8 @@ _1m_v030_hyb:
         # 先给 1（=1 TB 虚拟池）；task_stream_num 是单任务流数量。
         ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config":{"protocol_desc":"ubmem"},"fabric_memory":{"max_capacity":1,"task_stream_num":4}}'
     layerwise:
-      enabled: true
+      # 2026-10-21 A/B：先跑 B 组（普通池化 use_layerwise=false），对照 A 组（layerwise=true）的延迟/对象数。
+      enabled: false
       prefetch_layers: 2               # 文档 §Configuration 原值
       # 2026-10-21 已验证：mooncake 后端不 opt-in reuse，传 num_shared_buffers 被静默忽略
       #   （设 8 后 P 仍 33.12 GiB / 641,408 tokens、D 仍 36.05 GiB / 697,984 tokens，与基线一致）。

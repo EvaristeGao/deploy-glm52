@@ -1089,12 +1089,17 @@ def test_a3_v030_poff_not_leaked_into_other_configs():
 def test_a3_v030_hyb_matches_doc_configuration():
     """P/D 两侧都渲染文档 §Configuration 的那份 kv-transfer-config（单 AscendStoreConnector +
     use_layerwise + 三个旋钮）；kv_role 按 P/D 分离拆成 producer/consumer。"""
+    import copy as _c4
+
     lw = _gv(GV_FILE_A3, "1m-v030-hyb")["pd_cluster"]["layerwise"]
+    # 文档配置要求 layerwise 打开；若活跃档为 A/B 对照临时关了，用合成 gv 强制打开后再断言
+    gv_on = _c4.deepcopy(_gv(GV_FILE_A3, "1m-v030-hyb"))
+    gv_on["pd_cluster"]["layerwise"]["enabled"] = True
     # 文档的单实例配置是 kv_both；本项目是 P/D 分离 ⇒ 按角色拆成 producer / consumer
     expected_role = {"prefill": "kv_producer", "decode": "kv_consumer"}
     for role in ("prefill", "decode"):
-        out = _render_a3(role, "1m-v030-hyb")
-        d = _kv_transfer_json("1m-v030-hyb", role)
+        out = _render(role, cluster_type="a3", gv=_c4.deepcopy(gv_on))
+        d = json.loads(out.split("--kv-transfer-config")[1].split("'")[1])
         assert d["kv_connector"] == "AscendStoreConnector"
         assert d["kv_role"] == expected_role[role]
         assert d["kv_load_failure_policy"] == "recompute"   # 项目既有约定键
