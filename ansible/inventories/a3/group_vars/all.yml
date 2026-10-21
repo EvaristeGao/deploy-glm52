@@ -350,7 +350,7 @@ _1m_v030_hyb:
     #     {"event":"commit","layer_id":N,"key_count":K,"results":[...]}
     #   results<0 ⇒ 该 key 的 range put/get 失败（save 侧随后 revoke）；没有 commit 行 ⇒ 会话没提交。
     #   跑性能/基准时必须关回 false（每层一行 JSON 很吵）。
-    range_debug: true
+    range_debug: false               # 性能轮关闭（每层一行 JSON 开销不小）
     # ★ 排查记录（2026-10-19 实机两轮，结论：env 规避不了，属传输层/驱动问题，已提给开发）：
     #   · 默认 env：range put 走 NPU→NPU HCCS P2P，通道建不起来
     #     （halDeviceDisableP2P drvRetCode=17 / aclrtIpcMemImportByKey 107000）→
@@ -371,9 +371,6 @@ _1m_v030_hyb:
     # ★ 临时探针（只读挂载，不改镜像）：把打了 [KVPOOL_PROBE]/keys 日志的两个 python 文件
     #   覆盖进容器，用来判断 load 失败是"master 没按 preferred_segment 分配"还是"跨 DP 撞 key"。
     #   验证完把这段和 probe/patch 里的文件一起删掉。
-    debug_mounts:
-      /mnt/sfs_turbo/g00832294/probe/patch/kv_transfer.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/kv_transfer.py
-      /mnt/sfs_turbo/g00832294/probe/patch/mooncake_backend.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/backend/mooncake_backend.py
     # ★ 2026-10-20 对齐 A5 已验证脚本（/mnt/sfs_turbo/g00832294/a5test/start.sh）的池化 env：
     #   ASCEND_LOCAL_COMM_RES 会触发 hixl 的 LocalCommResGenerator 按 (ip, device_id, device_port)
     #   生成每个 device 的 endpoint/rank table —— 正好对应我们一直看到的

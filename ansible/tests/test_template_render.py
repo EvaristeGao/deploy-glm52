@@ -1151,15 +1151,24 @@ def test_a3_v030_hyb_not_leaked_into_other_configs():
 
 def test_range_debug_env_gated_by_config():
     """range_debug=true 才渲染 export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1；其它档不得出现。"""
+    import copy as _c3
+
     for role in ("prefill", "decode"):
-        lines = _render_a3(role, "1m-v030-hyb").splitlines()
-        assert "export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1" in lines
-        # 默认关：不带该键的档不能渲染
+        # 机制测试（不依赖当前活跃档的取值）：true 渲染、false 不渲染
+        on = _c3.deepcopy(_gv(GV_FILE_A3, "1m-v030-hyb"))
+        on["pd_cluster"]["range_debug"] = True
+        assert "export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1" in _render(role, cluster_type="a3", gv=on).splitlines()
+        off = _c3.deepcopy(_gv(GV_FILE_A3, "1m-v030-hyb"))
+        off["pd_cluster"]["range_debug"] = False
+        assert not any("KVPOOL_RANGE_DEBUG" in ln for ln in _render(role, cluster_type="a3", gv=off).splitlines())
+        # 不带该键的档不能渲染
         for cfg in ("200k", "1m", "1m-v030", "1m-v030-lw", "1m-v030-poff"):
             assert "export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1" not in _render_a3(role, cfg).splitlines(), (
                 f"{cfg}/{role} 不应渲染 range debug")
     # 位置在 PYTHONHASHSEED 之后、MOONCAKE_CONFIG_PATH 之前（纯顺序回归）
-    lines = _render_a3("prefill", "1m-v030-hyb").splitlines()
+    _on = _c3.deepcopy(_gv(GV_FILE_A3, "1m-v030-hyb"))
+    _on["pd_cluster"]["range_debug"] = True
+    lines = _render("prefill", cluster_type="a3", gv=_on).splitlines()
     i_ph = lines.index("export PYTHONHASHSEED=0")
     i_dbg = lines.index("export VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1")
     i_mc = next(i for i, ln in enumerate(lines) if ln.startswith("export MOONCAKE_CONFIG_PATH"))

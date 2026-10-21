@@ -538,6 +538,38 @@ TE 初始化变成 `roce_mode=true`（之前是 `false`），效果：
 （`roce_mode=false, use_fabric_mem=false`）退到了 ACL IPC（`aclrtIpcMemImportByKey`），而那条路在 A3 +
 HDK 26.0 上不可用。
 
+### 5.10 RoCE 打通后的功能 / 性能验证（2026-10-21）
+
+**功能（range_debug 开着，4 节点 2P+2D，200K 档）**
+
+| 用例 | 结果 |
+|---|---|
+| 正确性：同 prompt 连发 2 次 | ✅ 两次输出完全一致（`identical_output=True`） |
+| 200K 长上下文 | ✅ OK，`prompt_tokens=197,828`，399.9s（≈495 tok/s），池新增 1545 keys |
+| 并发 4 × 32K | ✅ 4/4 OK，18.8 / 19.0 / 26.1 / 32.0s |
+| 稳定性 10 × 2K（unique） | ✅ 10/10 OK，1.7~2.1s，**全程无新增 Segfault** |
+| master 累计 | 2825 keys / 20.05 GB（put_end=96，无 revoke） |
+
+**性能（range_debug 关闭）**
+
+| 长度 | cold | warm（同 prompt 再发） | 加速 |
+|---|---|---|---|
+| 2K | 1.9s（1105 tok/s） | 1.45~1.77s（1188~1444 tok/s） | 1.1~1.3x |
+| 32K | 14.7s（2189 tok/s） | **4.2s（7612 tok/s）** | **3.5x** |
+| 64K | 30.6s（2109 tok/s） | **7.8s（8253 tok/s）** | **3.9x** |
+| 128K | 246.9s（522 tok/s） | 183.5s（702 tok/s） | 1.3x |
+| 200K | 399.9s（495 tok/s） | — | — |
+
+**观察**：32K/64K 是甜点（3.5~3.9x）；**128K 开始明显退化**（cold 只有 522 tok/s，是 64K 的 1/4；
+warm 也只有 1.3x）。怀疑原因：chunked prefill（P 的 `max_num_batched_tokens=4096`）在 128K 时要切 32 个 chunk，
+每个 chunk 都要逐层 save/load，而 `layerwise_prefetch_layers=2` 遮不住；另外 `layerwise_max_transfer_blocks=64`
+会让 1006 个 block 拆成 16 批/层。
+
+**下一步调优方向**（下次可试）：
+- `layerwise_max_transfer_blocks` 64 → 256（减少 range 调用次数）；
+- `layerwise_prefetch_layers` 2 → 4（长 prompt 预取更深）；
+- P 的 `max_num_batched_tokens` 4096 → 8192/16384（减少 chunk 数）。
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑
