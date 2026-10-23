@@ -651,6 +651,28 @@ def extract_layout_config(extra_config):
   或大 chunk 下 128 blocks/层的 range load 排队）。
 - 结论：layerwise 在 warm（命中复用）这条路上没有救回来；**当前最优仍是普通池化（B 组）**。
 
+### 5.14 关键配置：lease TTL 11s → 300s（文档 §4.4），128K 全面改善
+
+设计文档《Mooncake Layerwise KVPool Put v2》§4.4 / §7 明确：`default_kv_lease_ttl` **必须覆盖分层 onload**，
+多 chunk 依赖每个 chunk `batch_get_start` 续约；租约过期后按 load 失败处理（vLLM fallback 重算）。
+我们之前一直用默认 **11000（11s）**，而 128K warm 需要 180s+ ⇒ 必然过期。
+
+改成 `default_kv_lease_ttl: 300000`（A 组原参数：layerwise、prefetch=2、blocks=64、chunk=4096）实测：
+
+| 长度 | TTL=11s（旧） | **TTL=300s（新）** | 普通池化（TTL=11s） |
+|---|---|---|---|
+| 32K cold / warm | 14.7s / 4.2s | **14.6s / 4.19s**（3.5x） | 14.1s / 4.1s |
+| 64K cold / warm | 30.6s / 7.8s | **30.3s / 7.52s**（4.0x） | 28.6s / 6.5s |
+| **128K cold / warm** | **246.9s / 183.5s** | **71.0s / 26.45s**（2.7x） | 60.5s / 11.1s |
+
+- **128K cold 3.5x、warm 6.9x 改善**，之前「layerwise 在长上下文慢 4x/16x」的结论**主要是租约过期造成的**；
+- 但对比普通池化（60.5s / 11.1s），layerwise 仍略慢（cold 1.17x、warm 2.4x）；
+- 32K/64K 两者已在同一水平（差距 5~15%）。
+
+**结论**：`default_kv_lease_ttl` 是本特性的**必调项**（我们此前漏了）；调大后 layerwise 从「不可用」变为
+「基本可用、略逊于普通池化」。下一步应带上 TTL=300s 重测 A'（prefetch=4/blocks=256/chunk=16384），
+看大 chunk + 长租约能否反超普通池化。
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑

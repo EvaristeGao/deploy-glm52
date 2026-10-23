@@ -414,9 +414,9 @@ _1m_v030_hyb:
         # 先给 1（=1 TB 虚拟池）；task_stream_num 是单任务流数量。
         ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config":{"protocol_desc":"ubmem"},"fabric_memory":{"max_capacity":1,"task_stream_num":4}}'
     layerwise:
-      # 2026-10-23 A' 调参组已实测（prefetch=4 / blocks=256 / P chunk=16384）：
-      #   cold 128K 60.1s（追平普通池化 60.5s），但 warm 128K 反而 194.9s（普通池化 11.1s）⇒ 回退到 B 组。
-      enabled: false
+      # 2026-10-23 A-TTL 组：lease TTL 11000→300000 后，回到 A 组原参数验证 warm 是否恢复
+      #   （A 组此前：128K cold 246.9s / warm 183.5s；普通池化 60.5s / 11.1s）
+      enabled: true
       prefetch_layers: 2               # 文档原值 2
       max_transfer_blocks: 64          # 文档原值 64
       # 2026-10-21 已验证：mooncake 后端不 opt-in reuse，传 num_shared_buffers 被静默忽略
@@ -692,7 +692,8 @@ mooncake:
   # 结果 client 打出 `Global segment size is 0, skip mounting segment` 后 store.setup 仍然失败
   # （`Initialize mooncake failed`），假设证伪 ⇒ 保持 40GB。
   global_segment_size: 40GB
-  default_kv_lease_ttl: 11000
+  # 2026-10-23 文档 §4.4：TTL 须覆盖分层 onload；128K warm 要 180s+，11s 必然过期 ⇒ 调成 5 分钟
+  default_kv_lease_ttl: 300000
   # 对象分配偏好（对应 mooncake store 的 ReplicateConfig）：
   # prefer_alloc_in_same_node：优先分配在同节点 client 的 segment；
   # preferred_segment：true = 每个 client 把对象**钉在自己的 segment** 上
