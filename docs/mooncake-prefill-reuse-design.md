@@ -1,36 +1,43 @@
-# Mooncake 后端 Prefill 侧 KV Buffer 复用 —— 设计文档（store-only P/D）
+# Mooncake 后端 Prefill 侧 KV Buffer 复用 —— 设计文档（D2D P/D）
 
 | 项 | 值 |
 | :--- | :--- |
 | **代码基线** | `~/code/python/vllm-ascend` @ `5f828ad63`（v0.30.0rc1），与生产镜像 `glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13` 同版本 |
 | **目标后端** | `backend=mooncake`，`LAYERWISE_DATA_PLANE = "block_key"`（`backend/mooncake_layerwise.py:27`） |
-| **目标拓扑** | **store-only P/D**：单个 `AscendStoreConnector`，P（`kv_producer`）逐层写 Mooncake 池、D（`kv_consumer` + `consumer_is_to_load: true`）逐层从池读。**无 P2P 直连** |
-| **范围** | 仅 **prefill（P 侧）** 的 HBM 物理 buffer 复用；D 侧零改动 |
-| **相关既有文档** | `prefill_kvoffload_block_key_reuse_design.md`（接线细节）、`prefill_offload_mooncake_codelevel_design.md`（代码级详版，PD 走 MultiConnector+P2P）、`prefill_kvoffload_two_schemes.md`（收益预估） |
+| **PD 交接** | **D2D（P→D 点对点）**，池（AscendStore + Mooncake）只承担跨请求 prefix cache，**不作为** P/D 交接通道 |
+| **目标拓扑** | P：`MultiConnector[PD 逐层连接器(producer), AscendStoreConnector(producer, mooncake, use_layerwise)]`<br>D：`MultiConnector[PD 逐层连接器(consumer), AscendStoreConnector(consumer, consumer_is_to_load)]` |
+| **范围** | 仅 **prefill（P 侧）** 的 HBM 物理 buffer 复用；D 侧 KV 布局零改动 |
+| **相关既有文档** | `prefill_kvoffload_block_key_reuse_design.md`（接线细节）、`prefill_offload_mooncake_codelevel_design.md`（代码级详版）、`prefill_kvoffload_two_schemes.md`（收益预估） |
 
-> 本文与既有文档的关系：**复用机制本身**沿用前两份的结论（不重复推导）；本篇补的是
-> ① prefill-only 的范围裁剪、② **store-only P/D 的传输契约**（既有文档 §7.2 只覆盖 MultiConnector+P2P）、
-> ③ 与本项目实测数据（RoCE、lease TTL、容量/延迟）对齐后的落地参数。
+> 与既有文档的关系：复用机制沿用前两份的结论（不重复推导）。本篇的增量是
+> ① **D2D 为 PD 主路径**（池不参与交接）后的双消费者门控与 waiter 链路；
+> ② 与本项目实测（RoCE、lease TTL、容量/延迟）对齐的落地参数；
+> ③ 把「哪些部分被证实、哪些仍待验证」写清。
 
 ---
 
 ## 0. TL;DR
 
-1. **复用机制在当前代码里已经完整存在**，只是 `mooncake_layerwise.extract_layout_config()` 恒 `return None`
-   （`backend/mooncake_layerwise.py:77-80`），把 block-key 平面挡在门外。真正要写的代码是
-   **「一个显式开关 + 三处门控归属迁移 + 一组防御校验」**，不新增数据面。
-2. **store-only P/D 比 MultiConnector+P2P 简单**：D 读的是池对象而不是 P 的 HBM，因此 P 的 buffer 覆写
-   与 D **解耦**，**不需要** `external_slot_release_waiter`（该 waiter 由 P2P layerwise 连接器提供）。
-   复用只需等「本层 range put 已返回」（同步语义）。
-3. **收益是解除 P 侧并发上限**：P 79 层（78 + 1 MTP）→ B=9 时 10~11 个物理 buffer，KV 逻辑容量放大约
-   **7.2~7.9x**（641,408 → 约 4.6~5.1M tokens，200K 下并发 3.16 → 约 23~25）；但 **D 侧仍是 697,984 tokens
-   （3.44 并发 @200K）**，端到端并发不因本特性提升。
-4. **两个前置条件**（否则功能不可用或静默出错）：
-   - `default_kv_lease_ttl` 必须覆盖整请求 onload 时长（实测 11s → 128K warm 183.5s；300s → 26.45s）；
-   - chunk 边界必须与 `cache_transfer_granularity`（128）对齐（partial block 无法落池，见 §5.2）。
-5. **正确性命门是 partial block**：复用后 HBM 只保留最后 B 层，chunk 尾部不满 128 token 的 KV
-   既落不了池、又会被覆写 → 下一 chunk 读到空洞。第一版用「启动期强校验 chunk 粒度为 128 的倍数」兜住，
-   逐请求对齐/尾部重算作为 Phase 2。
+1. **复用机制在当前代码里已经完整存在**，唯一堵点是 `mooncake_layerwise.extract_layout_config()` 恒 `return None`
+   （`backend/mooncake_layerwise.py:77-80`）。要写的代码是「一个显式开关 + 门控归属迁移 + 防御校验」，
+   不新增数据面。
+2. **PD 交接走 D2D**（走池太慢）：P 每层算完就把 KV 点对点推给 D 的 HBM
+   （`MooncakeLayerwiseConnector`），或由 D 从 P 的 HBM 拉走（`SfaRemoteD2HConnector`）。
+   池只负责**跨请求 prefix cache**：P 仍把每层 range put 进 Mooncake，D 命中时仍从池读前缀。
+3. 于是 P 的共享 buffer 有**两个消费者**：**PD 推送**和**池写入**。槽位覆写前必须两者都完成：
+   - PD 侧：`wait_for_layer_reuse(layer)` → 等发送线程的 `storage_send_done_events[slot]`；
+   - 池侧：`batch_put_from_multi_buffer_ranges` 返回（同步语义，数据已离开 HBM）。
+   ⇒ **R2c（把 slot-release waiter 接到 block-key 平面）从"可选"变成"必需"**。
+4. **收益是解除 P 侧并发上限**：P 79 层（78 + 1 MTP）→ B=9 时 10~11 个物理 buffer，KV 逻辑容量放大约
+   **7.2~7.9x**（641,408 → 约 4.6~5.1M tokens，200K 下并发 3.16 → 约 23~25）；D 仍是 697,984 tokens
+   （3.44 并发 @200K），端到端并发不因本特性提升。
+5. **两个硬前置**：
+   - `default_kv_lease_ttl` ≥ 单请求 onload 时长（实测 11s → 128K warm 183.5s；300s → 26.45s）；
+   - chunk 边界与 `cache_transfer_granularity`(128) 对齐（partial block 无法落池，见 §5.2）。
+6. **两个准入门槛**：partial block（正确性）；连接器选择（兼容性）——官方文档只把
+   `SfaRemoteD2HConnector` 列为"prefill offload + reuse"的支持连接器，`MooncakeLayerwiseConnector`
+   虽在代码里声明 `supports_layerwise_buffer_reuse = True`（`kv_p2p/mooncake_layerwise_connector.py:749`），
+   但属于**未验证组合**（§4.1/§8）。
 
 ---
 
@@ -38,31 +45,31 @@
 
 ### 1.1 目标
 
-- P 侧（`kv_producer`）在 **prefill** 期间把 KV 的物理 HBM buffer 从「每层一份」降为「B 份轮转」，
-  从而在同一张卡上容纳更长的前缀 / 更多并发请求；
-- 复用只改变 **HBM 侧 buffer 管理**，**不改变** pool 对象布局、key 格式、session 语义、D 侧行为。
+- P 侧（`kv_producer`）在 prefill 期间把 KV 的物理 HBM buffer 从「每层一份」降为「B 份轮转」，
+  同卡容纳更长的前缀 / 更多并发请求；
+- 复用只改变 **HBM 侧 buffer 管理**：**不改变** pool 对象布局、block key 格式、session 语义；
+- PD 交接保持 D2D 直传（不经池）：交接落点是 **D 的 HBM**，与 P 的 buffer 覆写相对独立，
+  但 P 的覆写必须等 PD 推送完成（§4.4）。
 
 ### 1.2 非目标（第一版不做）
 
 | 非目标 | 原因 |
 | :--- | :--- |
 | D 侧（decode）复用 | decode 每步都要所有层 KV，复用会退化成「每步从池重载」；decode offload 属另一特性 |
-| DCP/PCP > 1 | `validate_topology`（`mooncake_layerwise.py:177`）硬拒；CP 会让 key 需带 CP 坐标 |
-| P/D TP mismatch | 同上，硬拒 |
-| partial block 落池 | block-key 平面没有 partial key（GVA 平面有），对象必须按完整块内容寻址 |
-| SSD offload / 跨实例长期保留 | 属 store 容量议题，见 §4.6 |
-| MultiConnector + P2P 逐层投递 | 该组合需要 R2c 的 waiter 配合，见 §4.7；第一版不启用 |
+| DCP/PCP > 1 | `validate_topology`（`mooncake_layerwise.py:177`）硬拒；CP 需给 block key 加坐标 |
+| P/D TP mismatch | 同上硬拒；D2D 连接器另有「P TP ≥ D TP 且整除」的约束 |
+| partial block 落池 | block-key 平面没有 partial key（GVA 有），对象必须按完整块内容寻址 |
+| 池作为 P/D 交接通道 | 延迟/带宽不可接受，列为对照方案（§4.7） |
+| `MooncakeConnectorV1` 按块 pull | 与复用结构性互斥（请求算完才 pull，早期层已被覆写），必须 fail-fast |
 
-### 1.3 收益边界（必须写清，避免误判）
-
-复用放大的只是 **P 的逻辑 KV 预算**：
+### 1.3 收益边界（避免误判）
 
 | 引擎 | 现状容量 | 复用后（B=9） | 200K 并发上限 |
 | :--- | :--- | :--- | :--- |
 | P（79 层） | 641,408 tokens / 33.12 GiB | 约 4.6M（含 MTP 排除）/ 5.07M（不排除） | 3.16 → **约 23~25** |
 | D（79 层） | 697,984 tokens / 36.05 GiB | **不变** | 3.44 |
 
-> 结论：本特性把「P 先撞墙」变成「D 先撞墙」。要让端到端并发也上去，必须叠加 D 侧 offload（另行立项）。
+> 本特性把「P 先撞墙」变成「D 先撞墙」；端到端并发提升需叠加 D 侧 offload（另行立项）。
 
 ---
 
@@ -84,27 +91,26 @@
 | `_layerwise_reuse_layout` | `pool_worker.py:490`（`_init_layerwise_config`） | B | A |
 | `prefetch_layer_map` / `independent_layers` | `pool_worker.py:611-646` | B | A |
 | scheduler 侧复用布局 | `pool_scheduler.py:237-257` | B（外层）+ A（内层） | A |
-| `set_external_slot_release_waiter` | `pool_worker.py:722` | B | A（但 store-only 不需要，见 §4.5） |
+| `set_external_slot_release_waiter` | `pool_worker.py:722` | B | **A（D2D 必需）** |
 | `reuse_source = prefetch_layer_map.get(...)` | `pool_worker.py:2748-2750` | A（经 `prefetch_layer_map`） | A |
 
 ### 2.2 已经就绪、无需改动的三要素
 
-1. **规划**：`build_layerwise_reuse_layout()`（`layerwise_cache_layout.py:210`）把同 spec 的层分桶，
-   `num_shared_buffers` 决定桶内槽位数，产出 `buffer_slots`、`prefetch_layer_map`（层 L 复用层 L−B 的槽位）、
-   `has_layer_reuse`；
-2. **加载侧门控**：`kv_transfer.py:2043-2060`（`_handle_range_layer_task`）在写共享 buffer 前等
-   `layer_save_finished_events[S]` 并 `sync_save_events[S].synchronize()`；
+1. **规划**：`build_layerwise_reuse_layout()`（`layerwise_cache_layout.py:210`）按 main spec 分桶，
+   `num_shared_buffers` 决定桶内槽位数，产出 `buffer_slots`、`prefetch_layer_map`（层 L 复用层 L−B 的槽位）；
+2. **加载侧门控**：`kv_transfer.py:2043-2060` 在写共享 buffer 前等 `layer_save_finished_events[S]` 并
+   `sync_save_events[S].synchronize()`；
 3. **保存侧完成信号**：`kv_transfer.py:1812` 在 range put 结束后置位本层 save 事件。
 
-> 关键推论：**覆写保护是传递性获得的**——层 L 的 attention 写共享 buffer 前，必然经过
-> 「等源层 save 完成（+ 加载 L 的前缀）」→ `layer_load_finished_events[L]` → `wait_for_layer_load` 返回。
-> 因此不需要额外的「保存侧覆盖门控」。
+> 覆写保护是传递的：层 L 的 attention 写共享 buffer 前，必经「等源层 save 完成（+ 加载 L 的前缀）」→
+> `layer_load_finished_events[L]` → `wait_for_layer_load` 返回。**store-only 下这就够了；D2D 下还差一步
+> ——等 PD 把源层推送给 D 完成（§4.4）。**
 
 ---
 
 ## 3. 实现方式（改动清单）
 
-> 总原则：所有改动收敛在**协议模块 + 门控点**，不侵入传输线程；**默认行为逐字节不变**
+> 总原则：改动收敛在协议模块 + 门控点，不侵入传输线程；**默认行为逐字节不变**
 > （不配新开关时，mooncake 路径与今天完全一致）。
 
 ### R1 · 协议 opt-in（`backend/mooncake_layerwise.py:77-80`）
@@ -118,30 +124,25 @@ def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None
 
 # 改为
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
-    """Opt into physical-buffer reuse only when the operator asks for it.
-
-    The reuse planner is backend-agnostic (it only reads KV cache specs); the
-    completion signal it needs is produced by the shared save path, not by GVA
-    slot accounting.
-    """
+    """Opt into physical-buffer reuse only when the operator asks for it."""
     if extra_config.get("use_layerwise") and extra_config.get("use_layerwise_buffer_reuse"):
         return extra_config
     return None
 ```
 
-**为什么用独立开关而不是复用 `use_layerwise`**：该返回值同时驱动「显存预算放大」（`worker.py:629-647`）
-与「运行期布局」。无条件返回会让「配了 `layerwise_num_shared_buffers` 但没打算复用」的部署也改变预算。
+用独立开关而不是复用 `use_layerwise`：返回值同时驱动「显存预算放大」（`worker.py:629-647`）与运行期布局，
+无条件返回会让「配了 `layerwise_num_shared_buffers` 但没打算复用」的部署也改变预算。
 
 ### R2 · worker 侧门控迁移（`pool_worker.py` 三处）
 
 ```python
-# R2a  _init_layerwise_config (:490) —— 复用布局对 block-key 也构建
+# R2a  _init_layerwise_config (:490)：复用布局对 block-key 也构建
 #      现在：if self.use_layerwise_transfer:
-#      改为：if self.use_layerwise_reuse_enabled = (get_layerwise_reuse_config(...) is not None)
+#      改为：if get_layerwise_reuse_config(...) is not None:
 ```
 
 ```python
-# R2b  运行时状态 (:611-646) —— 只有 has_layer_reuse=True 才接管，否则保持现有 else 分支
+# R2b  运行时状态 (:611-646)：仅 has_layer_reuse=True 才接管，否则保持现有 else 分支
 if self.use_layerwise_transfer or (
     self.use_layerwise
     and self._layerwise_reuse_layout is not None
@@ -153,12 +154,16 @@ else:
 ```
 
 ```python
-# R2c  set_external_slot_release_waiter (:722) —— store-only 拓扑不需要，但为 MultiConnector 场景
-#      把拒绝条件从 `not self.use_layerwise_transfer` 改为 `not self.use_layerwise`
+# R2c  set_external_slot_release_waiter (:722) —— D2D 复用必需
+#      现在：if not self.use_layerwise_transfer: return False
+#      改为：if not self.use_layerwise: return False
 ```
 
-> store-only（我们）不启用 R2c：没有 P2P provider，waiter 恒为 None，现有的
-> `elif self.external_slot_release_waiter is not None:` 分支自然跳过。
+> R2c 的意义：D2D 下 P 的槽位要被层 L+B 覆写，必须确认层 L 已被推送给 D 且 D 已收完。
+> `MultiConnector` 会把 PD producer 的 `wait_for_layer_reuse` 包装成
+> `_wait_for_external_slot_release(layer_idx)` 注册进来（`ascend_multi_connector.py:85-95`），
+> store connector 接单后由 recv 线程在覆写前调用（`kv_transfer.py:2060`）。
+> 不接单时退化为 `MultiConnector.wait_for_layer_load` 里的逐 provider 等待（可用但更慢，需实测）。
 
 ### R3 · scheduler 侧同源开启（`pool_scheduler.py:237-257`）
 
@@ -171,8 +176,8 @@ if extra_config is not None:
     self.layerwise_offload = reuse_layout.has_layer_reuse
 ```
 
-**必须与 R2a 同源同判**：只改一侧会出现「scheduler 认为复用 / worker 认为不复用」，
-导致 key 空间分裂、池永不命中且不报错（`hybrid_layout_id` 的 docstring 记录过这类静默 bug）。
+必须与 R2a 同判：只改一侧会出现「scheduler 认为复用 / worker 认为不复用」，key 空间分裂、
+池永不命中且不报错。
 
 ### R4 · 防御校验（fail-fast）
 
@@ -187,133 +192,155 @@ def validate_runtime(*, use_hybrid, has_recurrent_state, tp_mismatch,
         raise ValueError("Layerwise buffer reuse is prefill-only: kv_role must be able to save")
 ```
 
-调用点补参：`pool_scheduler.py:192-197`、`pool_worker.py:158-163`（`can_save = is_kv_save_role(self.kv_role, self.consumer_is_to_put)`），
-另加三条启动校验：
+调用点补参：`pool_scheduler.py:192-197`、`pool_worker.py:158-163`（`can_save = is_kv_save_role(...)`），另加：
 
-| 校验 | 条件 | 报错 |
+| 校验 | 条件 | 动作 |
 | :--- | :--- | :--- |
 | 角色 | 复用开启且 `kv_role` 不能 save | fail-fast |
-| decode cache | 复用开启且 `save_decode_cache=True` | fail-fast（语义未定义） |
+| decode cache | 复用开启且 `save_decode_cache=True` | fail-fast |
 | CP | 复用开启且 DCP/PCP > 1 | 已有 `validate_topology` 拒绝，补明确文案 |
-| P2P 混用 | 复用开启且 MultiConnector 含 `MooncakeConnectorV1` | fail-fast（按块 pull 与复用结构性互斥） |
+| P2P 块拉 | MultiConnector 内含 `MooncakeConnectorV1` | fail-fast（§4.5） |
 
 ### R5 · 复用距离 B 与 fence backlog
 
 - 复用距离 `D = layerwise_num_shared_buffers`；
-- 门控 stall 的必要条件：`D` 层的前向时间 ≥ 1 层 put 时间；经验公式
-  `B ≥ ceil(t_put_layer / t_compute_layer) + 余量`；
-- `send_fence_backlog()=8`（`mooncake_layerwise.py:255`）是「attention 边界允许积压的 save 层数」，
-  若 `B < 8`，计算流走到 `L+B` 时源层 save 很可能还没做完 → **计算流被门控卡住**；
-- **第一版取 B=9**（>8），`send_fence_backlog` 不改；B=8/12/16 作为调参项（见 §7 V6）。
+- 不 stall 的必要条件：`D` 层的前向时间 ≥ 1 层的「PD push + 池 put」时间；
+- `send_fence_backlog()=8`（`mooncake_layerwise.py:255`）是 attention 边界允许积压的 save 层数，
+  若 `B < 8`，计算流走到 `L+B` 时源层很可能还没发完 → 计算流被门控卡住；
+- **第一版取 B=9**（>8），`send_fence_backlog` 不改；B=8/12/16 作为调参项（§7 V6）。
 
 ### R6 · GLM 适配
 
-`build_layerwise_reuse_layout()` 在 `has_layer_reuse=True` 时，若发现非 `AttentionSpec`
-（Mamba/KDA state、`AscendIndexerKPoolTailSpec` 压缩环）会直接 `NotImplementedError`
-（`layerwise_cache_layout.py:273-285`）。
+`build_layerwise_reuse_layout()` 在 `has_layer_reuse=True` 时遇到非 `AttentionSpec`
+（Mamba/KDA state、`AscendIndexerKPoolTailSpec` 压缩环）会 `NotImplementedError`
+（`layerwise_cache_layout.py:280-285`）。
 
 - **我们的 GLM-5.2**（`model_type=glm_moe_dsa`，78 层）：只有 MLA main（576 B/token）与 DSA indexer
   （128 B/token），**无 KDA/Mamba、无 tail spec** → 不需要排除逻辑；
-- **风险点**：`indexer_types` 是 full/shared 混合。若 shared 层与 full 层的 indexer spec 不同，
-  `_merge_specs()`（`layerwise_cache_layout.py:352-360`）会 `ValueError`。**必须先用 CPU harness 验证分桶**（§7 V0）；
-- **glm5next / GLM-5.3（未来）**：需要 R6 的排除逻辑——只让随上下文增长的 group（main+indexer）参与复用，
-  tail/KDA group 每层独占 buffer（逻辑上并入 `independent_layers`）。
+- 风险点：`indexer_types` 是 full/shared 混合；若 shared 层与 full 层的 indexer spec 不同，
+  `_merge_specs()`（`:357-361`）会 `ValueError` → **必须先用 CPU harness 验证**（§7 V0）；
+- **glm5next / GLM-5.3（未来）**：只让随上下文增长的 group（main+indexer）参与复用，
+  tail/KDA group 每层独占 buffer。
 
 ### 明确不改的部分
 
 | 项 | 原因 |
 | :--- | :--- |
-| `send_fence_backlog()` / `fence_drains_recv()` | 为重叠调过，改了回归风险最高；第一版用 B>8 规避 |
-| `kv_transfer.py` 传输线程 | 门控与 range 收发已就绪 |
-| key 格式 / `hybrid_layout_id` | 复用不改变 key 空间（block key 不含层号，层是对象内 offset） |
-| `mooncake_backend.py` | session/range 原语足够，无需 GVA 语义 |
-| D 侧任何配置 | 复用是 P 专属 |
+| `send_fence_backlog()` / `fence_drains_recv()` | 为重叠调过；第一版用 B>8 规避 |
+| `kv_transfer.py` 传输线程 | 门控与 range 收发已就绪（D2D 的 waiter 调用点位已存在：`:2060`） |
+| block key 格式 / `hybrid_layout_id` | 复用不改变 key 空间（层是对象内 offset） |
+| `mooncake_backend.py` | session/range 原语足够 |
+| D 侧 KV 布局 | 复用是 P 专属 |
 
 ---
 
-## 4. PD transfer 契约（store-only）
+## 4. PD transfer（D2D）
 
-### 4.1 拓扑与时序
+### 4.1 连接器选型
+
+| 方案 | 连接器 | 交接方式 | reuse 支持 | 官方文档 | 对 D 的要求 | 依赖 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **A（推荐）** | `MooncakeLayerwiseConnector` | P 逐层 **push** 到 D 的 HBM | `supports_layerwise_buffer_reuse=True`（`:749`）+ `wait_for_layer_reuse`（`:831`） | ❌ 未列入 offload 支持清单 | D 保持现有全层 HBM 布局，**无需改 decode** | 镜像自带 `mooncake_layerwise_connector.py` |
+| **B（文档支持）** | `SfaRemoteD2HConnector` | D 从 P 的 HBM **pull**（memfabric/SDMA） | `supports_layerwise_buffer_reuse=True`（`sfa_pd_rd2h/connector.py:58`）+ `wait_for_layer_reuse`（`:303`） | ✅ 官方列为 prefill/decode offload 唯一支持连接器 | D 需 `sparse_kv_offload_config.enabled=true`，主 KV 必须 BF16（indexer 可 int8） | `memfabric_hybrid`（镜像已装 1.2.0）；P TP ≥ D TP 且整除 |
+| **C（禁止）** | `MooncakeConnectorV1` | 请求算完后按块 pull | ❌ | — | — | 与复用结构性互斥（§4.5） |
+
+**推荐 A**：不改 D 的 decode 内存布局（我们 D 现在是 int8 主 KV、全层驻留），改造面最小；
+但要接受"文档未验证"的风险，并把 V5 的 waiter 链路验证作为准入门槛。
+若 A 验证失败，退到 B（需要 D 侧切 BF16 + sparse offload，属额外改动）。
+
+### 4.2 配置形状
+
+```jsonc
+// P（kv_producer）
+"kv_connector": "MultiConnector",
+"kv_connector_extra_config": {"connectors": [
+  { "kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_producer",
+    "kv_connector_extra_config": { "engine_id": "0", "kv_port": "26001" } },
+  { "kv_connector": "AscendStoreConnector", "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+      "lookup_rpc_port": "0", "backend": "mooncake",
+      "use_layerwise": true,
+      "use_layerwise_buffer_reuse": true,     // ★ R1
+      "layerwise_num_shared_buffers": 9,      // ★ B=9（> backlog 8）
+      "layerwise_prefetch_layers": 2,
+      "layerwise_max_transfer_blocks": 64,
+      "layerwise_max_transfer_bytes": 16777216
+    } }
+] }
+
+// D（kv_consumer）
+"kv_connector": "MultiConnector",
+"kv_connector_extra_config": {"connectors": [
+  { "kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_consumer",
+    "kv_connector_extra_config": { "engine_id": "0", "kv_port": "26001" } },
+  { "kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer",
+    "kv_connector_extra_config": {
+      "lookup_rpc_port": "0", "backend": "mooncake",
+      "use_layerwise": true, "consumer_is_to_load": true
+      // 不加 use_layerwise_buffer_reuse
+    } }
+] }
+```
+
+### 4.3 时序（P 侧两阶段 save）
+
+`AscendMultiConnector` 已保证顺序（`ascend_multi_connector.py:144-168`）：
 
 ```
-P（kv_producer，TP16）                                   D（kv_consumer，TP16）
-  │  chunk i:                                              │
-  │   batch_put_start(keys, size=page×layers)              │   batch_get_start(load_keys)
-  │   for L in 0..77:                                      │   for L in 0..77:
-  │     batch_put_from_multi_buffer_ranges(                │     batch_get_into_multi_buffer_ranges(
-  │       keys, buffers[L], sizes[L], dst_off=L*page)      │       keys, buffers[L], sizes[L], src_off=L*page)
-  │   batch_put_end(active_keys)   ← 块对 D 可见           │   … last chunk: batch_get_end(load_keys)
-  │                                                        │
-  │  HBM: 只有最后 B 层的 buffer 有效，其余已覆写           │  HBM: 全 79 层常驻
+compute layer L
+  → on_kv_cache_written(L)     Phase1: PD provider 先关闸（记录本层可发）
+                               Phase2: 其它 connector（AscendStore）再挂钩
+  → save_kv_layer(L)           Phase1: PD push 入队（发送线程逐层推给 D）
+                               Phase2: AscendStore range put 入队（写池，供 prefix cache）
+compute layer L+1 … L+B-1      （各自用不同槽位）
+  → wait_for_layer_load(L+B)   等本层槽位可用：
+       ├─ 池侧：等 L+B-B=L 的 save 事件（range put 已完成）
+       └─ PD 侧：wait_for_layer_reuse(L) → 等 storage_send_done_events[slot]
+  → attention 写 L+B 的共享槽位
 ```
 
-- P 侧对象：**每 block 一个 object**（MLA 下 `put_step = tp_size`，组内共享 `@{head}`，只有 rank0 写）；
-- `size = page_size × num_layers`，层只是对象内 `layer_id × page` 的 byte range；
-- 复用**不改变**对象布局、key 格式、session 语义——只改 HBM 侧 buffer 数量。
+### 4.4 覆写安全的双条件与 waiter 链路
 
-### 4.2 覆写安全的充分条件
+> **INV-1'**：层 `L+B` 写共享槽位前，必须同时满足
+> (a) 层 `L` 的**池 range put 已返回**（数据已离开 HBM）；
+> (b) 层 `L` 的**PD 推送已完成**（D 已收完，`storage_send_done_events[slot]` 置位）。
 
-> **INV-1**：层 `L+B` 覆写共享 buffer 前，层 `L` 的 range put 必须已返回。
+- (a) 由 `layer_save_finished_events[L]` + `sync_save_events[L]` 保证（`kv_transfer.py:2043-2060`）；
+- (b) 由 waiter 链路保证：
+  `ascend_multi_connector.py:85-95` 把 PD provider 的 `wait_for_layer_reuse` 包成
+  `_wait_for_external_slot_release` → `pool_worker.set_external_slot_release_waiter`（R2c 放开）
+  → `KVCacheStoreLayerRecvingThread` 在覆写前调用（`kv_transfer.py:2060`），
+  或 `pool_worker.wait_for_layer_load` 的 fallback 分支（`:2804-2805`）；
+- PD provider 内部：`MooncakeLayerwiseConnectorWorker.wait_for_layer_reuse`（`:1327`）
+  按 `layer_storage_slots[layer]` 的槽位等 `storage_send_done_events`，失败会把错误抛出来。
 
-- `batch_put_from_multi_buffer_ranges` 是**同步**的（`SubmitScatter(...) + operation->wait()`），
-  返回即数据已离开源 buffer；
-- `commit`（`batch_put_end`）只影响**对其他请求的可见性**，不影响本请求的复用；
-- 因此 P 的复用**不需要等 D**——D 读的是池对象，P 后续覆写 HBM 与 D 无关。
+### 4.5 为什么禁止 `MooncakeConnectorV1`
 
-### 4.3 为什么 store-only 不需要 slot-release waiter
+按块 pull 的语义是「P 算完整个请求后，D 再按 block 拉」；复用下层 `L+B` 早已覆写层 `L` 的 HBM，
+等"算完再拉"时早期层已不存在 → 必然读到错数据。R4 需在启动期 fail-fast。
 
-- `external_slot_release_waiter` 的语义是「告诉 PD 对端：这块 HBM buffer 我已读完，可以覆写」；
-- 它的提供方是 **P2P layerwise 连接器**（`kv_p2p/mooncake_layerwise_connector.py:749`
-  `supports_layerwise_buffer_reuse = True`，`wait_for_layer_reuse`），由 `ascend_multi_connector.py:76-95` 接线；
-- 我们的 `single_store_connector` 拓扑里没有 P2P 对端，D 从池读，**不存在「D 直接读 P 的 HBM」**，
-  因此 waiter 恒为 None 是正确状态；
-- **何时必须加回来**：改回 `MultiConnector(PD-layerwise + AscendStoreConnector)` 时——D 读的是 P 的 HBM，
-  P 覆写前必须等 D 读完（否则读到错数据），此时必须启用 R2c 并验证链路。
-
-### 4.4 lease / TTL 契约
+### 4.6 TTL、失败与容量
 
 | 项 | 契约 |
 | :--- | :--- |
-| D 侧读会话 | 每 chunk `batch_get_start` 续约；`batch_get_end` 只在 last chunk |
-| TTL 要求 | `default_kv_lease_ttl` **必须覆盖整请求的 onload 时长**（不能只覆盖单层） |
-| 我们实测 | `11000`（11s）：128K warm **183.5s**；`300000`（300s）：**26.45s**（6.9x 改善） |
-| 失败语义 | 租约过期 → 该 key range get 失败 → 按 load 失败处理（回退重算），不会读到错数据 |
-| 建议值 | 300000（按最长请求 onload 时长再留 2x 余量） |
+| lease TTL | D 从池读前缀时仍需 lease；`default_kv_lease_ttl` 必须覆盖整请求 onload（实测：11s → 128K warm 183.5s；300s → 26.45s） |
+| PD push 失败 | 层事件置错，`wait_for_layer_reuse` 抛出 → 请求失败/降级重算，不静默 |
+| 池 put 失败 | `batch_put_revoke` + 移出 `active_keys`；该块不可命中，后续 chunk 重算 |
+| 容量 | store 容量 ≥ 并发 × 单请求全量 KV（200K ≈ 11.3 GB/请求）；D2D 不减少 store 占用 |
+| 元数据 | 每 chunk 对全前缀做 range get ⇒ `O(blocks × chunks)`；128K/200K 实测已含该开销 |
 
-### 4.5 失败与降级
+### 4.7 store-only 对照（何时可退回）
 
-| 事件 | 处理 | 对复用的影响 |
+| 维度 | store-only（当前生产） | D2D（本设计） |
 | :--- | :--- | :--- |
-| `put_start` 失败 | 该 key 不进本批 `active_keys` | 无（不写不占槽） |
-| 某层 range put 失败 | 立即 `batch_put_revoke`，移出 `active_keys`，后续层只传剩余 key | HBM 槽位照常复用；该块不可命中，后续 chunk 重算 |
-| `commit` 失败 | 由 Master 超时清理 PROCESSING | 同上（不可命中） |
-| range get miss / 过期 | 回退重算该块 | 无（P 侧不受影响） |
-| 请求中止 | `layer_load_aborted` + 清理 session | 槽位随请求结束释放 |
+| P→D 路径 | 池中转（P 写 DRAM segment，D 读） | P→D 直传（HBM） |
+| P 覆写门控 | 只需池 put 返回 | 需池 put 返回 **+ PD 送达** |
+| waiter | 不需要 | **必需（R2c）** |
+| 交接延迟 | 高（池中转 + master 元数据） | 低（点对点） |
+| 复杂度 | 低 | 中（两连接器 + 顺序 + waiter） |
 
-> 关键：**复用下「写失败」不会造成静默错数据**——失败的 key 被 revoke，池里不可见；HBM 覆写丢的是
-> 已经不可用的数据，代价只是重算。
-
-### 4.6 容量与元数据压力
-
-```
-store 容量 ≥ 并发请求数 × 单请求全量 KV
-单请求 200K：202,752 × 55,616 B ≈ 11.3 GB（79 层 × 704 B/token）
-```
-
-- 复用**不减少** store 侧对象体积（每块仍是 `page × layers`），只减少 HBM；
-- 每 chunk 对全前缀做 range get ⇒ 元数据/传输量是 `O(blocks × chunks)`；
-  128K/200K 下的实测（warm 26.45s / cold 71.0s）已包含这部分开销；
-- 若 store 打满触发 evict：load miss → 重算（性能损失，不是错误），但需实测
-  「evict 与在途 session」的交互（Mooncake 可能对已 commit 对象报 `MMC_UNMATCHED_KEY`）。
-
-### 4.7 与 MultiConnector+P2P 的差异
-
-| 维度 | 本篇：store-only | 既有文档 §7.2：MultiConnector+P2P |
-| :--- | :--- | :--- |
-| D 的数据来源 | Mooncake 池（DRAM segment） | P 的 HBM（逐层 push/pull） |
-| P 覆写前置 | 本层 range put 返回 | range put 返回 **+ D 已取走**（`wait_for_layer_reuse`） |
-| waiter | 不需要 | 必需（R2c） |
-| 禁止 `MooncakeConnectorV1` | 天然不存在 | 必须 fail-fast（按块 pull 会读到已覆写数据） |
+> store-only 仍保留为**回退方案与对照组**：若 D2D 的 waiter 链路验证不通过，可先回到 store-only
+> （功能可用、性能次优），不影响复用本身的验证。
 
 ---
 
@@ -321,46 +348,33 @@ store 容量 ≥ 并发请求数 × 单请求全量 KV
 
 ### 5.1 不变量
 
-- **INV-1**（覆写安全）：层 `L+B` 写共享 buffer 前，层 `L` 的 put 已完成并同步（§4.2）；
-- **INV-2**（完成状态单位）：完成信号以**物理 buffer** 为判定单位；block-key 平面复用同一套
-  `layer_save_finished_events`（按层号索引，层号与槽位一一映射由 `prefetch_layer_map` 保证）；
-- **INV-3**（key 空间不变）：复用不改变 `hybrid_layout_id`（`apply_layerwise_kv_cache_plan` 只改
-  `kv_cache_config.kv_cache_tensors`，不碰 `kv_cache_groups`）——这是 block-key 相对 GVA 的结构性优势。
+- **INV-1'**（覆写安全，D2D）：见 §4.4；
+- **INV-2**（完成状态单位）：以**物理 buffer** 判定；`prefetch_layer_map` 保证层号↔槽位一一映射；
+- **INV-3**（key 空间不变）：`apply_layerwise_kv_cache_plan` 只改 `kv_cache_config.kv_cache_tensors`，
+  不碰 `kv_cache_groups` → `hybrid_layout_id` 不变，key 空间稳定。
 
 ### 5.2 partial block —— 唯一需要额外处理的正确性边界
 
-**场景**：chunk 结束时有 5000 token（128 的倍数 = 4992），尾部 8 token 的 KV：
+复用后 HBM 只保留最后 B 层；chunk 结束时不满 128 token 的尾部：
 1. 落不了池（`num_tokens_to_save = 5000//128*128 = 4992`；block-key 无 partial key）；
 2. 同 chunk 后半程被层 `L+B` 覆写 → HBM 也没了；
 3. 下一 chunk 的前缀 `[0,5000)` 只能 load 到 4992 → 尾部 KV 彻底丢失。
 
-**对照**：
-
-| 配置 | 尾部 token 命运 |
-| :--- | :--- |
-| 无复用（现行） | buffer 不覆写，KV 留 HBM，下一 chunk 从 5000 继续；问题不存在 |
-| 复用 + GVA（memcache） | 用 partial key 落池，可 load 回来 |
-| **复用 + block-key（本特性）** | **存不了 + 被覆写 → 必须对齐或重算兜底** |
-
-**第一版落地（D4）**：
-
-1. **启动期强校验**：复用开启时，要求 `max_num_batched_tokens % cache_transfer_granularity == 0`
-   （我们 4096 / 16384 均满足），否则 fail-fast——这样**单请求**的 chunk 边界天然对齐；
-2. **并发下的风险**：多请求共享 batch 预算时，单请求 chunk 可能提前结束（不对齐）。
-   这是 Phase 2 的工作：让 scheduler 把每个请求的 chunk 边界 floor 到 granularity
-   （`pool_scheduler.py:622` 已有 `_floor_to_cache_transfer_granularity` 可复用），
-   或做「尾部重算」兜底；
-3. **文档硬约束**：未完成 Phase 2 前，复用只允许用于「P 的 `max_num_batched_tokens` 为 128 倍数
-   且并发请求数受控」的部署。
+**第一版落地**：
+1. **启动期强校验**：复用开启时要求 `max_num_batched_tokens % cache_transfer_granularity == 0`
+   （我们 4096/16384 满足），否则 fail-fast；
+2. **Phase 2**：让 scheduler 把每个请求的 chunk 边界 floor 到 granularity
+   （`pool_scheduler.py:622` 已有 `_floor_to_cache_transfer_granularity`），或做尾部重算兜底；
+3. 未完成 Phase 2 前，复用只允许用于「单请求/受控并发」的部署。
 
 ### 5.3 其他边界
 
 | 情形 | 处理 |
 | :--- | :--- |
-| 层 L 无 cached prefix | `submit_layer_load` 仍提交空任务承载 `wait_for_save_layer` 门控（`pool_worker.py:2748-2760`，已实现） |
-| `independent_layers`（默认 `[0]`） | 不在 `prefetch_layer_map` 中 → 独占 buffer，安全 |
-| MTP draft 层 | v1 runner（`model_runner_v1.py:4609`）不排除 → 参与复用；v2 runner（`v2/model_runner.py:374`）`excluded_layer_names=persistent_draft_names` → 独占。两种行为都自洽，但容量系数不同，需 V0 确认 |
-| 多 group（MLA main + indexer） | `build_layerwise_reuse_layout` 按 main spec 分桶，indexer 跟随 main 槽位（`:232-247`）；须保证同桶层 indexer spec 一致（§6） |
+| 层 L 无 cached prefix | `submit_layer_load` 仍提交空任务承载 `wait_for_save_layer` 门控（`pool_worker.py:2748-2762`，已实现） |
+| `independent_layers`（默认 `[0]`） | 不参与复用 → 独占 buffer |
+| MTP draft 层 | v1 runner（`model_runner_v1.py:4609`）不排除 → 参与复用；v2 runner（`v2/model_runner.py:374`）排除 → 独占；容量系数不同，需 V0 确认 |
+| 多 group（MLA main + indexer） | 按 main spec 分桶，indexer 跟随；须保证同桶 indexer spec 一致 |
 | 并发写同前缀 | `_filter_pool_existing_keys` + `_put_started_keys` 去重；put_start 被拒只告警，一写赢 |
 
 ---
@@ -373,15 +387,15 @@ store 容量 ≥ 并发请求数 × 单请求全量 KV
 | KV 组成 | MLA main 576 B/token/层 + DSA indexer 128 B/token/层 | 704 B/token/层；×79 = 55,616 B/token |
 | 容量校验 | 641,408 tokens × 55,616 B = 33.2 GiB | 与日志 33.12 GiB 吻合 |
 | KDA / Mamba | 无 | 不需要 R6 的 state 排除 |
-| tail spec（`AscendIndexerKPoolTailSpec`） | 无（`model_version` 非 `glm5_next`） | 不需要 tail 排除 |
-| **indexer full/shared** | `indexer_types` 为 full/shared 混合 | **风险**：同桶层的 indexer spec 可能不同 → `_merge_specs` ValueError；必须 V0 验证 |
+| tail spec | 无（`model_version` 非 `glm5_next`） | 不需要 tail 排除 |
+| **indexer full/shared** | 混合 | **风险**：同桶层的 indexer spec 可能不同 → `_merge_specs` ValueError；必须 V0 验证 |
 | glm5next（未来） | 有 tail + KDA group | 需要 R6 排除逻辑 |
 
 **容量系数（B=9, I=1）**：
 
 ```
-不排除 MTP：buffers = 1 + 9 = 10  → factor = 79/10 = 7.90 → 641,408 × 7.9  ≈ 5.07M tokens
-排除 MTP：  buffers = 1 + 9 + 1 = 11 → factor = 79/11 = 7.18 → 641,408 × 7.18 ≈ 4.61M tokens
+不排除 MTP：buffers = 1 + 9      = 10 → factor = 79/10 = 7.90 → 641,408 × 7.9  ≈ 5.07M tokens
+排除 MTP：  buffers = 1 + 9 + 1  = 11 → factor = 79/11 = 7.18 → 641,408 × 7.18 ≈ 4.61M tokens
 ```
 
 ---
@@ -392,12 +406,13 @@ store 容量 ≥ 并发请求数 × 单请求全量 KV
 
 | 编号 | 内容 | 通过标准 |
 | :--- | :--- | :--- |
-| U1 | `extract_layout_config` 三种输入（无 `use_layerwise` / 有但无 `use_layerwise_buffer_reuse` / 有） | None / None / 配置；且非复用时 factor == 1 |
+| U1 | `extract_layout_config` 三种输入 | None / None / 配置；非复用时 factor == 1 |
 | U2 | R2/R3 两侧门控一致 | `prefetch_layer_map` 与 `layerwise_offload` 同源同判 |
-| U3 | `save_partial_block=True` + block-key 下的块对齐行为 | 与 §5.2 一致 |
-| U4 | 非复用 block-key 回归 | prefetch 仍为 2，行为不变 |
+| U3 | `save_partial_block=True` + block-key 的块对齐 | 与 §5.2 一致 |
+| U4 | 非复用 block-key 回归 | prefetch 仍为 2 |
 | U5 | R4 四条防御校验 | 全部 fail-fast |
-| U6 | GLM-5.3 风格四 group：main+indexer 参与、tail/KDA 独占 | 布局与原行为等价 |
+| U6 | GLM-5.3 风格四 group | main+indexer 参与、tail/KDA 独占 |
+| U7 | **R2c waiter 注册** | `set_external_slot_release_waiter` 在 block-key 返回 True，recv 线程拿到回调 |
 
 ### 7.2 准入门槛 V0（不改代码即可跑）
 
@@ -406,30 +421,31 @@ store 容量 ≥ 并发请求数 × 单请求全量 KV
 
 | 问题 | 判据 |
 | :--- | :--- |
-| Q1 分桶 | 每物理层 main×1 + indexer×1；无 `extra_main_specs` 落入无人管的分支 |
-| Q2 合并丢层 | 合并后所有层仍被某个 descriptor 覆盖（不丢层） |
+| Q1 分桶 | 每物理层 main×1 + indexer×1；无 `extra_main_specs` 落入无人管分支 |
+| Q2 合并丢层 | 合并后所有层仍被某个 descriptor 覆盖 |
 | Q3 key 空间 | 合并前后 `hybrid_layout_id` 一致 |
 
-> 三项全 PASS 才允许动 R1–R3；任一 FAIL 说明复用规划与我们的 cache spec 不兼容。
+> 三项全 PASS 才允许动 R1–R3。
 
 ### 7.3 实机（A3，4 节点 2P+2D）
 
-| 编号 | 内容 | 命令/判据 |
+| 编号 | 内容 | 判据 |
 | :--- | :--- | :--- |
-| V1 | 容量与日志 | 日志出现 `Layerwise KV cache reuse maps 79 layers onto N buffer assignments; scale ... by X`；`Available KV cache memory` 与基线比值 ≈ X |
-| V2 | 正确性 | 同 prompt 两次输出逐 token 一致；needle 探针；开/关复用对拍（8K/32K/128K） |
-| V3 | chunk 边界 | 4096（对齐）通过；故意配 4000（不对齐）应被启动校验拒绝 |
-| V4 | 会话/淘汰 | 长请求跨 TTL 的行为；store 打满触发 evict 时降级为重算 |
-| V5 | PD | D 侧 `External prefix cache hit rate` 正常、`Range read failed == 0`；P 侧 `wait_for_layer_load` 阻塞时长 |
-| V6 | 性能 | 32K/64K/128K 冷热 A/B；B = 8/9/12/16 扫参；对比普通池化（128K 60.5s / 11.1s） |
+| V1 | 容量与日志 | 出现 `Layerwise KV cache reuse maps 79 layers onto N buffer assignments; scale ... by X`；`Available KV cache memory` 比值 ≈ X |
+| V2 | 正确性 | 同 prompt 两次输出逐 token 一致；needle 探针；复用开/关对拍（8K/32K/128K） |
+| V3 | chunk 边界 | 4096（对齐）通过；4000（不对齐）应被启动校验拒绝 |
+| V4 | 会话/淘汰 | 长请求跨 TTL；store 打满触发 evict 时降级为重算 |
+| **V5** | **D2D waiter 链路** | P 侧出现 `Waiting for Mooncake transfer to release physical KV slot` 且等待时长受控；D 侧无 `Range read failed`；`External prefix cache hit rate` 正常；注入 D 侧延迟可观察到 P 的 `wait_for_layer_reuse` 等待 |
+| V6 | 性能 | 32K/64K/128K 冷热 A/B；B=8/9/12/16 扫参 |
+| **V7** | **D2D vs store-only** | 同 prompt 的 TTFT/端到端时延对比（D2D 应显著优于池中转） |
 
-**日志过滤**（沿用生产口径）：
+**日志过滤**：
 
 ```bash
-grep -a 'Layerwise KV cache reuse maps'            vllm_p0.log | tail -1
-grep -a 'Available KV cache memory'               vllm_p0.log | tail -1
-grep -aE 'Range (write|read) failed|Segfault'     vllm_p*.log vllm_d*.log | tail
-grep -a 'External prefix cache hit rate'          vllm_d*.log | tail -3
+grep -a 'Layerwise KV cache reuse maps'                       vllm_p0.log | tail -1
+grep -a 'Waiting for Mooncake transfer to release physical KV slot' vllm_p0.log | tail -3
+grep -aE 'Range (write|read) failed|Segfault'                 vllm_p*.log vllm_d*.log | tail
+grep -a 'External prefix cache hit rate'                      vllm_d*.log | tail -3
 ```
 
 ---
@@ -438,15 +454,16 @@ grep -a 'External prefix cache hit rate'          vllm_d*.log | tail -3
 
 | # | 风险 | 等级 | 缓解 |
 | :--- | :--- | :--- | :--- |
-| K1 | **partial block 丢 KV**（§5.2） | **高（正确性）** | 第一版启动校验 + 部署约束；Phase 2 对齐/兜底 |
-| K2 | **indexer full/shared spec 不一致** → 复用规划 ValueError | 中 | V0 CPU harness 先验证 |
-| K3 | 时序硬化：put 完成进入关键路径，Mooncake 尾延迟传导 TTFT | 中 | B=9 起步（> backlog 8）；V6 实测 |
-| K4 | store eviction 与在途 session 交互（无 lease 的 block-key） | 中 | V4；容量规划 + 开 SSD offload |
-| K5 | 每 chunk 对全前缀 range get，master QPS `O(blocks×chunks)` | 中 | V6 观测；必要时调 `layerwise_max_transfer_blocks` |
-| K6 | 逆上游意图（`extract_layout_config` docstring 明确排除 reuse） | 中 | 提 issue/RFC 对齐；把 U1–U6/V1–V6 纳入 CI |
-| K7 | 上游 KVPP 系列正在重构 layerwise 管线，落点会漂移 | 中 | 改动收在协议模块 + 门控点，diff 面积最小 |
-| K8 | lease TTL 配置缺失 → warm 退化（已实测 6.9x） | **高（部署）** | 硬性配置契约：300000 |
-| K9 | D 侧仍为瓶颈，端到端并发不提升 | — （预期内） | §1.3 明示；需另立 D 侧 offload |
+| K1 | **partial block 丢 KV**（§5.2） | **高（正确性）** | 启动校验 + 部署约束；Phase 2 对齐/兜底 |
+| **K2** | **官方文档只把 `SfaRemoteD2HConnector` 列为 offload 支持连接器**；`MooncakeLayerwiseConnector` + reuse 属未验证组合 | **高（兼容性）** | V5 先把 waiter 链路打通；失败则退 B 方案（D 侧 BF16 + sparse offload） |
+| K3 | `indexer_types` full/shared 导致复用分桶 spec 不一致 | 中 | V0 CPU harness 先验证 |
+| K4 | 时序硬化：PD push 尾延迟进入关键路径 → TTFT 抖动 | 中 | B=9 起步；V6 实测；必要时调 `send_fence_backlog` |
+| K5 | store eviction 与在途 session 交互（block-key 无 lease） | 中 | V4；容量规划；开 SSD offload |
+| K6 | 每 chunk 对全前缀 range get，master QPS `O(blocks×chunks)` | 中 | V6 观测；调 `layerwise_max_transfer_blocks` |
+| K7 | 逆上游意图（`extract_layout_config` docstring 明确排除 reuse） | 中 | 提 issue/RFC 对齐；U1–U7/V1–V7 纳入 CI |
+| K8 | 上游 KVPP 系列重构 layerwise 管线，落点漂移 | 中 | 改动收在协议模块 + 门控点 |
+| K9 | `SfaRemoteD2H` 要求 P TP ≥ D TP 且整除；D 侧主 KV 必须 BF16 | 中（若选 B） | 选 A 可绕开；选 B 需改 D 的 dtype 与 sparse offload 配置 |
+| K10 | lease TTL 缺失 → warm 退化（实测 6.9x） | **高（部署）** | 硬性配置契约：300000 |
 
 ---
 
@@ -454,47 +471,35 @@ grep -a 'External prefix cache hit rate'          vllm_d*.log | tail -3
 
 | 阶段 | 内容 | 估算 |
 | :--- | :--- | :--- |
-| **Phase 1** | R1–R4 + U1–U5 + V0–V2（打通 P 侧复用、正确性对拍） | 1.5–2 人周 |
-| **Phase 2** | chunk 对齐（或尾部重算兜底）+ R6 + 调参（B、fence） | 1–2 人周 |
-| **Phase 3** | V4–V6（evict/压测/性能）+ 上线评审 | 1–1.5 人周 |
+| **Phase 1** | R1–R4（含 R2c）+ U1–U7 + V0–V2（P 侧复用、store-only 打通） | 1.5–2 人周 |
+| **Phase 2** | D2D 接线（方案 A）+ V5–V7 + chunk 对齐 | 1.5–2 人周 |
+| **Phase 3** | evict/压测/调参 + 上线评审 | 1–1.5 人周 |
 
-前置依赖（不计入）：GLM-5.2 的 indexer spec 与复用规划兼容（V0）；lease TTL 与 RoCE 配置就绪（已有）。
+前置依赖：V0 通过；lease TTL 与 RoCE 配置就绪（已有）；D2D 方案选型（A/B）由 V5 结果决定。
 
 ---
 
 ## 10. 本仓库落地配置
 
-### 10.1 P / D 配置差异（只 P 侧加开关）
-
-```jsonc
-// P（kv_producer）
-"kv_connector_extra_config": {
-  "lookup_rpc_port": "0",
-  "backend": "mooncake",
-  "use_layerwise": true,
-  "use_layerwise_buffer_reuse": true,      // ★ 新增：opt-in
-  "layerwise_num_shared_buffers": 9,       // ★ B=9（> send_fence_backlog=8）
-  "layerwise_prefetch_layers": 2,
-  "layerwise_max_transfer_blocks": 64,
-  "layerwise_max_transfer_bytes": 16777216
-}
-
-// D（kv_consumer）：保持现状，不加 use_layerwise_buffer_reuse
-```
-
-Ansible 落点：`ansible/inventories/a3/group_vars/all.yml` 的 `_1m_v030_hyb.pd_cluster.layerwise`，
-模板 `ansible/templates/run_dp_prefill_template.sh.j2` 的 `single_store_connector` 分支
-（`{% if lw.enabled | default(true) %}` 段内追加两个可选键，D 模板不加）。
-
-### 10.2 必须同时满足的部署前置
+### 10.1 前置（必须同时满足）
 
 | 项 | 值 | 说明 |
 | :--- | :--- | :--- |
 | `default_kv_lease_ttl` | **300000** | 11s 实测导致 128K warm 183.5s（vs 26.45s） |
-| RoCE | `HCCL_INTRA_ROCE_ENABLE=1` + `HCCL_INTRA_PCIE_ENABLE=0` + `hixl_preset: roce` | 不开启会退到 ACL IPC，全量 `-800` + segfault（已验证） |
+| RoCE | `HCCL_INTRA_ROCE_ENABLE=1` + `HCCL_INTRA_PCIE_ENABLE=0` + `hixl_preset: roce` | 不开会退到 ACL IPC，全量 `-800` + segfault |
 | `use_layerwise` | true | 复用是 layerwise 的增强 |
-| P chunk 粒度 | 4096 / 16384（128 的倍数） | §5.2 的正确性要求 |
-| 拓扑 | `single_store_connector`（无 P2P） | 本篇结论只对 store-only 成立 |
+| P chunk 粒度 | 4096 / 16384（128 倍数） | §5.2 正确性要求 |
+| 连接器 | `MultiConnector[MooncakeLayerwiseConnector, AscendStoreConnector]` | 禁止 `MooncakeConnectorV1` |
+
+### 10.2 Ansible 落点
+
+- `ansible/inventories/a3/group_vars/all.yml` → `_1m_v030_hyb.pd_cluster.layerwise`：
+  新增 `buffer_reuse: true`、`num_shared_buffers: 9`；
+- `ansible/templates/run_dp_prefill_template.sh.j2`：`single_store_connector` 分支改为
+  MultiConnector 形状（或新增 `d2d: true` 分支），P 侧渲染两个 connector；
+- `ansible/templates/run_dp_decode_template.sh.j2`：D 侧渲染 `MooncakeLayerwiseConnector(kv_consumer)`
+  + `AscendStoreConnector(kv_consumer, consumer_is_to_load)`；
+- 新增档位 `1m-v030-hyb-d2d`，保留 `1m-v030-hyb`（store-only）作为回退与对照。
 
 ---
 
@@ -511,16 +516,19 @@ Ansible 落点：`ansible/inventories/a3/group_vars/all.yml` 的 `_1m_v030_hyb.p
 | 布局规划（GVA 版） | `layerwise_cache_layout.py:128` |
 | **复用布局（slot/prefetch）** | `layerwise_cache_layout.py:210` |
 | **合并 tensor 描述符** | `layerwise_cache_layout.py:297` |
-| 连续页校验 | `layerwise_cache_layout.py:347` |
+| 非 attention spec 拒绝 | `layerwise_cache_layout.py:280-285` |
+| 同桶 spec 一致性校验 | `layerwise_cache_layout.py:357-361` |
 | 模式判定（GVA） | `pool_worker.py:231` |
-| 复用状态构建（R2） | `pool_worker.py:490` / `:611-646` |
-| slot waiter 注册（R2c） | `pool_worker.py:722` |
-| 加载任务提交（门控传递） | `pool_worker.py:2748-2760` |
+| 复用状态构建（R2a/R2b） | `pool_worker.py:490` / `:611-646` |
+| **slot waiter 注册（R2c）** | `pool_worker.py:722` |
+| 加载任务提交（门控传递） | `pool_worker.py:2748-2762` |
+| waiter fallback 调用 | `pool_worker.py:2804-2805` |
 | scheduler 复用布局（R3） | `pool_scheduler.py:237-257` |
-| chunk 粒度与 floor 工具 | `pool_scheduler.py:147` / `:622` |
+| chunk 粒度与 floor | `pool_scheduler.py:147` / `:622` |
 | KV 预算放大 + 日志 | `worker/worker.py:629-647` |
 | 布局应用（v1 / v2） | `worker/model_runner_v1.py:4609` / `worker/v2/model_runner.py:374` |
 | 加载侧门控实现 | `kv_transfer.py:2043-2060` |
 | 保存完成信号 | `kv_transfer.py:1812` |
-| P2P waiter 提供方 | `kv_p2p/mooncake_layerwise_connector.py:749` |
-| MultiConnector 接线 | `ascend_multi_connector.py:76-95` |
+| **MultiConnector 两阶段 save + waiter 注册** | `ascend_multi_connector.py:85-95` / `:144-168` |
+| PD 连接器 reuse 能力 | `kv_p2p/mooncake_layerwise_connector.py:749` / `:831` / `:1327` |
+| SfaRemoteD2H reuse 能力 | `kv_p2p/sfa_pd_rd2h/connector.py:58` / `:303` |
