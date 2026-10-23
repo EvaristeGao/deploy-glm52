@@ -663,6 +663,25 @@ GLM-5.2 形状（78 main int8 576 + 78 indexer int8 128 + 1 MTP）：
 | V2（复用正确性） | 同 prompt 两次输出一致；容量按 24 slots 放大（当前 P 侧实测 ×3.005） |
 | 部署切换 | 切到 `1m-v030-poff` 需重启；D 侧 KV 从 int8 变 BF16、走 sparse 路径，属**行为级变更**，应单独安排窗口 |
 
+### 12.4 运行时验证（2026-10-24）：被 memfabric 版本卡住
+
+切换 `1m-v030-poff`（P=SfaRemoteD2H+Store(reuse)、D=SfaRemoteD2H+sparse offload、D 主 KV BF16）启动，两侧都在
+engine init 失败：
+
+| 侧 | 报错 | 结论 |
+| :--- | :--- | :--- |
+| **P** | `ImportError: cannot import name 'TransDataOpType' from 'memfabric_hybrid'` | **硬阻塞**：镜像里 `memfabric_hybrid 1.2.0` 只导出 `TransferEngine`/`TransferOpcode`，而 `memfabric_transfer_engine.py:147` 需要 `TransDataOpType`（SDMA / DEVICE_RDMA）→ 需要**更新版本的 memfabric_hybrid** |
+| D | `torch.OutOfMemoryError: Tried to allocate 2.53 GiB（61.27 GiB total，60.09 已分配）` | 附带问题：D 侧 sparse offload 的 topk/预算超了，即使 memfabric 修好也要调 `gpu_memory_utilization` / `topk_buffer_size` |
+
+已回退到 `1m-v030-hyb` 恢复服务：4 引擎 200、proxy ok、P 侧 reuse 仍生效
+（`maps 79 layers onto 24 buffer assignments; scale ... by 3.005`，1,927,552 tokens）。
+
+**后续可选路径**：
+(a) 换含 `TransDataOpType` 的 memfabric_hybrid（A5 环境那套 `/usr/local/memfabric_hybrid` 或对应 wheel）；
+(b) 写兼容 shim，把 `TransDataOpType.SDMA/DEVICE_RDMA` 映射到 1.2.0 的 `TransferOpcode`（需核对 1.2.0 API 语义）；
+(c) 改用 `MooncakeLayerwiseConnector`（按层 push 到 D 的 HBM，不依赖 memfabric/sparse offload，但目标不是 DRAM）；
+(d) 维持现状（P 侧 reuse 已验证，容量 ×3）。
+
 ## 附录 A：代码锚点索引（基线 `5f828ad63`）
 
 | 关注点 | 位置 |
