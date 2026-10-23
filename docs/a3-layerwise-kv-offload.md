@@ -5,6 +5,9 @@
 - [Mooncake Layerwise Adaptation and Optimization](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.html)
 - [Layerwise and Sparse KV Cache Offloading](https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.html)
 
+> 设计文档：[Mooncake 后端 Prefill 侧 KV Buffer 复用（store-only P/D）](./mooncake-prefill-reuse-design.md)
+> —— P 侧 prefill 省 HBM 的实现方式与 PD transfer 契约（本文件只记录实测与运维口径）。
+
 本项目实现两档（同一份 `use_layerwise`，连接器形状不同）：
 
 | 档位 | 形状 | 说明 |
