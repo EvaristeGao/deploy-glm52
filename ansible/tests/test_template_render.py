@@ -1109,9 +1109,15 @@ def test_a3_v030_hyb_matches_doc_configuration():
         assert e["layerwise_prefetch_layers"] == lw["prefetch_layers"]
         assert e["layerwise_max_transfer_blocks"] == lw["max_transfer_blocks"]
         assert e["layerwise_max_transfer_bytes"] == lw["max_transfer_bytes"]
-        # 文档明说 cross-layer cache-buffer reuse 不属于该实现 ⇒ 不得出现复用旋钮
-        assert "layerwise_num_shared_buffers" not in e
-        assert "layerwise_independent_layers" not in e
+        # Phase-1：P（kv_producer）侧 opt-in 复用；D 侧不得出现复用旋钮
+        reuse_on = bool(gv_on["pd_cluster"]["layerwise"].get("buffer_reuse"))
+        if role == "prefill" and reuse_on:
+            assert e["use_layerwise_buffer_reuse"] is True
+            assert e["layerwise_num_shared_buffers"] == gv_on["pd_cluster"]["layerwise"]["num_shared_buffers"]
+        else:
+            assert "use_layerwise_buffer_reuse" not in e
+            assert "layerwise_num_shared_buffers" not in e
+            assert "layerwise_independent_layers" not in e
         # 不再是 MultiConnector / 不再挂 P-D 直连 connector
         assert '"kv_connector": "MultiConnector"' not in out
         assert "MooncakeConnectorV1" not in out

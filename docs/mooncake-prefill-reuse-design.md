@@ -561,6 +561,55 @@ grep -a 'External prefix cache hit rate'                      vllm_d*.log | tail
 
 ---
 
+## 11. Phase-1 实测记录（2026-10-23，store-only 拓扑）
+
+### 11.1 V0 离线验证（CPU，容器内，`ansible/repros/verify_prefill_reuse_layout.py`）
+
+GLM-5.2 形状（78 main int8 576 + 78 indexer int8 128 + 1 MTP）：
+
+| 项 | 结果 |
+| :--- | :--- |
+| 分类 | 79 物理层、78 indexer、无 `extra_main_specs` ✅ |
+| 规划 | `has_layer_reuse=True`、`buffer_slots=10`、`prefetch_map=69`、factor **7.90x** ✅ |
+| 合并 | 157 descriptors → 20，**无丢层** ✅ |
+| key 空间 | `hybrid_layout_id` 前后一致 ✅ |
+| 变体 | shared-indexer（每 4 层共享）/ B=16 同样 PASS ✅ |
+
+### 11.2 真机启动：复用生效，但数据面报 -800
+
+补丁（只读挂载，不改镜像）：`ansible/repros/patch/reuse/`
+（`mooncake_layerwise.py` R1+R4、`pool_worker.py` R2a/b/c、`pool_scheduler.py` R3、`layerwise_cache_layout.py` 两处修正）。
+
+| 观测 | 值 |
+| :--- | :--- |
+| 复用日志 | `Layerwise KV cache reuse maps 79 layers onto 24 buffer assignments; scale logical KV budget by 3.005` |
+| P `Available KV cache memory` | 33.12 GiB → **99.54 GiB** |
+| P `NPU KV cache size` | 641,408 → **1,927,680 tokens**（×3.005） |
+| D | 697,984 tokens（不变，符合预期） |
+| 4 引擎 / proxy | 200 / `{"status":"ok",...}` |
+| **数据面** | **`Range write failed, entry=0..15, error=-800`** ⇒ 请求失败 |
+
+### 11.3 本轮发现的两个硬问题（已修/待修）
+
+1. **indexer 的页面 padding 不一致**（已修）：`AscendSFAIndexerCacheSpec.page_size_bytes=16640`，
+   但真实 descriptor 用 **unpadded 16384**。`apply_layerwise_kv_cache_plan` 必须用
+   `unpadded_page_size_bytes` 做校验与新 descriptor 的 `size/block_stride`。
+2. **indexer spec 是 `AscendSFAIndexerCacheSpec` 且 full/shared 混合**（已绕过）：
+   按 main spec 分桶会让同槽层的 indexer spec 不一致 → `_merge_specs` ValueError。
+   改为按「main + indexer + extra 的完整签名」分桶后启动通过，但 slots 从 10 涨到 **24**（factor 7.9 → 3.0）。
+   **待优化**：main 与 indexer 分别分桶（各自复用），可回到约 6.7x。
+3. **数据面地址表未跟随合并后的布局**（待修，下一步）：合并把多层别名到同一物理槽
+   （`layer_stride=0`、`block_stride=unpadded_page`），但 `kv_transfer.build_addrs` /
+   `pool_worker` 的 `_kv_caches_base_addr_np` / `_block_len_np` / `_block_stride_np` /
+   `_layer_cache_entry_offsets_np` 仍按旧布局生成 → 传给 TE 的本地地址非法 → `Range write failed -800`。
+
+### 11.4 下一步（按顺序）
+
+1. 修地址表：让 `build_addrs` 的 `all_buffers` 由**合并后的 descriptor** 生成，并补 V0 的地址一致性检查；
+2. main/indexer 独立分桶，把 factor 从 3.0 拉回约 6.7；
+3. 重跑 V1（容量）× V2（正确性：同 prompt 两次一致 + needle）；
+4. 通过后再考虑 D2H（§4）与 waiter（R2c）联调。
+
 ## 附录 A：代码锚点索引（基线 `5f828ad63`）
 
 | 关注点 | 位置 |

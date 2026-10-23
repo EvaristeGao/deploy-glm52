@@ -229,7 +229,8 @@ vllm serve {{ model_path }} \
     "kv_connector_extra_config": {
         "lookup_rpc_port":"0",
         "backend": "mooncake",
-        "use_layerwise": {% if lw.enabled | default(true) %}true{% else %}false{% endif %}{% if lw.enabled | default(true) %},
+        "use_layerwise": {% if lw.enabled | default(true) %}true{% else %}false{% endif %}{% if lw.buffer_reuse | default(false) %},
+        "use_layerwise_buffer_reuse": true{% endif %}{% if lw.enabled | default(true) %},
         "layerwise_prefetch_layers": {{ lw.prefetch_layers | default(2) }},
         "layerwise_max_transfer_blocks": {{ lw.max_transfer_blocks | default(64) }},
         "layerwise_max_transfer_bytes": {{ lw.max_transfer_bytes | default(16777216) }}{% if lw.num_shared_buffers is defined %},

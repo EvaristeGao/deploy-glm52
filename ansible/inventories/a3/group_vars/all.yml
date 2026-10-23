@@ -375,6 +375,12 @@ _1m_v030_hyb:
     #   ASCEND_LOCAL_COMM_RES 会触发 hixl 的 LocalCommResGenerator 按 (ip, device_id, device_port)
     #   生成每个 device 的 endpoint/rank table —— 正好对应我们一直看到的
     #   `Dest buffer device_id=N >= endpoint count 1, falling back to ...`（没有它每个 segment 只有 1 个 endpoint）。
+    # ★ Phase-1 复用补丁：只读挂载三个打过 PR 的模块（R1/R2/R3），不改镜像
+    debug_mounts:
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/mooncake_layerwise.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/backend/mooncake_layerwise.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_scheduler.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/layerwise_cache_layout.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py
     extra_env:
       # 2026-10-20 试 RoCE 路（用户要求）：A3 上默认 HCCL_INTRA_ROCE_ENABLE 只在 a2 模板里开，
       # A3 模板从来没设过；这里显式打开 RoCE、关掉 PCIe，配上 hixl_preset=roce（roce:device）。
@@ -414,11 +420,16 @@ _1m_v030_hyb:
         # 先给 1（=1 TB 虚拟池）；task_stream_num 是单任务流数量。
         ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config":{"protocol_desc":"ubmem"},"fabric_memory":{"max_capacity":1,"task_stream_num":4}}'
     layerwise:
-      # 2026-10-23 A-TTL 组：lease TTL 11000→300000 后，回到 A 组原参数验证 warm 是否恢复
-      #   （A 组此前：128K cold 246.9s / warm 183.5s；普通池化 60.5s / 11.1s）
+      # 2026-10-23 Phase-1：P 侧 prefill buffer reuse（store-only 拓扑先验证）
+      #   use_layerwise_buffer_reuse 只渲染到 P 模板；D 侧不打开
       enabled: true
-      prefetch_layers: 2               # 文档原值 2
-      max_transfer_blocks: 64          # 文档原值 64
+      # 2026-10-23 Phase-1 实测：opt-in 生效（79 层→24 slots，P 容量 641,408→1,927,680 tokens, ×3.0），
+      #   但数据面 `Range write failed -800` —— 传输侧按层地址表仍是旧布局，需修 build_addrs。
+      #   暂回退 false 恢复服务；修好后再打开。
+      buffer_reuse: false
+      num_shared_buffers: 9            # B=9（> send_fence_backlog=8）
+      prefetch_layers: 2
+      max_transfer_blocks: 64
       # 2026-10-21 已验证：mooncake 后端不 opt-in reuse，传 num_shared_buffers 被静默忽略
       #   （设 8 后 P 仍 33.12 GiB / 641,408 tokens、D 仍 36.05 GiB / 697,984 tokens，与基线一致）。
       #   要 reuse 必须换 memcache(GVA) 后端（其 extract_layout_config 会在 use_layerwise=true 时返回 extra_config）。
