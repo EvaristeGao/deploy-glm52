@@ -264,11 +264,12 @@ vllm serve {{ model_path }} \
                 "kv_connector_extra_config": {
                     "lookup_rpc_port":"0",
                     "backend": "mooncake",
-                    "use_layerwise": true,
+                    "use_layerwise": true,{% if pd_cluster.prefill_kv_offload.buffer_reuse | default(false) %}
+                    "use_layerwise_buffer_reuse": true,{% endif %}
                     "layerwise_prefetch_layers": {{ lw.prefetch_layers | default(2) }},
                     "layerwise_max_transfer_blocks": {{ lw.max_transfer_blocks | default(64) }},
                     "layerwise_max_transfer_bytes": {{ lw.max_transfer_bytes | default(16777216) }},
-                    "layerwise_num_shared_buffers": {{ pd_cluster.prefill_kv_offload.shared_buffers | default(3) }},
+                    "layerwise_num_shared_buffers": {{ pd_cluster.prefill_kv_offload.shared_buffers | default(9) }},
                     "layerwise_independent_layers": {{ (pd_cluster.prefill_kv_offload.independent_layers | default([0])) | tojson }}
                 }
             }

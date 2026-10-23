@@ -628,6 +628,41 @@ GLM-5.2 形状（78 main int8 576 + 78 indexer int8 128 + 1 MTP）：
 2. D2H（主 KV 进 D 的 DRAM）+ waiter（R2c）联调；
 3. 向上游提 PR：R1–R4 + 两处 layout 修正 + 死锁修复；`docs/` 与单测（U1–U7）一并提交。
 
+## 12. 附：D2H（SfaRemoteD2HConnector）可用性评估（2026-10-24）
+
+目标形态：**P 按层把 KV 交给 D，主 KV 直接落 D 的 DRAM**（pool 只做 prefix cache）。
+
+### 12.1 结论：**改造后可用，且不需要改 vllm-ascend 传输层代码**
+
+| 前置 | 事实 | 是否满足 |
+| :--- | :--- | :--- |
+| sparse KV 自定义算子 | `_C_ascend` 里 7 个 `sparse_kv_*` 算子**全部存在**（导入 `vllm_ascend_C` 后 `hasattr` 均为 True） | ✅ 本镜像可用，无需重编 |
+| memfabric | `memfabric_hybrid` 已装（1.2.0），`transfer_backend=memfabric` 可导入 | ✅ |
+| layerwise 代理 | 镜像自带 `examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py` | ✅ |
+| 按层接口 | `save_kv_layer` / `wait_for_layer_load` / `wait_for_layer_reuse` + `supports_layerwise_buffer_reuse=True` | ✅ |
+| D 侧前置 | `sparse_kv_offload_config.enabled=true`（connector 里是 assert）、主 KV **BF16**、`keep_device_kv_cache=false` | 需配置 |
+| P 侧 reuse | 需要 `use_layerwise_buffer_reuse`（否则 `layerwise_num_shared_buffers` 被静默忽略） | 已补 |
+
+### 12.2 本仓库已落地的最小改动
+
+1. `ansible/templates/run_dp_prefill_template.sh.j2`：`prefill_kv_offload` 分支新增
+   `"use_layerwise_buffer_reuse": true`（受 `prefill_kv_offload.buffer_reuse` 控制），
+   `shared_buffers` 默认值 3 → **9**（> `send_fence_backlog=8`，否则复用门控会 stall）；
+2. `ansible/inventories/a3/group_vars/all.yml` 的 `_1m_v030_poff`（= D2H 档）：
+   `prefill_kv_offload.buffer_reuse: true`、`shared_buffers: 9`，并挂上 4 个 reuse 补丁（`debug_mounts`）；
+3. 渲染验证（`gen -e deploy_config=1m-v030-poff`）：
+   - P：`SfaRemoteD2HConnector(producer)` + `AscendStoreConnector(producer, mooncake, use_layerwise, use_layerwise_buffer_reuse=true, num_shared_buffers=9)`
+   - D：`SfaRemoteD2HConnector(consumer)` + `sparse_kv_offload_config {enabled:true, topk_buffer_size:12288, dram_size_per_dp_GB:512}` + **不渲染** `--kv-cache-dtype`（BF16）
+
+### 12.3 仍需运行时验证（下一步）
+
+| 项 | 判据 |
+| :--- | :--- |
+| V8（D 侧 sparse offload） | 与 dense 逐 token 对拍一致；D 的 DRAM 占用符合预估（约 18.45 GB/200K 请求，BF16）；D HBM 只剩 indexer + topk |
+| V5（waiter） | P 侧 `wait_for_layer_reuse` 生效（D 读完前不覆写），无 `Range write failed` |
+| V2（复用正确性） | 同 prompt 两次输出一致；容量按 24 slots 放大（当前 P 侧实测 ×3.005） |
+| 部署切换 | 切到 `1m-v030-poff` 需重启；D 侧 KV 从 int8 变 BF16、走 sparse 路径，属**行为级变更**，应单独安排窗口 |
+
 ## 附录 A：代码锚点索引（基线 `5f828ad63`）
 
 | 关注点 | 位置 |

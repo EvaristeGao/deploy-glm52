@@ -594,6 +594,12 @@ _1m_v030_poff:
     max_model_len: 204800
     num_cards: 16
     v030_env: true
+    # D2H 档同样挂 Phase-1 复用补丁（只读）
+    debug_mounts:
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/mooncake_layerwise.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/backend/mooncake_layerwise.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_scheduler.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/layerwise_cache_layout.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py
     layerwise:
       enabled: true
       prefetch_layers: 2
@@ -604,7 +610,8 @@ _1m_v030_poff:
       sfa_remote_d2h: true              # 渲染 SfaRemoteD2HConnector(producer) 并去掉 MooncakeConnectorV1
       kv_port: 20050                    # SfaRemoteD2H 的 side-channel 基址（子 connector 读自己的 kv_port）
       memfabric_transfer_protocol: sdma  # A3 用 sdma/device_rdma；950 系用 device_urma（两侧必须一致）
-      shared_buffers: 3                 # → layerwise_num_shared_buffers（文档建议 2~4）
+      buffer_reuse: true                # ★ Phase-1 补丁下的 buffer reuse（需 debug_mounts 挂 R1–R4）
+      shared_buffers: 9                 # B=9（> send_fence_backlog=8；文档 2~4 会 stall）
       independent_layers: [0]           # → layerwise_independent_layers（文档默认 [0]；"all" 等于不复用）
     # ---- decode 侧 offload（doc §3）----
     decode_kv_offload:
