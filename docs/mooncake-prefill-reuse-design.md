@@ -1,16 +1,16 @@
-# Mooncake 后端 Prefill 侧 KV Buffer 复用 —— 设计文档（D2D P/D）
+# Mooncake 后端 Prefill 侧 KV Buffer 复用 —— 设计文档（D2H P/D：主 KV 进 D 的 DRAM）
 
 | 项 | 值 |
 | :--- | :--- |
 | **代码基线** | `~/code/python/vllm-ascend` @ `5f828ad63`（v0.30.0rc1），与生产镜像 `glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13` 同版本 |
 | **目标后端** | `backend=mooncake`，`LAYERWISE_DATA_PLANE = "block_key"`（`backend/mooncake_layerwise.py:27`） |
-| **PD 交接** | **D2D（P→D 点对点）**，池（AscendStore + Mooncake）只承担跨请求 prefix cache，**不作为** P/D 交接通道 |
-| **目标拓扑** | P：`MultiConnector[PD 逐层连接器(producer), AscendStoreConnector(producer, mooncake, use_layerwise)]`<br>D：`MultiConnector[PD 逐层连接器(consumer), AscendStoreConnector(consumer, consumer_is_to_load)]` |
-| **范围** | 仅 **prefill（P 侧）** 的 HBM 物理 buffer 复用；D 侧 KV 布局零改动 |
+| **PD 交接** | **D2H（P 暴露 HBM，D 拉取）**：主 KV 直接落 **D 的 DRAM**（CPU pool），indexer KV 落 D 的 HBM；池（AscendStore + Mooncake）只承担跨请求 prefix cache，**不作为** P/D 交接通道 |
+| **目标拓扑** | P：`MultiConnector[SfaRemoteD2HConnector(producer, memfabric), AscendStoreConnector(producer, mooncake, use_layerwise, reuse)]`<br>D：`SfaRemoteD2HConnector(consumer)` + `additional_config.sparse_kv_offload_config.enabled=true` |
+| **范围** | **prefill（P 侧）** 的 HBM 物理 buffer 复用为主体；D 侧因 D2H 需要切 sparse offload（主 KV 进 DRAM、BF16），属配套改动 |
 | **相关既有文档** | `prefill_kvoffload_block_key_reuse_design.md`（接线细节）、`prefill_offload_mooncake_codelevel_design.md`（代码级详版）、`prefill_kvoffload_two_schemes.md`（收益预估） |
 
 > 与既有文档的关系：复用机制沿用前两份的结论（不重复推导）。本篇的增量是
-> ① **D2D 为 PD 主路径**（池不参与交接）后的双消费者门控与 waiter 链路；
+> ① **D2H 为 PD 主路径**（主 KV 进 D 的 DRAM，池不参与交接）后的双消费者门控与 waiter 链路；
 > ② 与本项目实测（RoCE、lease TTL、容量/延迟）对齐的落地参数；
 > ③ 把「哪些部分被证实、哪些仍待验证」写清。
 
@@ -21,16 +21,22 @@
 1. **复用机制在当前代码里已经完整存在**，唯一堵点是 `mooncake_layerwise.extract_layout_config()` 恒 `return None`
    （`backend/mooncake_layerwise.py:77-80`）。要写的代码是「一个显式开关 + 门控归属迁移 + 防御校验」，
    不新增数据面。
-2. **PD 交接走 D2D**（走池太慢）：P 每层算完就把 KV 点对点推给 D 的 HBM
-   （`MooncakeLayerwiseConnector`），或由 D 从 P 的 HBM 拉走（`SfaRemoteD2HConnector`）。
-   池只负责**跨请求 prefix cache**：P 仍把每层 range put 进 Mooncake，D 命中时仍从池读前缀。
-3. 于是 P 的共享 buffer 有**两个消费者**：**PD 推送**和**池写入**。槽位覆写前必须两者都完成：
-   - PD 侧：`wait_for_layer_reuse(layer)` → 等发送线程的 `storage_send_done_events[slot]`；
+2. **PD 交接走 D2H，主 KV 直接进 D 的 DRAM**（走池太慢、进 HBM 又占显存）：
+   P 只**暴露**自己的 HBM，D 的读线程按层把 KV 拉到 **D 的 CPU pool（DRAM，GVA 寻址）**
+   （`sfa_pd_rd2h/read_thread.py:546` `main_gva_bases`），indexer KV 落 D 的 HBM（`:580` `d_base`）。
+   连接器是 `SfaRemoteD2HConnector`（`transfer_backend=memfabric`），也是官方文档唯一列为
+   prefill offload + reuse 支持的连接器。池只负责**跨请求 prefix cache**（P 仍逐层 range put）。
+3. 于是 P 的共享 buffer 有**两个消费者**：**D 的拉取（RD2H）**和**池写入**。槽位覆写前必须两者都完成：
+   - PD 侧：`wait_for_layer_reuse(layer)` → 等 D 的读线程确认该槽位已读完；
    - 池侧：`batch_put_from_multi_buffer_ranges` 返回（同步语义，数据已离开 HBM）。
    ⇒ **R2c（把 slot-release waiter 接到 block-key 平面）从"可选"变成"必需"**。
-4. **收益是解除 P 侧并发上限**：P 79 层（78 + 1 MTP）→ B=9 时 10~11 个物理 buffer，KV 逻辑容量放大约
-   **7.2~7.9x**（641,408 → 约 4.6~5.1M tokens，200K 下并发 3.16 → 约 23~25）；D 仍是 697,984 tokens
-   （3.44 并发 @200K），端到端并发不因本特性提升。
+4. **收益是两侧同时解锁**：
+   - **P**：79 层 → B=9 时 10~11 个物理 buffer，KV 逻辑容量 ×7.2~7.9（641,408 → 约 4.6~5.1M tokens，
+     200K 下并发 3.16 → 约 23~25）；
+   - **D**：主 KV 不再常驻 HBM（`keep_device_kv_cache=false`），改由 DRAM 承载；HBM 只剩 indexer
+     （约 2.05 GB/200K 请求）与 topk buffer ⇒ D 的 HBM 边界从 3.44 提升到约 17（indexer 限制），
+     而 DRAM（本机 2.0 TiB）可支撑 65+，不是瓶颈。
+   （数值为估算，需 §7 V8 实测。）
 5. **两个硬前置**：
    - `default_kv_lease_ttl` ≥ 单请求 onload 时长（实测 11s → 128K warm 183.5s；300s → 26.45s）；
    - chunk 边界与 `cache_transfer_granularity`(128) 对齐（partial block 无法落池，见 §5.2）。
@@ -48,8 +54,9 @@
 - P 侧（`kv_producer`）在 prefill 期间把 KV 的物理 HBM buffer 从「每层一份」降为「B 份轮转」，
   同卡容纳更长的前缀 / 更多并发请求；
 - 复用只改变 **HBM 侧 buffer 管理**：**不改变** pool 对象布局、block key 格式、session 语义；
-- PD 交接保持 D2D 直传（不经池）：交接落点是 **D 的 HBM**，与 P 的 buffer 覆写相对独立，
-  但 P 的覆写必须等 PD 推送完成（§4.4）。
+- PD 交接走 **D2H**：P 只暴露 HBM，D 按层拉取——**主 KV 落 D 的 DRAM**，indexer 落 D 的 HBM；
+  不经池，因此交接延迟低，且 D 的 HBM 不为「主 KV 常驻」买单；
+- P 的 buffer 覆写必须等 D 读完该槽位（`wait_for_layer_reuse`，§4.4）。
 
 ### 1.2 非目标（第一版不做）
 
@@ -57,19 +64,30 @@
 | :--- | :--- |
 | D 侧（decode）复用 | decode 每步都要所有层 KV，复用会退化成「每步从池重载」；decode offload 属另一特性 |
 | DCP/PCP > 1 | `validate_topology`（`mooncake_layerwise.py:177`）硬拒；CP 需给 block key 加坐标 |
-| P/D TP mismatch | 同上硬拒；D2D 连接器另有「P TP ≥ D TP 且整除」的约束 |
+| P/D TP mismatch | 同上硬拒；D2H 连接器另有「P TP ≥ D TP 且整除」的约束 |
 | partial block 落池 | block-key 平面没有 partial key（GVA 有），对象必须按完整块内容寻址 |
 | 池作为 P/D 交接通道 | 延迟/带宽不可接受，列为对照方案（§4.7） |
 | `MooncakeConnectorV1` 按块 pull | 与复用结构性互斥（请求算完才 pull，早期层已被覆写），必须 fail-fast |
 
 ### 1.3 收益边界（避免误判）
 
+**场景一：只开 P 复用，D 不动（store-only）**
+
 | 引擎 | 现状容量 | 复用后（B=9） | 200K 并发上限 |
 | :--- | :--- | :--- | :--- |
-| P（79 层） | 641,408 tokens / 33.12 GiB | 约 4.6M（含 MTP 排除）/ 5.07M（不排除） | 3.16 → **约 23~25** |
-| D（79 层） | 697,984 tokens / 36.05 GiB | **不变** | 3.44 |
+| P（79 层） | 641,408 tokens / 33.12 GiB | 约 4.6M / 5.07M tokens | 3.16 → **约 23~25** |
+| D（79 层） | 697,984 tokens / 36.05 GiB | 不变 | 3.44（**成为新瓶颈**） |
 
-> 本特性把「P 先撞墙」变成「D 先撞墙」；端到端并发提升需叠加 D 侧 offload（另行立项）。
+**场景二：P 复用 + D 侧 D2H/sparse offload（本设计的完整形态）**
+
+| 资源 | 现状 | D2H 之后 | 200K 并发上限（估算） |
+| :--- | :--- | :--- | :--- |
+| P HBM（复用后） | 641,408 tokens | ≈4.6~5.1M tokens | 约 23~25 |
+| D HBM（indexer + topk） | 36.05 GiB（全部 79 层） | 只剩 indexer（约 2.05 GB/请求）+ topk | 约 17（indexer 限制） |
+| D DRAM（主 KV，BF16） | 不参与 | 约 18.45 GB/请求；本机 2.0 TiB，可用 1.18 TiB | 65+（不是瓶颈） |
+
+> 本设计把系统并发从 **3.44** 推向 **约 17**（HBM indexer 成为新边界）。
+> 所有数字为估算，需 §7 V8 用真实 sparse offload 验证；未开 D 侧 offload 时仍是场景一。
 
 ---
 
@@ -91,7 +109,7 @@
 | `_layerwise_reuse_layout` | `pool_worker.py:490`（`_init_layerwise_config`） | B | A |
 | `prefetch_layer_map` / `independent_layers` | `pool_worker.py:611-646` | B | A |
 | scheduler 侧复用布局 | `pool_scheduler.py:237-257` | B（外层）+ A（内层） | A |
-| `set_external_slot_release_waiter` | `pool_worker.py:722` | B | **A（D2D 必需）** |
+| `set_external_slot_release_waiter` | `pool_worker.py:722` | B | **A（D2H 必需）** |
 | `reuse_source = prefetch_layer_map.get(...)` | `pool_worker.py:2748-2750` | A（经 `prefetch_layer_map`） | A |
 
 ### 2.2 已经就绪、无需改动的三要素
@@ -103,8 +121,8 @@
 3. **保存侧完成信号**：`kv_transfer.py:1812` 在 range put 结束后置位本层 save 事件。
 
 > 覆写保护是传递的：层 L 的 attention 写共享 buffer 前，必经「等源层 save 完成（+ 加载 L 的前缀）」→
-> `layer_load_finished_events[L]` → `wait_for_layer_load` 返回。**store-only 下这就够了；D2D 下还差一步
-> ——等 PD 把源层推送给 D 完成（§4.4）。**
+> `layer_load_finished_events[L]` → `wait_for_layer_load` 返回。**store-only 下这就够了；D2H 下还差一步
+> ——等 D 把源层读完（§4.4）。**
 
 ---
 
@@ -154,12 +172,12 @@ else:
 ```
 
 ```python
-# R2c  set_external_slot_release_waiter (:722) —— D2D 复用必需
+# R2c  set_external_slot_release_waiter (:722) —— D2H 复用必需
 #      现在：if not self.use_layerwise_transfer: return False
 #      改为：if not self.use_layerwise: return False
 ```
 
-> R2c 的意义：D2D 下 P 的槽位要被层 L+B 覆写，必须确认层 L 已被推送给 D 且 D 已收完。
+> R2c 的意义：D2H 下 P 的槽位要被层 L+B 覆写，必须确认层 L 已被 D 读完。
 > `MultiConnector` 会把 PD producer 的 `wait_for_layer_reuse` 包装成
 > `_wait_for_external_slot_release(layer_idx)` 注册进来（`ascend_multi_connector.py:85-95`），
 > store connector 接单后由 recv 线程在覆写前调用（`kv_transfer.py:2060`）。
@@ -227,26 +245,31 @@ def validate_runtime(*, use_hybrid, has_recurrent_state, tp_mismatch,
 | 项 | 原因 |
 | :--- | :--- |
 | `send_fence_backlog()` / `fence_drains_recv()` | 为重叠调过；第一版用 B>8 规避 |
-| `kv_transfer.py` 传输线程 | 门控与 range 收发已就绪（D2D 的 waiter 调用点位已存在：`:2060`） |
+| `kv_transfer.py` 传输线程 | 门控与 range 收发已就绪（waiter 调用点位已存在：`:2060`） |
 | block key 格式 / `hybrid_layout_id` | 复用不改变 key 空间（层是对象内 offset） |
 | `mooncake_backend.py` | session/range 原语足够 |
-| D 侧 KV 布局 | 复用是 P 专属 |
+| 复用本身对 D 的影响 | 复用只在 P 生效；D 的改动仅来自 D2H（sparse offload），与本复用的门控无关 |
 
 ---
 
-## 4. PD transfer（D2D）
+## 4. PD transfer（D2H → D 的 DRAM）
 
 ### 4.1 连接器选型
 
-| 方案 | 连接器 | 交接方式 | reuse 支持 | 官方文档 | 对 D 的要求 | 依赖 |
+| 方案 | 连接器 | 交接目的地 | reuse 支持 | 官方文档 | 对 D 的要求 | 依赖 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **A（推荐）** | `MooncakeLayerwiseConnector` | P 逐层 **push** 到 D 的 HBM | `supports_layerwise_buffer_reuse=True`（`:749`）+ `wait_for_layer_reuse`（`:831`） | ❌ 未列入 offload 支持清单 | D 保持现有全层 HBM 布局，**无需改 decode** | 镜像自带 `mooncake_layerwise_connector.py` |
-| **B（文档支持）** | `SfaRemoteD2HConnector` | D 从 P 的 HBM **pull**（memfabric/SDMA） | `supports_layerwise_buffer_reuse=True`（`sfa_pd_rd2h/connector.py:58`）+ `wait_for_layer_reuse`（`:303`） | ✅ 官方列为 prefill/decode offload 唯一支持连接器 | D 需 `sparse_kv_offload_config.enabled=true`，主 KV 必须 BF16（indexer 可 int8） | `memfabric_hybrid`（镜像已装 1.2.0）；P TP ≥ D TP 且整除 |
+| **B（推荐，本设计）** | `SfaRemoteD2HConnector` | **D 的 DRAM**（主 KV，CPU pool）+ D 的 HBM（indexer） | `supports_layerwise_buffer_reuse=True`（`sfa_pd_rd2h/connector.py:58`）+ `wait_for_layer_reuse`（`:303`） | ✅ 唯一被列为 prefill/decode offload 的连接器 | `sparse_kv_offload_config.enabled=true`、`keep_device_kv_cache=false`、主 KV **BF16**（indexer 可 int8） | `memfabric_hybrid`（镜像已装 1.2.0）；`transfer_backend=memfabric`；P TP ≥ D TP 且整除 |
+| **A（备选）** | `MooncakeLayerwiseConnector` | D 的 **HBM**（P 逐层 push） | `supports_layerwise_buffer_reuse=True`（`:749`）+ `wait_for_layer_reuse`（`:831`） | ❌ 未列入 offload 支持清单 | 保持现有全层 HBM 布局 | 镜像自带；无需 memfabric |
 | **C（禁止）** | `MooncakeConnectorV1` | 请求算完后按块 pull | ❌ | — | — | 与复用结构性互斥（§4.5） |
 
-**推荐 A**：不改 D 的 decode 内存布局（我们 D 现在是 int8 主 KV、全层驻留），改造面最小；
-但要接受"文档未验证"的风险，并把 V5 的 waiter 链路验证作为准入门槛。
-若 A 验证失败，退到 B（需要 D 侧切 BF16 + sparse offload，属额外改动）。
+**推荐 B（D2H → D 的 DRAM）**，理由：
+1. 主 KV 不占 D 的 HBM ⇒ D 侧 HBM 只剩 indexer + topk，容量从 3.44 提升到约 17（§1.3 场景二）；
+2. 官方文档明确把 `SfaRemoteD2HConnector` 列为 prefill offload + reuse 的支持连接器（`layerwise_and_sparse_kv_cache_offloading.md:74`）；
+3. 代价：D 侧要切 sparse offload + BF16 主 KV（额外验证项 V8），且 proxy 必须用镜像里的
+   `load_balance_proxy_layerwise_server_example.py`（D 要回调 `/v1/metaserver` 做 rendezvous）。
+
+**方案 A 仅作为回退**：当 B 的 sparse offload 链路在本环境不可用时，退回「P push 到 D HBM」，
+复用的门控逻辑不变（只是交接目的地不同）。
 
 ### 4.2 配置形状
 
@@ -254,8 +277,12 @@ def validate_runtime(*, use_hybrid, has_recurrent_state, tp_mismatch,
 // P（kv_producer）
 "kv_connector": "MultiConnector",
 "kv_connector_extra_config": {"connectors": [
-  { "kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_producer",
-    "kv_connector_extra_config": { "engine_id": "0", "kv_port": "26001" } },
+  { "kv_connector": "SfaRemoteD2HConnector", "kv_role": "kv_producer",
+    "kv_port": "26001",
+    "kv_connector_extra_config": {
+      "transfer_backend": "memfabric",
+      "memfabric_transfer_protocol": "sdma"     // A3: sdma | device_rdma；两侧必须一致
+    } },
   { "kv_connector": "AscendStoreConnector", "kv_role": "kv_producer",
     "kv_connector_extra_config": {
       "lookup_rpc_port": "0", "backend": "mooncake",
@@ -268,34 +295,42 @@ def validate_runtime(*, use_hybrid, has_recurrent_state, tp_mismatch,
     } }
 ] }
 
-// D（kv_consumer）
-"kv_connector": "MultiConnector",
-"kv_connector_extra_config": {"connectors": [
-  { "kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_consumer",
-    "kv_connector_extra_config": { "engine_id": "0", "kv_port": "26001" } },
-  { "kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer",
-    "kv_connector_extra_config": {
-      "lookup_rpc_port": "0", "backend": "mooncake",
-      "use_layerwise": true, "consumer_is_to_load": true
-      // 不加 use_layerwise_buffer_reuse
-    } }
-] }
+// D（kv_consumer）：只需要 D2H 连接器（主 KV 进 DRAM，不再挂 store connector）
+"kv_connector": "SfaRemoteD2HConnector",
+"kv_role": "kv_consumer",
+"kv_port": "26001",
+"kv_connector_extra_config": {
+  "transfer_backend": "memfabric",
+  "memfabric_transfer_protocol": "sdma"
+}
+// 另需（D 侧 additional_config）：
+// "sparse_kv_offload_config": {"enabled": true}   // keep_device_kv_cache 默认 false
 ```
 
-### 4.3 时序（P 侧两阶段 save）
+> `kv_port` 需要预留 `dp × tp` 个连续端口（本档 2×16 = 32），见 `pool_scheduler`/连接器的端口约定。
 
-`AscendMultiConnector` 已保证顺序（`ascend_multi_connector.py:144-168`）：
+### 4.3 时序（P 两阶段 save + D 拉取到 DRAM）
+
+`AscendMultiConnector` 已保证 P 侧顺序（`ascend_multi_connector.py:144-168`）：
 
 ```
-compute layer L
-  → on_kv_cache_written(L)     Phase1: PD provider 先关闸（记录本层可发）
-                               Phase2: 其它 connector（AscendStore）再挂钩
-  → save_kv_layer(L)           Phase1: PD push 入队（发送线程逐层推给 D）
+P: compute layer L
+  → on_kv_cache_written(L)     Phase1: PD provider 先关闸（记录本层可拉）
+                               Phase2: AscendStore 再挂钩
+  → save_kv_layer(L)           Phase1: D2H provider 发布「本层可拉」信号
                                Phase2: AscendStore range put 入队（写池，供 prefix cache）
-compute layer L+1 … L+B-1      （各自用不同槽位）
+
+D: read_thread（sfa_pd_rd2h/read_thread.py）
+  → 收到 READ_READY（含层号/块区间）
+  → memfabric 从 P 的 HBM 读取：
+       · 主 KV → D 的 CPU pool（DRAM，GVA 寻址；:546 main_gva_bases）
+       · indexer KV → D 的 HBM（:580 d_base）
+  → READ_DONE 回给 P（P 的 storage_send_done_events[slot] 置位）
+
+P: compute layer L+1 … L+B-1   （各自用不同槽位）
   → wait_for_layer_load(L+B)   等本层槽位可用：
        ├─ 池侧：等 L+B-B=L 的 save 事件（range put 已完成）
-       └─ PD 侧：wait_for_layer_reuse(L) → 等 storage_send_done_events[slot]
+       └─ PD 侧：wait_for_layer_reuse(L) → 等 D 的 READ_DONE（storage_send_done_events[slot]）
   → attention 写 L+B 的共享槽位
 ```
 
@@ -303,7 +338,7 @@ compute layer L+1 … L+B-1      （各自用不同槽位）
 
 > **INV-1'**：层 `L+B` 写共享槽位前，必须同时满足
 > (a) 层 `L` 的**池 range put 已返回**（数据已离开 HBM）；
-> (b) 层 `L` 的**PD 推送已完成**（D 已收完，`storage_send_done_events[slot]` 置位）。
+> (b) 层 `L` 的**D 已读完**（RD2H 完成，`storage_send_done_events[slot]` 置位）。
 
 - (a) 由 `layer_save_finished_events[L]` + `sync_save_events[L]` 保证（`kv_transfer.py:2043-2060`）；
 - (b) 由 waiter 链路保证：
@@ -311,8 +346,8 @@ compute layer L+1 … L+B-1      （各自用不同槽位）
   `_wait_for_external_slot_release` → `pool_worker.set_external_slot_release_waiter`（R2c 放开）
   → `KVCacheStoreLayerRecvingThread` 在覆写前调用（`kv_transfer.py:2060`），
   或 `pool_worker.wait_for_layer_load` 的 fallback 分支（`:2804-2805`）；
-- PD provider 内部：`MooncakeLayerwiseConnectorWorker.wait_for_layer_reuse`（`:1327`）
-  按 `layer_storage_slots[layer]` 的槽位等 `storage_send_done_events`，失败会把错误抛出来。
+- PD provider 内部：`SfaRemoteD2H` 的 worker `wait_for_layer_reuse`（`sfa_pd_rd2h/worker.py:1152`）
+  按 stage-local 层号等对应 slot 的发送/读取完成事件；失败会抛出错误（不会静默放行）。
 
 ### 4.5 为什么禁止 `MooncakeConnectorV1`
 
@@ -326,12 +361,15 @@ compute layer L+1 … L+B-1      （各自用不同槽位）
 | lease TTL | D 从池读前缀时仍需 lease；`default_kv_lease_ttl` 必须覆盖整请求 onload（实测：11s → 128K warm 183.5s；300s → 26.45s） |
 | PD push 失败 | 层事件置错，`wait_for_layer_reuse` 抛出 → 请求失败/降级重算，不静默 |
 | 池 put 失败 | `batch_put_revoke` + 移出 `active_keys`；该块不可命中，后续 chunk 重算 |
-| 容量 | store 容量 ≥ 并发 × 单请求全量 KV（200K ≈ 11.3 GB/请求）；D2D 不减少 store 占用 |
+| 容量 | store 容量 ≥ 并发 × 单请求全量 KV（200K ≈ 11.3 GB/请求）；D2H 不减少 store 占用（主 KV 在 D 的 DRAM 另算） |
 | 元数据 | 每 chunk 对全前缀做 range get ⇒ `O(blocks × chunks)`；128K/200K 实测已含该开销 |
+| **D 侧存储** | 主 KV 落 DRAM（`keep_device_kv_cache=false`）：约 18.45 GB/200K 请求（BF16）；HBM 只留 indexer（约 2.05 GB/请求）与 topk buffer |
+| **D 侧前置** | `additional_config.sparse_kv_offload_config.enabled=true`；主 KV 必须 BF16（`--kv-cache-dtype` 不能是 int8）；indexer 可 int8 |
+| **proxy** | 必须用镜像自带 `load_balance_proxy_layerwise_server_example.py`（D 回调 `/v1/metaserver` 做 rendezvous） |
 
 ### 4.7 store-only 对照（何时可退回）
 
-| 维度 | store-only（当前生产） | D2D（本设计） |
+| 维度 | store-only（当前生产） | D2H（本设计） |
 | :--- | :--- | :--- |
 | P→D 路径 | 池中转（P 写 DRAM segment，D 读） | P→D 直传（HBM） |
 | P 覆写门控 | 只需池 put 返回 | 需池 put 返回 **+ PD 送达** |
@@ -339,7 +377,7 @@ compute layer L+1 … L+B-1      （各自用不同槽位）
 | 交接延迟 | 高（池中转 + master 元数据） | 低（点对点） |
 | 复杂度 | 低 | 中（两连接器 + 顺序 + waiter） |
 
-> store-only 仍保留为**回退方案与对照组**：若 D2D 的 waiter 链路验证不通过，可先回到 store-only
+> store-only 仍保留为**回退方案与对照组**：若 D2H 的 waiter 链路验证不通过，可先回到 store-only
 > （功能可用、性能次优），不影响复用本身的验证。
 
 ---
@@ -348,7 +386,7 @@ compute layer L+1 … L+B-1      （各自用不同槽位）
 
 ### 5.1 不变量
 
-- **INV-1'**（覆写安全，D2D）：见 §4.4；
+- **INV-1'**（覆写安全，D2H）：见 §4.4；
 - **INV-2**（完成状态单位）：以**物理 buffer** 判定；`prefetch_layer_map` 保证层号↔槽位一一映射；
 - **INV-3**（key 空间不变）：`apply_layerwise_kv_cache_plan` 只改 `kv_cache_config.kv_cache_tensors`，
   不碰 `kv_cache_groups` → `hybrid_layout_id` 不变，key 空间稳定。
@@ -390,6 +428,17 @@ compute layer L+1 … L+B-1      （各自用不同槽位）
 | tail spec | 无（`model_version` 非 `glm5_next`） | 不需要 tail 排除 |
 | **indexer full/shared** | 混合 | **风险**：同桶层的 indexer spec 可能不同 → `_merge_specs` ValueError；必须 V0 验证 |
 | glm5next（未来） | 有 tail + KDA group | 需要 R6 排除逻辑 |
+
+**D 侧的 KV 布局变化（D2H 方案 B）**：
+
+| 项 | 现在 | D2H 之后 |
+| :--- | :--- | :--- |
+| 主 KV dtype | int8（576 B/token/层） | **BF16**（1152 B/token/层）——稀疏 offload 的硬要求 |
+| 主 KV 位置 | D HBM（全 79 层） | **D DRAM**（CPU pool，GVA） |
+| indexer | int8，D HBM | 不变（int8，D HBM） |
+| 每 200K 请求占用 | ≈11.3 GB HBM | 主 KV ≈**18.45 GB DRAM** + indexer ≈**2.05 GB HBM** |
+
+> 注意：切 BF16 会让主 KV 字节数翻倍，但占的是 DRAM（2.0 TiB），HBM 反而释放出来。
 
 **容量系数（B=9, I=1）**：
 
@@ -435,9 +484,10 @@ compute layer L+1 … L+B-1      （各自用不同槽位）
 | V2 | 正确性 | 同 prompt 两次输出逐 token 一致；needle 探针；复用开/关对拍（8K/32K/128K） |
 | V3 | chunk 边界 | 4096（对齐）通过；4000（不对齐）应被启动校验拒绝 |
 | V4 | 会话/淘汰 | 长请求跨 TTL；store 打满触发 evict 时降级为重算 |
-| **V5** | **D2D waiter 链路** | P 侧出现 `Waiting for Mooncake transfer to release physical KV slot` 且等待时长受控；D 侧无 `Range read failed`；`External prefix cache hit rate` 正常；注入 D 侧延迟可观察到 P 的 `wait_for_layer_reuse` 等待 |
+| **V5** | **D2H waiter 链路** | P 侧出现 `Waiting for Mooncake transfer to release physical KV slot` 且等待时长受控；D 侧无 `Range read failed`；`External prefix cache hit rate` 正常；注入 D 侧延迟可观察到 P 的 `wait_for_layer_reuse` 等待 |
 | V6 | 性能 | 32K/64K/128K 冷热 A/B；B=8/9/12/16 扫参 |
-| **V7** | **D2D vs store-only** | 同 prompt 的 TTFT/端到端时延对比（D2D 应显著优于池中转） |
+| **V7** | **D2H vs store-only** | 同 prompt 的 TTFT/端到端时延对比（D2H 应显著优于池中转） |
+| **V8** | **D2H/sparse offload 正确性** | D 侧开 sparse offload 后，与 dense（不开 offload）逐 token 对拍一致；`Range read failed` 为 0；D 的 DRAM 占用符合预估；并发上限实测 vs 3.44 |
 
 **日志过滤**：
 
@@ -464,6 +514,9 @@ grep -a 'External prefix cache hit rate'                      vllm_d*.log | tail
 | K8 | 上游 KVPP 系列重构 layerwise 管线，落点漂移 | 中 | 改动收在协议模块 + 门控点 |
 | K9 | `SfaRemoteD2H` 要求 P TP ≥ D TP 且整除；D 侧主 KV 必须 BF16 | 中（若选 B） | 选 A 可绕开；选 B 需改 D 的 dtype 与 sparse offload 配置 |
 | K10 | lease TTL 缺失 → warm 退化（实测 6.9x） | **高（部署）** | 硬性配置契约：300000 |
+| **K11** | **D 侧 sparse offload（D2H 的落地前提）在 rc1 未验证**：`fused_op_type` 默认 `none`、主 KV 必须 BF16、proxy 需 layerwise 版 | **高（D2H）** | V8 单独立项验证；失败则退回方案 A（push 到 HBM） |
+| **K12** | BF16 主 KV 使 DRAM 需求翻倍（18.45 GB/200K 请求） | 中 | 容量规划按 65+ 并发；必要时限制 `max_num_seqs` |
+| **K13** | `kv_port` 需连续 `dp×tp` 个端口，proxy/metaserver 端口也要预留 | 中 | 部署前端口表核对（本档 32 个） |
 
 ---
 
@@ -472,10 +525,10 @@ grep -a 'External prefix cache hit rate'                      vllm_d*.log | tail
 | 阶段 | 内容 | 估算 |
 | :--- | :--- | :--- |
 | **Phase 1** | R1–R4（含 R2c）+ U1–U7 + V0–V2（P 侧复用、store-only 打通） | 1.5–2 人周 |
-| **Phase 2** | D2D 接线（方案 A）+ V5–V7 + chunk 对齐 | 1.5–2 人周 |
+| **Phase 2** | D2H 接线（方案 B：SfaRemoteD2H + D 侧 sparse offload）+ V5–V8 + chunk 对齐 | 2–3 人周 |
 | **Phase 3** | evict/压测/调参 + 上线评审 | 1–1.5 人周 |
 
-前置依赖：V0 通过；lease TTL 与 RoCE 配置就绪（已有）；D2D 方案选型（A/B）由 V5 结果决定。
+前置依赖：V0 通过；lease TTL 与 RoCE 配置就绪（已有）；D2H 的 D 侧 sparse offload 需先单独验证（V8）。
 
 ---
 
@@ -489,7 +542,9 @@ grep -a 'External prefix cache hit rate'                      vllm_d*.log | tail
 | RoCE | `HCCL_INTRA_ROCE_ENABLE=1` + `HCCL_INTRA_PCIE_ENABLE=0` + `hixl_preset: roce` | 不开会退到 ACL IPC，全量 `-800` + segfault |
 | `use_layerwise` | true | 复用是 layerwise 的增强 |
 | P chunk 粒度 | 4096 / 16384（128 倍数） | §5.2 正确性要求 |
-| 连接器 | `MultiConnector[MooncakeLayerwiseConnector, AscendStoreConnector]` | 禁止 `MooncakeConnectorV1` |
+| 连接器（P） | `MultiConnector[SfaRemoteD2HConnector(memfabric), AscendStoreConnector(mooncake, reuse)]` | 禁止 `MooncakeConnectorV1` |
+| 连接器（D） | `SfaRemoteD2HConnector(memfabric)` + `sparse_kv_offload_config.enabled=true` | D 不再挂 store connector；主 KV BF16 |
+| 端口 | `kv_port` 预留 `dp×tp` 个连续端口（本档 32） | 见 K13 |
 
 ### 10.2 Ansible 落点
 
@@ -499,7 +554,10 @@ grep -a 'External prefix cache hit rate'                      vllm_d*.log | tail
   MultiConnector 形状（或新增 `d2d: true` 分支），P 侧渲染两个 connector；
 - `ansible/templates/run_dp_decode_template.sh.j2`：D 侧渲染 `MooncakeLayerwiseConnector(kv_consumer)`
   + `AscendStoreConnector(kv_consumer, consumer_is_to_load)`；
-- 新增档位 `1m-v030-hyb-d2d`，保留 `1m-v030-hyb`（store-only）作为回退与对照。
+- 新增档位 `1m-v030-hyb-d2h`（D2H → D 的 DRAM），保留 `1m-v030-hyb`（store-only）作为回退与对照；
+- D 侧模板需要新增 `--additional-config` 里的 `sparse_kv_offload_config`，
+  并去掉 `--kv-cache-dtype int8`（主 KV 必须 BF16）；
+- proxy 必须切到镜像自带的 `load_balance_proxy_layerwise_server_example.py`（支持 memfabric/metaserver）。
 
 ---
 
@@ -532,3 +590,7 @@ grep -a 'External prefix cache hit rate'                      vllm_d*.log | tail
 | **MultiConnector 两阶段 save + waiter 注册** | `ascend_multi_connector.py:85-95` / `:144-168` |
 | PD 连接器 reuse 能力 | `kv_p2p/mooncake_layerwise_connector.py:749` / `:831` / `:1327` |
 | SfaRemoteD2H reuse 能力 | `kv_p2p/sfa_pd_rd2h/connector.py:58` / `:303` |
+| SfaRemoteD2H 传输后端要求（memfabric） | `kv_p2p/sfa_pd_rd2h/worker.py:92-115` / `:214-236` / `:616-619` |
+| **D 侧主 KV 落 DRAM（CPU pool）** | `kv_p2p/sfa_pd_rd2h/read_thread.py:54-59`（`cpu_pools`/`main_gva_bases`）/ `:546` |
+| **D 侧 indexer 落 HBM** | `kv_p2p/sfa_pd_rd2h/read_thread.py:580`（`d_base`） |
+| D 侧 sparse offload manager | `kv_p2p/sfa_pd_rd2h/worker.py:236`（`get_sparse_kv_offload_manager`） |
