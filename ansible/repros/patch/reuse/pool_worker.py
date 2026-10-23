@@ -1027,6 +1027,19 @@ class KVPoolWorker:
         self.group_block_len[group_id] = group_block_lens
         self.group_block_stride[group_id] = group_block_strides
         self.group_layer_cache_entry_offsets[group_id] = layer_cache_entry_offsets
+        # [REUSE-DIAG] 打印每 group 的地址表规模，判断合并后是否按 79 层展开
+        import os as _os
+        if _os.environ.get("REUSE_DIAG"):
+            logger.error(
+                "[REUSE-DIAG] group=%d kv_caches=%d entries=%d block_lens=%s strides=%s offsets=%s addrs=%s",
+                group_id,
+                len(self.kv_caches),
+                len(group_addrs),
+                group_block_lens[:4],
+                group_block_strides[:4],
+                layer_cache_entry_offsets[:6],
+                group_addrs[:4],
+            )
         self.group_num_layers[group_id] = len(layer_names_by_physical)
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
@@ -2910,7 +2923,14 @@ class KVPoolWorker:
             # An empty final layer sets its event on the compute thread, ahead
             # of earlier queued PUTs. Drain at the step boundary before source
             # blocks can be reused. Layer-to-layer overlap remains unchanged.
+            # [PROBE-PATCH] 复用开启时：reuse-source 层的 save 事件会被后续复用层的
+            # recv 线程消费并 clear，这里若再等它们会永远等不到（死锁）。它们的
+            # 缓冲区安全已由复用门控链（wait_for_save → 拷贝 → load_finished）保证，
+            # 与下面清理循环的跳过逻辑保持一致。
+            _reuse_sources = set(self.prefetch_layer_map.values()) if self.prefetch_layer_map else set()
             for layer_id in range(num_local - 1):
+                if layer_id in _reuse_sources:
+                    continue
                 while not save_finished_events[layer_id].wait(timeout=10):
                     send_thread.raise_if_failed()
             send_thread.raise_if_failed()

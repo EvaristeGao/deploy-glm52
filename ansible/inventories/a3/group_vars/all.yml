@@ -381,6 +381,7 @@ _1m_v030_hyb:
       /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
       /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_scheduler.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py
       /mnt/sfs_turbo/g00832294/probe/patch/reuse/layerwise_cache_layout.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/kv_transfer.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/kv_transfer.py
     extra_env:
       # 2026-10-20 试 RoCE 路（用户要求）：A3 上默认 HCCL_INTRA_ROCE_ENABLE 只在 a2 模板里开，
       # A3 模板从来没设过；这里显式打开 RoCE、关掉 PCIe，配上 hixl_preset=roce（roce:device）。
@@ -425,8 +426,8 @@ _1m_v030_hyb:
       enabled: true
       # 2026-10-23 Phase-1 实测：opt-in 生效（79 层→24 slots，P 容量 641,408→1,927,680 tokens, ×3.0），
       #   但数据面 `Range write failed -800` —— 传输侧按层地址表仍是旧布局，需修 build_addrs。
-      #   暂回退 false 恢复服务；修好后再打开。
-      buffer_reuse: false
+      #   2026-10-23 第二轮：打开复用 + REUSE_DIAG 诊断地址表。
+      buffer_reuse: true
       num_shared_buffers: 9            # B=9（> send_fence_backlog=8）
       prefetch_layers: 2
       max_transfer_blocks: 64

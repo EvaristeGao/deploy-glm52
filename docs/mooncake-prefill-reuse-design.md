@@ -589,7 +589,28 @@ GLM-5.2 形状（78 main int8 576 + 78 indexer int8 128 + 1 MTP）：
 | 4 引擎 / proxy | 200 / `{"status":"ok",...}` |
 | **数据面** | **`Range write failed, entry=0..15, error=-800`** ⇒ 请求失败 |
 
-### 11.3 本轮发现的两个硬问题（已修/待修）
+### 11.3 死锁修复（本轮）与最终验证结果
+
+**死锁**：`pool_worker._wait_for_final_layer_save()` 在 block-key 分支里对 `0..num_local-2` **所有层**
+等 `layer_save_finished_events`，但复用开启后 reuse-source 层的该事件会被后续复用层的 recv 线程
+消费并 `clear()` → 永远等不到（py-spy 栈：`save_kv_layer → _wait_for_final_layer_save` 卡在
+`threading.Event.wait`）。修法：等待循环跳过 `prefetch_layer_map` 的 source 层（与紧随其后的
+清理循环逻辑一致），缓冲安全由复用门控链保证。
+
+**最终验证（P 侧 reuse 开启，B=9，store-only）**：
+
+| 项 | 结果 |
+| :--- | :--- |
+| 容量 | P 33.12 → **99.54 GiB**；641,408 → **1,927,680 tokens（×3.005）**；日志 `maps 79 layers onto 24 buffer assignments; scale ... by 3.005` |
+| 合并 | `merged 3 descriptors into 39 descriptors using 24 buffer assignments` |
+| D | 697,984 tokens（不变）；`External prefix cache hit rate` **96.5~98.3%** |
+| 2K | cold 6.7s / warm **1.7s**；两次输出**逐 token 一致** |
+| needle | ✅ 正确复述 `[CODE=...]` |
+| 8K（跨 chunk） | ✅ 5.5s |
+| 32K | cold 16.4s / warm 5.7s（2.9x）；对比无复用 14.6s / 4.2s（复用略慢 10~35%） |
+| 稳定性 | 当天 `Range write/read failed` = **0**、`Segfault` = **0**；master `key_count=116`、`put_end=5`、`revoke=0` |
+
+### 11.4 本轮发现的两个硬问题（已修）
 
 1. **indexer 的页面 padding 不一致**（已修）：`AscendSFAIndexerCacheSpec.page_size_bytes=16640`，
    但真实 descriptor 用 **unpadded 16384**。`apply_layerwise_kv_cache_plan` 必须用
@@ -598,17 +619,14 @@ GLM-5.2 形状（78 main int8 576 + 78 indexer int8 128 + 1 MTP）：
    按 main spec 分桶会让同槽层的 indexer spec 不一致 → `_merge_specs` ValueError。
    改为按「main + indexer + extra 的完整签名」分桶后启动通过，但 slots 从 10 涨到 **24**（factor 7.9 → 3.0）。
    **待优化**：main 与 indexer 分别分桶（各自复用），可回到约 6.7x。
-3. **数据面地址表未跟随合并后的布局**（待修，下一步）：合并把多层别名到同一物理槽
-   （`layer_stride=0`、`block_stride=unpadded_page`），但 `kv_transfer.build_addrs` /
-   `pool_worker` 的 `_kv_caches_base_addr_np` / `_block_len_np` / `_block_stride_np` /
-   `_layer_cache_entry_offsets_np` 仍按旧布局生成 → 传给 TE 的本地地址非法 → `Range write failed -800`。
+3. **死锁（已修，见 11.3）**：`_wait_for_final_layer_save` 等 reuse-source 层的事件，而该事件已被消费清除。
 
-### 11.4 下一步（按顺序）
+### 11.5 下一步（Follow-up，非阻塞）
 
-1. 修地址表：让 `build_addrs` 的 `all_buffers` 由**合并后的 descriptor** 生成，并补 V0 的地址一致性检查；
-2. main/indexer 独立分桶，把 factor 从 3.0 拉回约 6.7；
-3. 重跑 V1（容量）× V2（正确性：同 prompt 两次一致 + needle）；
-4. 通过后再考虑 D2H（§4）与 waiter（R2c）联调。
+1. **提高复用率**：当前按「main+indexer 完整签名」分桶得到 24 slots（×3.0）。要回到 ~6.7x，
+   需要把 `buffer_slots` 从「按层」升级为「按 cache（main / indexer 各自分桶）」的数据模型；
+2. D2H（主 KV 进 D 的 DRAM）+ waiter（R2c）联调；
+3. 向上游提 PR：R1–R4 + 两处 layout 修正 + 死锁修复；`docs/` 与单测（U1–U7）一并提交。
 
 ## 附录 A：代码锚点索引（基线 `5f828ad63`）
 
