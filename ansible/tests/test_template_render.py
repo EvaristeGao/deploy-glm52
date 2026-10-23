@@ -1131,7 +1131,9 @@ def test_a3_v030_hyb_flags_and_topology_per_doc_prereqs():
     out_p = _render_a3("prefill", "1m-v030-hyb")
     out_d = _render_a3("decode", "1m-v030-hyb")
     assert "--enable-chunked-prefill" in out_p
-    assert "--max-num-batched-tokens 4096" in out_p
+    # chunk 粒度是可调项（A/B 调优会改它）；断言"有 chunked prefill + 数值来自配置"
+    pd_p = _gv(GV_FILE_A3, "1m-v030-hyb")["pd_cluster"]["prefill"]
+    assert f"--max-num-batched-tokens {pd_p['max_num_batched_tokens']}" in out_p
     assert "--enable-prefix-caching" in out_p
     assert "--enforce-eager" in out_p
     assert "--enforce-eager" in out_d           # 文档：Start validation in eager mode

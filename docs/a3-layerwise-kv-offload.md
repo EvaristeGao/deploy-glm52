@@ -634,6 +634,23 @@ def extract_layout_config(extra_config):
 3. 所以**当前配置相比普通 mooncake 池化没有可测量的收益**；只有在把
    `max_num_batched_tokens` / `max_transfer_blocks` / `prefetch_layers` 调到合适值后才可能翻盘（待验证）。
 
+### 5.13 A' 调参组（prefetch=4 / transfer_blocks=256 / P chunk=16384）—— cold 追平，warm 反而更差
+
+在 §5.12 基础上把 layerwise 调到更激进的参数，再跑同一组探针：
+
+| 长度 | A（原参数） | **A'（调参）** | B（普通池化） |
+|---|---|---|---|
+| 32K cold / warm | 14.7s / 4.2s | 15.6s / **14.1s** | 14.1s / 4.1s |
+| 64K cold / warm | 30.6s / 7.8s | 29.0s / 8.3s | 28.6s / 6.5s |
+| **128K cold / warm** | 246.9s / 183.5s | **60.1s / 194.9s** | **60.5s / 11.1s** |
+
+- **cold 128K：调参后 60.1s，和普通池化（60.5s）打平** —— 说明 128K cold 的瓶颈确实是
+  chunk 数（4096→16384）与 block 拆批（64→256）；
+- **warm 128K：194.9s（比 cold 还慢，speedup 0.3x）**，32K warm 也从 4.2s 退化到 14.1s ——
+  **池命中后的逐层 load 路径反而被这些参数拖垮**（疑似 load 侧与计算/prefetch 串行化，
+  或大 chunk 下 128 blocks/层的 range load 排队）。
+- 结论：layerwise 在 warm（命中复用）这条路上没有救回来；**当前最优仍是普通池化（B 组）**。
+
 ## 6. 最小验证：先单节点 co-located（推荐第一步）
 
 正式跑 4 节点之前，用 `ansible/layerwise_smoke_single_node.sh` 在**一个节点**上跑

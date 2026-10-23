@@ -414,14 +414,15 @@ _1m_v030_hyb:
         # 先给 1（=1 TB 虚拟池）；task_stream_num 是单任务流数量。
         ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config":{"protocol_desc":"ubmem"},"fabric_memory":{"max_capacity":1,"task_stream_num":4}}'
     layerwise:
-      # 2026-10-21 A/B：先跑 B 组（普通池化 use_layerwise=false），对照 A 组（layerwise=true）的延迟/对象数。
+      # 2026-10-23 A' 调参组已实测（prefetch=4 / blocks=256 / P chunk=16384）：
+      #   cold 128K 60.1s（追平普通池化 60.5s），但 warm 128K 反而 194.9s（普通池化 11.1s）⇒ 回退到 B 组。
       enabled: false
-      prefetch_layers: 2               # 文档 §Configuration 原值
+      prefetch_layers: 2               # 文档原值 2
+      max_transfer_blocks: 64          # 文档原值 64
       # 2026-10-21 已验证：mooncake 后端不 opt-in reuse，传 num_shared_buffers 被静默忽略
       #   （设 8 后 P 仍 33.12 GiB / 641,408 tokens、D 仍 36.05 GiB / 697,984 tokens，与基线一致）。
       #   要 reuse 必须换 memcache(GVA) 后端（其 extract_layout_config 会在 use_layerwise=true 时返回 extra_config）。
       # num_shared_buffers: 8
-      max_transfer_blocks: 64
       max_transfer_bytes: 16777216
     prefill:
       dp_size: 2                       # 2 节点 × 每节点 1 引擎（TP16）
