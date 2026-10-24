@@ -682,6 +682,149 @@ engine init 失败：
 (c) 改用 `MooncakeLayerwiseConnector`（按层 push 到 D 的 HBM，不依赖 memfabric/sparse offload，但目标不是 DRAM）；
 (d) 维持现状（P 侧 reuse 已验证，容量 ×3）。
 
+## 13. 详细设计：把 SfaRemoteD2H 的传输层从 memfabric 换成 Mooncake TE
+
+### 13.1 目标与不变量
+
+**目标**：保留 `SfaRemoteD2HConnector` 的编排语义（按层、P 暴露 HBM、D 主 KV 落 DRAM、
+`wait_for_layer_reuse` 门控），只把**传输后端**从 memfabric 换成 Mooncake TransferEngine（RoCE），
+从而绕开镜像里 `memfabric_hybrid 1.2.0` 缺 `TransDataOpType` 的阻塞。
+
+**不变量（换后必须保持）**：
+1. 按层时序不变（`READ_READY → batch_transfer_sync_read → READ_DONE`）；
+2. D 的主 KV 仍落其 CPU pool（DRAM），indexer 仍落 HBM；
+3. P 侧的 buffer 复用门控仍由 `wait_for_layer_reuse` 驱动（R2c）；
+4. KV pool（AscendStore/mooncake）与 `sparse_kv_offload_manager` 完全不动。
+
+### 13.2 现状：memfabric 的调用面只有 3 个方法
+
+`sfa_pd_rd2h` 对传输层的全部依赖，集中在 `utils/memfabric_transfer_engine.py:27-61` 的 `MemfabricBackend`：
+
+| 方法 | 语义 | 调用点 |
+| :--- | :--- | :--- |
+| `get_rpc_port() -> int` | 广告给对端的 TE RPC 端口 | scheduler 交换元数据时 |
+| `register_memory(ptr, size) -> int` | 注册本地缓冲区（P 的 device KV / D 的 host pool） | worker 初始化 |
+| `batch_transfer_sync_read(session_id, local_buffers, peer_buffers, length_list) -> int` | 从对端读（D 拉 P 的 KV） | `read_thread.py:429` |
+
+以及 `GlobalMemfabricTE`（`:63-221`）里的 `configure()/get_transfer_engine()`。
+**后端选择点**：`worker.py:92-115` 的 `_resolve_kv_transfer_backend()` 读
+`kv_connector_extra_config["transfer_backend"]`；`:214-236`、`:616-619` 两处 assert 写死 memfabric；
+`connector.py:82-89` 是 P/D 与 sparse offload 的角色断言（与传输无关）。
+
+### 13.3 目标 API：Mooncake TE 是同构的（1:1 可映射）
+
+`from mooncake.engine import TransferEngine` 现有方法（镜像实测 `dir`）：
+
+```
+initialize / initialize_ext, get_rpc_port, register_memory / batch_register_memory,
+batch_transfer_sync_read / batch_transfer_sync_write, transfer_sync_read / transfer_sync_write,
+batch_transfer_async*, get_batch_transfer_status, unregister_memory, ...
+```
+
+| memfabric | Mooncake TE | 是否同构 |
+| :--- | :--- | :--- |
+| `get_rpc_port()` | `get_rpc_port()` | ✅ 同名同义 |
+| `register_memory(ptr,size)` | `register_memory(ptr,size)` | ✅ |
+| `batch_transfer_sync_read(session_id, local, peer, lengths)` | `batch_transfer_sync_read(session_id, src, dst, lengths)` | ✅ 同签名（仓内已有用法：`mooncake_d2rh_connector.py:1223`、`mooncake_connector.py:1042`） |
+
+> **关键佐证**：`MooncakeD2RHConnectorV1` 已经在用 Mooncake TE 做
+> 「**从 P 的 device memory 读到 D 的 host staging**」（`batch_transfer_sync_read`，
+> `mooncake_d2rh_connector.py:1223/1667`，host 缓冲区来自 `pin_memory` + 2 MiB 对齐 `:2367`，
+> 注册走 `global_te.register_buffer` `:2286`）。也就是说 **device→host 的跨节点读在 Mooncake TE 上是被验证过的**。
+
+### 13.4 设计
+
+**(1) 新增 `utils/mooncake_te_backend.py`：`MooncakeTEBackend`**
+
+```python
+class MooncakeTEBackend:
+    """Drop-in replacement of MemfabricBackend (same 3-method surface)."""
+    def __init__(self, engine, advertised_rpc_port: int):
+        self._engine, self._port = engine, advertised_rpc_port
+
+    def get_rpc_port(self) -> int:
+        return self._port
+
+    def register_memory(self, ptr: int, size: int) -> int:
+        return 0 if self._engine.register_memory(ptr, size) == 0 else -1
+
+    def batch_transfer_sync_read(self, session_id, local_buffers, peer_buffers, length_list) -> int:
+        ret = self._engine.batch_transfer_sync_read(session_id, local_buffers, peer_buffers, length_list)
+        return 0 if ret == 0 else -1
+```
+
+引擎初始化沿用 store 侧同样的 RoCE 路径（`global_te` 的 `initialize(local_hostname,
+metadata_server="", protocol="ascend", device_name="")`），因此会自动继承
+`HCCL_INTRA_ROCE_ENABLE=1 / HCCL_INTRA_PCIE_ENABLE=0 / hixl_preset: roce` 带来的 `roce_mode=true`。
+
+**(2) 后端选择抽象**：把 `GlobalMemfabricTE` 提升为 `GlobalTransferTE`，按配置分派：
+
+```python
+backend = extra.get("transfer_backend", "memfabric")
+self._impl = MooncakeTEBackend(...) if backend == "mooncake" else MemfabricBackend(...)
+```
+
+**(3) `sfa_pd_rd2h` 的改动点（只改 4 处）**
+
+| 文件 | 改动 |
+| :--- | :--- |
+| `sfa_pd_rd2h/worker.py:92-115` | `_resolve_kv_transfer_backend` 接受 `"mooncake"` |
+| `sfa_pd_rd2h/worker.py:214-236`、`:616-619` | 两处 assert 改为 `in ("memfabric","mooncake")` |
+| `sfa_pd_rd2h/worker.py` 初始化 | `global_memfabric_te.get_transfer_engine(...)` → `global_transfer_te.get(...)` |
+| `sfa_pd_rd2h/read_thread.py:429` | 不改（签名一致） |
+
+**(4) 会话 id**：Mooncake TE 的 `session_id` 形如 `"<host>:<rpc_port>"`。sfa 的元数据里已交换
+`remote_te_port` 与对端 host，直接拼即可（与 `mooncake_connector.py` 的做法一致）。
+
+**(5) 缓冲区注册**
+- **P（device）**：沿用 `global_te.register_buffer(ptrs, lengths)` 的 device KV 注册（layerwise 连接器在用）；
+- **D（host）**：CPU pool 用 `pin_memory` 分配、按 **2 MiB 对齐**（`mooncake_d2rh_connector.py:2367` 的
+  `aligned_base = ceil(base / 2MiB) * 2MiB`），再用 `register_memory` 注册。
+
+**(6) 完成语义**：`batch_transfer_sync_read` 同步返回 ⇒ 现有 `READ_DONE` 事件链不变，
+不需要引入 poll/async（如后续要异步，可用 `batch_transfer_async_read + get_batch_transfer_status`）。
+
+**(7) 错误码**：Mooncake 返回 0/负值 → 归一成现有 `-1`，沿用 `read_thread` 的失败路径
+（`READ_FAILED` → 请求降级重算）。
+
+### 13.5 配置面
+
+```jsonc
+// P 与 D 的 SfaRemoteD2H 子连接器
+"kv_connector_extra_config": {
+  "transfer_backend": "mooncake",        // ★ 新增可选值（默认 memfabric）
+  "mooncake_te_protocol": "ascend",      // 与 store 一致；实际传输由 RoCE env 决定
+  "use_layerwise": true
+}
+```
+
+### 13.6 正确性与兼容性
+
+- 只替换「怎么搬字节」，**不动地址语义**：P 的 device 地址仍来自 KV cache 注册表，D 的 host 地址仍来自
+  sparse offload 的 CPU pool；
+- key/对象模型、pool 提交语义、waiter 门控均不变；
+- D 侧 `sparse_kv_offload_manager` 仍是唯一的 DRAM 分配者。
+
+### 13.7 风险与验证
+
+| # | 风险 | 说明 | 验证方法 |
+| :--- | :--- | :--- | :--- |
+| R1 | device→host 跨节点读 | Mooncake TE 需能从远端 device 读到本地 host | 先跑单机双进程；仓内已有先例（D2RH :1223） |
+| R2 | host 2 MiB 对齐 | UBMem 大页要求 | 复用 D2RH 的对齐逻辑（:2367） |
+| R3 | 大块带宽/尾延迟 | 层块约 100 KB~1 MB | 实测带宽、TTFT 对比 memfabric |
+| R4 | session/端口 | TE rpc 端口需与 ZMQ side channel 共存 | 用现有 `remote_te_port` 拼 session id |
+| R5 | RoCE 依赖 | 需要 `roce_mode=true` | 已有 env（`HCCL_INTRA_ROCE_ENABLE=1` 等） |
+| R6 | 上游兼容 | 新增 `transfer_backend=mooncake` 分支 | 默认 memfabric 行为不变，单测覆盖 |
+
+### 13.8 工作量
+
+| 项 | 估算 |
+| :--- | :--- |
+| `MooncakeTEBackend` + `GlobalTransferTE` 分派 + sfa 4 处改动 | 1–2 天 |
+| 单机双进程 + 4 节点跑通（R1/R2/R4） | 2–3 天 |
+| 正确性对拍（dense vs D2H）+ 带宽/TTFT | 1–2 天 |
+| **合计** | **4–7 天** |
+
 ## 附录 A：代码锚点索引（基线 `5f828ad63`）
 
 | 关注点 | 位置 |
