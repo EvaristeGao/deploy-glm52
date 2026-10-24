@@ -229,7 +229,7 @@ vllm serve {{ model_path }} \
     "kv_port": "{{ pd_cluster.decode_kv_offload.kv_port | default(20050) }}",
     "engine_id": "{{ pd_cluster.decode.engine_id | default('2') }}",
     "kv_connector_extra_config": {
-        "transfer_backend": "memfabric",
+        "transfer_backend": "{{ pd_cluster.decode_kv_offload.transfer_backend | default('memfabric') }}",
         "memfabric_transfer_protocol": "{{ pd_cluster.decode_kv_offload.memfabric_transfer_protocol | default('sdma') }}",
         "use_layerwise": true
     }

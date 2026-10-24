@@ -1017,13 +1017,15 @@ def test_a3_v030_poff_prefill_doc2_connectors():
     assert d2h["kv_role"] == "kv_producer"
     # MultiConnector 的子 connector 只拿到自己那份 dict（不继承 root）⇒ kv_port 必须显式给
     assert d2h["kv_port"] == str(off["kv_port"])
-    assert d2h["kv_connector_extra_config"]["transfer_backend"] == "memfabric"
+    assert d2h["kv_connector_extra_config"]["transfer_backend"] == off.get("transfer_backend", "memfabric")
     assert d2h["kv_connector_extra_config"]["memfabric_transfer_protocol"] == off["memfabric_transfer_protocol"]
     store = children[1]["kv_connector_extra_config"]
     assert store["backend"] == "mooncake"
     assert store["use_layerwise"] is True
     assert store["layerwise_num_shared_buffers"] == off["shared_buffers"]
     assert store["layerwise_independent_layers"] == off["independent_layers"]
+    if off.get("buffer_reuse", False):
+        assert store["use_layerwise_buffer_reuse"] is True
     # doc §2：prefill 绝不能带 sparse_kv_offload_config（镜像 connector.py producer 侧 assert 会直接挂）
     assert "sparse_kv_offload_config" not in _render_a3("prefill", "1m-v030-poff")
 
@@ -1037,7 +1039,7 @@ def test_a3_v030_poff_decode_doc3_single_connector_and_bf16():
     assert d["kv_connector"] == "SfaRemoteD2HConnector"
     assert d["kv_role"] == "kv_consumer"
     assert d["kv_port"] == str(off["kv_port"])
-    assert d["kv_connector_extra_config"]["transfer_backend"] == "memfabric"
+    assert d["kv_connector_extra_config"]["transfer_backend"] == off.get("transfer_backend", "memfabric")
     assert '"AscendStoreConnector"' not in out
     assert '"MooncakeConnectorV1"' not in out
     assert '"sparse_kv_offload_config": {"enabled": true' in out

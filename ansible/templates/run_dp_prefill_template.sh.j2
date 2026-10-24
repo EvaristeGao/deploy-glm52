@@ -253,7 +253,7 @@ vllm serve {{ model_path }} \
                 "kv_role": "kv_producer",
                 "kv_port": "{{ pd_cluster.prefill_kv_offload.kv_port | default(20050) }}",
                 "kv_connector_extra_config": {
-                    "transfer_backend": "memfabric",
+                    "transfer_backend": "{{ pd_cluster.prefill_kv_offload.transfer_backend | default('memfabric') }}",
                     "memfabric_transfer_protocol": "{{ pd_cluster.prefill_kv_offload.memfabric_transfer_protocol | default('sdma') }}",
                     "use_layerwise": true
                 }

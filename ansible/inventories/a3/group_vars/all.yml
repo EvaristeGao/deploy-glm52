@@ -381,6 +381,8 @@ _1m_v030_hyb:
       /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
       /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_scheduler.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py
       /mnt/sfs_turbo/g00832294/probe/patch/reuse/layerwise_cache_layout.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py
+      /mnt/sfs_turbo/g00832294/probe/patch/d2h/memfabric_transfer_engine.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/utils/memfabric_transfer_engine.py
+      /mnt/sfs_turbo/g00832294/probe/patch/d2h/sfa_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_p2p/sfa_pd_rd2h/worker.py
       /mnt/sfs_turbo/g00832294/probe/patch/reuse/kv_transfer.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/kv_transfer.py
     extra_env:
       # 2026-10-20 试 RoCE 路（用户要求）：A3 上默认 HCCL_INTRA_ROCE_ENABLE 只在 a2 模板里开，
@@ -600,6 +602,8 @@ _1m_v030_poff:
       /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
       /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_scheduler.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py
       /mnt/sfs_turbo/g00832294/probe/patch/reuse/layerwise_cache_layout.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py
+      /mnt/sfs_turbo/g00832294/probe/patch/d2h/memfabric_transfer_engine.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/utils/memfabric_transfer_engine.py
+      /mnt/sfs_turbo/g00832294/probe/patch/d2h/sfa_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_p2p/sfa_pd_rd2h/worker.py
     layerwise:
       enabled: true
       prefetch_layers: 2
@@ -611,12 +615,14 @@ _1m_v030_poff:
       kv_port: 20050                    # SfaRemoteD2H 的 side-channel 基址（子 connector 读自己的 kv_port）
       memfabric_transfer_protocol: sdma  # A3 用 sdma/device_rdma；950 系用 device_urma（两侧必须一致）
       buffer_reuse: true                # ★ Phase-1 补丁下的 buffer reuse（需 debug_mounts 挂 R1–R4）
+      transfer_backend: mooncake        # ★ D2H 适配：用 Mooncake TE（RoCE）替代 memfabric
       shared_buffers: 9                 # B=9（> send_fence_backlog=8；文档 2~4 会 stall）
       independent_layers: [0]           # → layerwise_independent_layers（文档默认 [0]；"all" 等于不复用）
     # ---- decode 侧 offload（doc §3）----
     decode_kv_offload:
       sfa_remote_d2h: true              # decode 只用 SfaRemoteD2HConnector(kv_consumer)
       kv_port: 20050                    # 文档：decode 侧要预留 dp*tp 个连续端口（本档 2*16=32）
+      transfer_backend: mooncake        # ★ D 侧同用 Mooncake TE（替代 memfabric）
       memfabric_transfer_protocol: sdma
     prefill:
       dp_size: 2                        # 2 节点 × 每节点 1 引擎（TP16）

@@ -825,6 +825,40 @@ self._impl = MooncakeTEBackend(...) if backend == "mooncake" else MemfabricBacke
 | 正确性对拍（dense vs D2H）+ 带宽/TTFT | 1–2 天 |
 | **合计** | **4–7 天** |
 
+### 13.9 适配器实测记录（2026-10-24）
+
+**已实现**（`ansible/repros/patch/d2h/`，只读挂载）：
+
+| 文件 | 改动 |
+| :--- | :--- |
+| `memfabric_transfer_engine.py` | 新增 `MooncakeTEBackend`（get_rpc_port / register_memory / batch_transfer_sync_read 三个方法）+ `BACKEND_MOONCAKE` + `configure(transfer_backend=...)` + `_build_mooncake_engine()`（`initialize(host, "P2PHANDSHAKE", "ascend", "")`） |
+| `sfa_pd_rd2h/worker.py` | `_resolve_kv_transfer_backend` 接受 `mooncake`；5 处 memfabric-only 断言改为 `in _SUPPORTED_TRANSFER_BACKENDS`；两处 `configure()` 传 `transfer_backend` |
+| 模板 | `transfer_backend` 改成可配（`prefill_kv_offload` / `decode_kv_offload`） |
+
+**TE 层冒烟（一次性容器，同设备/`hccn.conf`/RoCE env）**：✅ 通过
+
+```
+[AscendTE] roce_mode=true, use_fabric_mem=false
+[AscendTE] init adxl, te is created for store=false
+Success to initialize adxl engine: 172.168.4.237:20016
+TransferExecutor register mem addr:0x80000000000, length:2097152, mem type:host
+init_ret 0 / rpc_port 15387 / register_memory = 0
+```
+
+**整条 P/D 启动：被两个非传输层问题挡住**
+
+| 侧 | 报错 | 性质 |
+| :--- | :--- | :--- |
+| **P** | `SFAPD producer layer model.layers.0.self_attn.attn must expose main K/V tensors, got 1 tensor(s)`（`sfa_pd_rd2h/worker.py:828-834`） | **模型级不兼容**：SFA D2H 要求每层 main cache 是 **K/V 两个张量**，GLM-5.2 的 MLA 是**单个 packed 张量** |
+| D | `NPU out of memory. Tried to allocate 866.00 MiB（61.27 GiB total，60.09 已分配）` | 即使 `gpu_memory_utilization` 0.92→0.85、`topk_buffer_size` 12288→4096 仍 OOM ⇒ D 侧 sparse offload 的缓冲超出本机显存预算 |
+
+**结论**：传输层适配（memfabric→Mooncake TE）**本身可行且已验证到 TE 初始化/注册**；但 `SfaRemoteD2H` 整条路径在 **GLM-5.2（MLA）** 上不可用，卡点不在传输，而在「SFA 要求 K/V 双张量 + D 侧 sparse offload 显存」。
+
+**后续可选**：
+1. 上游给 SFA D2H 加 **MLA 支持**（`main_tensor_count` 允许 1，并处理 MLA 的 indexer/tail 布局）；
+2. 改用 `MooncakeLayerwiseConnector`（按层 + RoCE + 进 D 的 HBM），需验证它也接受 MLA 单张量；
+3. 维持 `1m-v030-hyb`（P 侧 reuse 已验证，容量 ×3.005）。
+
 ## 附录 A：代码锚点索引（基线 `5f828ad63`）
 
 | 关注点 | 位置 |
