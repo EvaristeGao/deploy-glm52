@@ -381,7 +381,18 @@ class KVPoolWorker:
             and infer_dcp_mismatch_info(self.kv_role, self._extra_config, self.dcp_size, self.pcp_size)
         ):
             peer_role = "prefill" if self.kv_role == "kv_consumer" else "decode"
-            raise ValueError(
+            # [PROBE-PATCH] DCP 异构实验：默认这里是 raise（防止 shard 布局不一致污染池）。
+            # 实验目的：验证「P 侧 layerwise(CP=1) + D 侧 DCP>1」是否能跑通；先降级为 warning，
+            # 若数据面/正确性有问题再回退。
+            import os as _os
+            if _os.environ.get("ALLOW_LAYERWISE_DCP_MISMATCH"):
+                import logging as _lg
+                _lg.getLogger(__name__).warning(
+                    "[PROBE] allowing layerwise DCP mismatch: local dcp_size=%s pcp_size=%s peer=%s",
+                    self.dcp_size, self.pcp_size, peer_role,
+                )
+            else:
+                raise ValueError(
                 f"Decode-context-parallel mismatch in PD-disaggregation "
                 f"(local dcp_size={self.dcp_size}, local pcp_size={self.pcp_size}, "
                 f"peer role={peer_role}) is not supported with layerwise KV "
@@ -610,6 +621,7 @@ class KVPoolWorker:
         self.layer_save_finished_events: list[threading.Event] | None = None
 
         self.next_layer_to_submit = 0
+        self._layer_load_gates: dict[int, object] = {}
         self.layerwise_offload = False
         self.independent_layers: list[int] = []
         self.prefetch_layer_map: dict[int, int] = {}
@@ -2777,6 +2789,11 @@ class KVPoolWorker:
             attention_start_gate = None
             if self.layer_load_tasks[layer_id] and layer_id != self.current_layer:
                 attention_start_gate = get_attention_compute_start_gate()
+                # [PROBE-PATCH] 记录该层 prefetch 任务绑定的 gate：等主线程真正需要这层数据时，
+                # 若 gate 还没被 attention 打开，就把 gate 直接 cancel（record 立即放行），
+                # 否则 recv 线程等 gate、主线程等 load 事件 → 环形死锁。
+                if attention_start_gate is not None:
+                    self._layer_load_gates[layer_id] = attention_start_gate
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]
                     wait_for_save_layer=reuse_source,
@@ -2822,6 +2839,15 @@ class KVPoolWorker:
                 bool(self.layer_load_tasks[self.current_layer]) or self.current_layer in self.prefetch_layer_map
             )
             if should_wait:
+                _pending_gate = self._layer_load_gates.pop(self.current_layer, None)
+                if _pending_gate is not None:
+                    try:
+                        _pending_gate.cancel()
+                        logger.info(
+                            "Layerwise %d demand load releases its prefetch gate", self.current_layer
+                        )
+                    except Exception:
+                        logger.exception("Layerwise gate cancel failed for layer %d", self.current_layer)
                 while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
                     self.kv_recv_thread.raise_if_failed()
                     logger.info("Layerwise %d load not done, keep waiting", self.current_layer)
