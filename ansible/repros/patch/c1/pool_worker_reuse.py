@@ -1589,7 +1589,9 @@ class KVPoolWorker:
                                     request.load_block_keys.append(None)
                                 request.load_block_keys[_i] = _key
                         logger.info(
-                            "[REUSE-PREFIX] layer=%d computed_blk=%d restore=%d", layer_id, _computed_blk, _end
+                            "[REUSE-PREFIX] layer=%d computed_blk=%d restore=%d first=%s",
+                            layer_id, _computed_blk, _end,
+                            request.load_block_keys[0] if request.load_block_keys else None,
                         )
                 populated_slots = [index for index, key in enumerate(request.load_block_keys) if key is not None]
                 _dump_left = int(getattr(self, "_meta_dump_left", 30) or 0)
@@ -2446,6 +2448,8 @@ class KVPoolWorker:
                 request.save_last_block_key = None
             else:
                 request.save_block_keys[slot] = None
+        _pk = [k for k, _, _ in key_slots][:2]
+        logger.info("[PUT-KEY] req=%s n=%d first=%s", request.req_id, len(key_slots), _pk)
         self._layerwise_session_tracker.register_put_keys(
             request.req_id,
             ((key, block_index) for key, _, block_index in key_slots if key in started),
