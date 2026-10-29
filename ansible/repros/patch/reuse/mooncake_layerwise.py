@@ -336,7 +336,25 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
     tracker = worker._layerwise_session_tracker
     worker._current_layerwise_request_ids = {request.req_id for request in requests}
     worker._current_layerwise_last_chunk_req_ids = {request.req_id for request in requests if request.is_last_chunk}
+    _diag_left = int(getattr(worker, "_sess_diag_left", 24) or 0)
     for request in requests:
+        if _diag_left > 0:
+            _diag_left -= 1
+            worker._sess_diag_left = _diag_left
+            try:
+                _rl = worker._reuse_slot_limit()
+            except Exception as _exc:  # noqa: BLE001
+                _rl = f"EXC:{type(_exc).__name__}:{_exc}"
+            logger.info(
+                "[SESS-PROTO] req=%s reuse_limit=%s has_spec=%s can_load=%s computed=%s target=%s save_start=%s",
+                request.req_id,
+                _rl,
+                request.load_spec is not None,
+                None if request.load_spec is None else request.load_spec.can_load,
+                getattr(request, "num_computed_tokens", "MISSING"),
+                getattr(request, "target_token_len", -1),
+                getattr(request, "save_start_token", -1),
+            )
         cached_tokens = request.save_start_token
         if request.load_spec is not None and request.load_spec.can_load:
             cached_tokens = request.load_spec.kvpool_cached_tokens
@@ -377,6 +395,24 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
                 for name, index in entries
                 if start <= index < min(len(ids), cached_tokens // block_size) and selected(load_mask, index)
             ]
+            # [REUSE-PREFIX] producer 侧：把本请求已提交的前缀块也作为要 load 的块。
+            # chunked prefill 下 chunk2 的 attention 需要 chunk1 的 KV，而 reuse 已经
+            # 把它从槽位里挤掉了，必须从池里重新读回来。producer 没有 load_spec，
+            # 所以这里绕开 mask/tracker 直接按 block hash 构造。
+            if (
+                worker._reuse_slot_limit()
+                and not (request.load_spec is not None and request.load_spec.can_load)
+            ):
+                _computed_tokens = int(getattr(request, "num_computed_tokens", 0) or 0)
+                _end_blk = min(_computed_tokens // block_size, len(hashes), len(ids))
+                _have = {index for _, index in entries}
+                _extra = [(key(i), i) for i in range(0, _end_blk) if i not in _have]
+                if _extra:
+                    entries = entries + _extra
+                    logger.info(
+                        "[REUSE-PREFIX] req=%s computed=%d restore_blocks=%d",
+                        request.req_id, _computed_tokens, len(_extra),
+                    )
             view.load_key_block_offset = 0
             view.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
             for name, index in entries:

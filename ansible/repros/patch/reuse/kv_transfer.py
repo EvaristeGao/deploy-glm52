@@ -454,6 +454,19 @@ class LayerBatchBuilder:
         """Compute per-layer addresses from pre-computed shared block data."""
         if shared.block_keys is not None:
             base_offset = int(self._layer_cache_entry_offsets_np[layer_id])
+            import os as _os2
+            if _os2.environ.get("REUSE_DIAG") and layer_id in (0, 1, 23, 24, 25, 47, 48, 78):
+                logger.info(
+                    "[ADDR-DIAG] layer=%d entry_off=%d..%d base0=%d baseN=%d n_base=%d block_len0=%d stride0=%d",
+                    layer_id,
+                    base_offset,
+                    int(self._layer_cache_entry_offsets_np[layer_id + 1]),
+                    int(self._kv_caches_base_addr_np[base_offset]),
+                    int(self._kv_caches_base_addr_np[int(self._layer_cache_entry_offsets_np[layer_id + 1]) - 1]),
+                    len(self._kv_caches_base_addr_np),
+                    int(self._block_len_np[base_offset]),
+                    int(self._block_stride_np[base_offset]),
+                )
             end_offset = int(self._layer_cache_entry_offsets_np[layer_id + 1])
             layer_base_addrs = self._kv_caches_base_addr_np[base_offset:end_offset]
             layer_block_len = self._block_len_np[base_offset:end_offset]
@@ -1821,6 +1834,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             raise
         finally:
             self.layer_save_finished_events[layer_id].set()
+            # [CREDIT] 本层 upload 结束（成功/失败都算），归还一个槽位额度
+            _release_credit = getattr(self, "release_slot_credit", None)
+            if _release_credit is not None:
+                _release_credit()
             transfer_tasks.clear()
             self.request_queue.task_done()
 

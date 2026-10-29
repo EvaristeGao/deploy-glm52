@@ -73,18 +73,11 @@
 3. 若 4.5K 仍乱码，检查 `[PREFIX-CHK] computed` 是否等于 4096、`[REUSE-PREFIX]` 是否打印 `restore_blocks=32`；
 4. 最后核对 `kv_caches` 数与地址表 entries 数是否一致（曾见 101 vs 117）。
 
-## 8. 第 28 轮补充：前缀 key 的 group 语义（候选 bug）
+## 8. 更正与补充（第 29–30 轮）
 
-`_make_mooncake_layerwise_key(hash)` 实际是：
-
-```python
-def _make_mooncake_layerwise_key(self, block_hash_or_tail):
-    return self._make_layerwise_full_key(0, block_hash_or_tail)   # 硬编码 group 0
-```
-
-而 `_prepare_layerwise_get_session` 里我构造前缀 entries 时只调用一次（没有按 group 循环）。若 `num_kv_cache_groups > 1`（main + indexer 是不同 group 时），会出现：
-
-- 前缀 key 只按 group 0 生成 → 其它 group 的 get 缺失或 key 不匹配；
-- 表现为 get 会话失败 → 请求 500（当前现象），或部分层恢复而其它层仍读脏数据。
-
-**修法**：前缀 entries 按 `self.num_kv_cache_groups` 循环，用 `_make_layerwise_full_key(group, hash)` 生成每组 key，并把 `group_id` 带上；或直接在 `_build_*` 的 block-key 分支里按 group 补范围（那里本来就有 `group_id` 上下文）。
+- **[更正] group 假设不成立**：实测 `num_kv_cache_groups = 1`（`use_hybrid=False, use_mamba=False`），
+  因此 `_make_mooncake_layerwise_key` 里硬编码 group 0 是正确的，不是 500 的原因。
+- **[确定 bug，已修] 额度不配对**：`wait_for_layer_load` 里原先只在「该层没有 load task」时
+  `_acquire_slot_credit()`，而 release 仍然每层发生 → 信号量计数单调上升 → 复用屏障逐步失效。
+  已改为：**只要 reuse 生效就每层 acquire 一次**，与「put 返回释放一次」严格配对。
+- 待验：3K（单 chunk）不回归、4.5K（2 chunk）是否恢复。
