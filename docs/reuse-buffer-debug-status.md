@@ -81,3 +81,41 @@
   `_acquire_slot_credit()`，而 release 仍然每层发生 → 信号量计数单调上升 → 复用屏障逐步失效。
   已改为：**只要 reuse 生效就每层 acquire 一次**，与「put 返回释放一次」严格配对。
 - 待验：3K（单 chunk）不回归、4.5K（2 chunk）是否恢复。
+
+## 9. 第 33–47 轮进展与当前卡点
+
+### 已解决
+
+1. **P/D 挂载分离**（`debug_mounts` / `debug_mounts_decode`）：reuse 版 `pool_worker` 只挂 P，
+   D 挂 C1 基线。此前 D 反复 000 的根因即「producer 语义 worker 挂到了 kv_consumer」。
+2. **额度配对**：`wait_for_layer_load` 里每层固定 `acquire` 一次（不再只在「无 load task」时），
+   与「put 返回 / 无 save 任务时 release」严格配对。
+3. **per-step 前缀重载**：搬到 block-key 分支（每 step 执行），
+   `computed_blk = (target_token_len - (save_end_token - save_start_token)) // block_size`，
+   实测 4.5K/2 chunk 时为 32，日志 `[REUSE-PREFIX] restore=32` 已验证。
+4. **移除调度器 `num_computed_tokens` 透传**：该路径在某些请求上 `request is None`
+   → `AttributeError: 'NoneType' object has no attribute 'num_computed_tokens'`（引擎崩溃）。
+   per-step 公式不需要它。
+
+### 实测事实（复用生效时）
+
+- 容量：`kv_cache_size_tokens = 2,258,944`（3.52×，24 槽）；
+- 单 chunk（≤4096 token）：输出正确；
+- 4.5K（2 chunk）：`[REUSE-PREFIX] restore=32` 正确触发，但**请求超时**（get 未完成）。
+
+### 当前唯一缺口
+
+历史块的 get 没有完成，attention 在等 `layer_load_finished_events`。三种可能，用已布好的日志区分：
+
+| 观察 | 结论 | 修法 |
+|---|---|---|
+| 有 `[REUSE-PREFIX]`、无 `[RECV-TASK]` | get 未提交（key 未注册/被 `prepare_load_entries` 过滤） | 让 store 端注册历史块的 put key，或跳过 tracker 过滤 |
+| 有 `[RECV-TASK]`（`key_major=True`）但无完成 | range 任务未 set 事件 | 在该分支补 `layer_load_finished_events[layer].set()` |
+| 有 `[RECV-TASK]` 且 get 卡住 | key 不在池中（key 不一致） | 对齐上传/下载的 key（namespace/pp_rank/group） |
+
+### 环境
+
+- 已验证基线：`buffer_reuse: false` + C1 四文件（P/D 相同），4 引擎 200、proxy ok、输出正确；
+- reuse 变体：P 9 挂载（C1 四文件 + `pool_worker_reuse` + `mooncake_layerwise` +
+  `pool_scheduler` + `layerwise_cache_layout` + `kv_transfer` + `worker`），D 4 挂载，
+  `buffer_reuse: true`、`max_num_seqs: 1`；容量应 ≈2.26M。
