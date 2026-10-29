@@ -1635,11 +1635,19 @@ class KVPoolWorker:
                     )
                 if not populated_slots:
                     continue
+                # [FIX] 只恢复「整块」：末尾部分块（prompt 非 block_size 整数倍）
+                # 若按整块 get，对象长度不足 → H2D 长度非法 → 设备层崩溃。
+                _full_blocks = int(getattr(request, "target_token_len", 0) or 0) // block_size
+                _end_block = max(populated_slots) + 1
+                if _full_blocks > 0:
+                    _end_block = min(_end_block, _full_blocks)
+                if _end_block <= min(populated_slots):
+                    continue
                 request_block_ranges.append(
                     LayerBlockRange(
                         request=request,
                         start_block=min(populated_slots),
-                        end_block=max(populated_slots) + 1,
+                        end_block=_end_block,
                     )
                 )
                 continue
