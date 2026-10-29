@@ -119,3 +119,42 @@
 - reuse 变体：P 9 挂载（C1 四文件 + `pool_worker_reuse` + `mooncake_layerwise` +
   `pool_scheduler` + `layerwise_cache_layout` + `kv_transfer` + `worker`），D 4 挂载，
   `buffer_reuse: true`、`max_num_seqs: 1`；容量应 ≈2.26M。
+
+## 10. 第 48–53 轮：多 chunk 的最后一段（引擎崩溃）
+
+### 事实链（全部有日志/命令证据）
+
+1. reuse 生效：`kv_cache_size_tokens = 2,258,944`（3.52×，P 9 挂载 / D 4 挂载）。
+2. 单 chunk（≤4096 token）：输出正确。
+3. 2 chunk（4.5K）：per-step 前缀重载**块数正确**
+   （`[REUSE-PREFIX] layer=9 computed_blk=64 restore=64`，8K 时 96），
+   但 recv 侧只看到每层 `ranges=1` 的任务（`key_major=True, wait_save=None`），
+   随后**请求失败并导致 P 引擎崩溃（health 000）**，客户端表现为超时 / ConnectionReset。
+4. range 任务的完成路径本身会 `layer_load_finished_events[layer].set()`（代码已核对），
+   所以问题不在事件，而在 **get 本身**（key 不存在或 H2D 长度/地址非法）——崩溃更像后者。
+
+### 下一步（最小实验，两条命令）
+
+```bash
+python3 /tmp/to_reuse.py && cd ansible && (nohup ... start.yml &) ; ~/bin/asup
+~/bin/asask 300 90 ; ~/bin/asask 600 90        # 先 1 chunk 再 2 chunk
+~/bin/as 'tail -c 200000 logs/vllm_p0.log | grep -aE "aicore|TimeoutError|Error" | tail -5'
+```
+
+判据：
+
+| 现象 | 结论 | 修法 |
+|---|---|---|
+| `aicore timeout` / `device error` | H2D 的 get 长度/地址非法 | 检查 restore 的 `block_ranges` 是否只应含 **历史块**（不应与新块重叠），并核对 `block_len/stride` 与合并后 slot 尺寸 |
+| Python `KeyError`/`RuntimeError` | key 不存在或 session 未提交 | 对齐 put/get key（group/pp_rank/namespace），或在 put 完成后显式 commit |
+| 无异常但挂 | get 阻塞 | 用 `m_store.get` 前先存在性检查，失败则跳过恢复并回退到重算 |
+
+### 诊断工具（本轮新增）
+
+`~/bin/as`（限长执行）、`asask`（单请求一行结果）、`aslog`（近 N 条日志去重）、`asup`（等 4 引擎）。
+日志锚点：`[META-DUMP]`（ReqMeta 字段）、`[REUSE-PREFIX]`（块数与首 key）、`[RECV-TASK]`（recv 收到的任务）、`[PUT-KEY]`（上传注册的 key）。
+
+### 环境
+
+- 已验证基线：`buffer_reuse: false` + C1 四文件，4 引擎 200（当前状态）；
+- reuse 变体：`python3 /tmp/to_reuse.py` 一键切换；回滚：`/tmp/to_baseline.py`。
