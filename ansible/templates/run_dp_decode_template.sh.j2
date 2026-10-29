@@ -261,8 +261,10 @@ vllm serve {{ model_path }} \
                     "use_layerwise": true,
                     "layerwise_prefetch_layers": {{ pd_cluster.layerwise.prefetch_layers | default(2) }},
                     "layerwise_max_transfer_blocks": {{ pd_cluster.layerwise.max_transfer_blocks | default(64) }},
-                    "layerwise_max_transfer_bytes": {{ pd_cluster.layerwise.max_transfer_bytes | default(16777216) }}{% if pd_cluster.layerwise.num_shared_buffers is defined %},
-                    "layerwise_num_shared_buffers": {{ pd_cluster.layerwise.num_shared_buffers }}{% endif %}{% if pd_cluster.layerwise.independent_layers is defined %},
+                    "layerwise_max_transfer_bytes": {{ pd_cluster.layerwise.max_transfer_bytes | default(16777216) }}{% if (pd_cluster.layerwise.buffer_reuse_consumer | default(false)) and pd_cluster.layerwise.num_shared_buffers is defined %},
+                    # ★ consumer 侧默认【不】开复用：D 要在整个解码期保留所有层的 KV，
+                    # 槽位别名会让后写的层覆盖前面层的 KV（实测 8K 起乱码）。
+                    "layerwise_num_shared_buffers": {{ pd_cluster.layerwise.num_shared_buffers }}{% endif %}{% if (pd_cluster.layerwise.buffer_reuse_consumer | default(false)) and pd_cluster.layerwise.independent_layers is defined %},
                     "layerwise_independent_layers": {{ pd_cluster.layerwise.independent_layers | to_json }}{% endif %}{% endif %}
                 }
             }

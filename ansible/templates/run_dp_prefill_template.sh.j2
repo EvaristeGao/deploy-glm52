@@ -233,8 +233,8 @@ vllm serve {{ model_path }} \
         "use_layerwise_buffer_reuse": true{% endif %}{% if lw.enabled | default(true) %},
         "layerwise_prefetch_layers": {{ lw.prefetch_layers | default(2) }},
         "layerwise_max_transfer_blocks": {{ lw.max_transfer_blocks | default(64) }},
-        "layerwise_max_transfer_bytes": {{ lw.max_transfer_bytes | default(16777216) }}{% if lw.num_shared_buffers is defined %},
-        "layerwise_num_shared_buffers": {{ lw.num_shared_buffers }}{% endif %}{% if lw.independent_layers is defined %},
+        "layerwise_max_transfer_bytes": {{ lw.max_transfer_bytes | default(16777216) }}{% if lw.buffer_reuse | default(false) and lw.num_shared_buffers is defined %},
+        "layerwise_num_shared_buffers": {{ lw.num_shared_buffers }}{% endif %}{% if lw.buffer_reuse | default(false) and lw.independent_layers is defined %},
         "layerwise_independent_layers": {{ lw.independent_layers | to_json }}{% endif %}{% endif %}
     }
     }' \

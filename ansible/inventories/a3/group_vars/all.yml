@@ -376,17 +376,24 @@ _1m_v030_hyb:
     #   生成每个 device 的 endpoint/rank table —— 正好对应我们一直看到的
     #   `Dest buffer device_id=N >= endpoint count 1, falling back to ...`（没有它每个 segment 只有 1 个 endpoint）。
     # ★ Phase-1 复用补丁：只读挂载三个打过 PR 的模块（R1/R2/R3），不改镜像
+    # ★ D 侧使用独立挂载集：reuse 补丁的 pool_worker 是 producer 语义，
+    # 挂到 decode（kv_consumer）会让 D 启动失败。D 只挂 C1 基线文件。
+    debug_mounts_decode:
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/attention_fence.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/attention_fence.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/sfa_v1.py: /vllm-workspace/vllm-ascend/vllm_ascend/attention/sfa_v1.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/mla_v1.py: /vllm-workspace/vllm-ascend/vllm_ascend/attention/mla_v1.py
     debug_mounts:
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/mooncake_layerwise.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/backend/mooncake_layerwise.py
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_scheduler.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/layerwise_cache_layout.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py
-      /mnt/sfs_turbo/g00832294/probe/patch/d2h/memfabric_transfer_engine.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/utils/memfabric_transfer_engine.py
-      /mnt/sfs_turbo/g00832294/probe/patch/d2h/sfa_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_p2p/sfa_pd_rd2h/worker.py
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/kv_transfer.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/kv_transfer.py
+      # C1-only 基线
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/attention_fence.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/attention_fence.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/sfa_v1.py: /vllm-workspace/vllm-ascend/vllm_ascend/attention/sfa_v1.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/mla_v1.py: /vllm-workspace/vllm-ascend/vllm_ascend/attention/mla_v1.py
     extra_env:
       # 2026-10-20 试 RoCE 路（用户要求）：A3 上默认 HCCL_INTRA_ROCE_ENABLE 只在 a2 模板里开，
       # A3 模板从来没设过；这里显式打开 RoCE、关掉 PCIe，配上 hixl_preset=roce（roce:device）。
+      LAYERWISE_LAYOUT_DEBUG: "1"
+      REUSE_DIAG: "1"
       HCCL_INTRA_ROCE_ENABLE: "1"
       HCCL_INTRA_PCIE_ENABLE: "0"
       ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
@@ -429,10 +436,10 @@ _1m_v030_hyb:
       # 2026-10-23 Phase-1 实测：opt-in 生效（79 层→24 slots，P 容量 641,408→1,927,680 tokens, ×3.0），
       #   但数据面 `Range write failed -800` —— 传输侧按层地址表仍是旧布局，需修 build_addrs。
       #   2026-10-23 第二轮：打开复用 + REUSE_DIAG 诊断地址表。
-      buffer_reuse: true
+      buffer_reuse: false          # R32：reuse 补丁的 pool_worker 也挂到 D，D 起不来；回 C1-only            # ★ 布局调试：reuse 打开，启动即打印 bucket 组成
       num_shared_buffers: 9            # B=9（> send_fence_backlog=8）
       prefetch_layers: 2
-      max_transfer_blocks: 64
+      max_transfer_blocks: 16384   # ★ 关掉分批（>64 块时疑似地址算错）
       # 2026-10-21 已验证：mooncake 后端不 opt-in reuse，传 num_shared_buffers 被静默忽略
       #   （设 8 后 P 仍 33.12 GiB / 641,408 tokens、D 仍 36.05 GiB / 697,984 tokens，与基线一致）。
       #   要 reuse 必须换 memcache(GVA) 后端（其 extract_layout_config 会在 use_layerwise=true 时返回 extra_config）。
@@ -447,7 +454,7 @@ _1m_v030_hyb:
       rpc_port: 16591
       engine_id: 0
       max_num_batched_tokens: 4096     # 文档示例值（配 chunked prefill）
-      max_num_seqs: 64
+      max_num_seqs: 64          # R7：reuse 槽位环 per-worker，限制同时预填
       gpu_memory_utilization: 0.85     # 跟随已跑通的 1m-v030（1m-v030-lw 当时给的是 0.9）
       enable_prefix_caching: true      # 文档示例带 --enable-prefix-caching
       enable_chunked_prefill: true     # 文档示例带 --enable-chunked-prefill
