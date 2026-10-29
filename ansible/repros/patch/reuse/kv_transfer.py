@@ -2129,6 +2129,20 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def _handle_request(  # type: ignore[override]
         self, data: LayerLoadTask
     ):
+        _left = int(getattr(self, "_recv_diag_left", 30) or 0)
+        if _left > 0:
+            self._recv_diag_left = _left - 1
+            _ranges = 0
+            try:
+                for _t in data.transfer_tasks:
+                    _ranges += len(_t.block_ranges)
+            except Exception:  # noqa: BLE001
+                _ranges = -1
+            logger.info(
+                "[RECV-TASK] layer=%d tasks=%d ranges=%d wait_save=%s key_major=%s",
+                data.layer_id, len(data.transfer_tasks), _ranges, data.wait_for_save_layer,
+                bool(data.transfer_tasks and data.transfer_tasks[0].use_key_major_ranges),
+            )
         if data.transfer_tasks and data.transfer_tasks[0].use_key_major_ranges:
             self._handle_range_layer_task(data)
             return
