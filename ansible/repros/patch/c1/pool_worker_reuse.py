@@ -2480,12 +2480,15 @@ class KVPoolWorker:
             # 已计算前缀 = 本 step 结束后的总长 - 本 step 新算的 token 数
             # （save_start_token/save_end_token 都是「本 step」语义，不能直接用）
             _target = int(getattr(request, "target_token_len", 0) or 0)
+            _start = int(getattr(request, "save_start_token", 0) or 0)
             _end = int(getattr(request, "save_end_token", 0) or 0)
-            computed_tokens = max(0, _target - _end)
+            # 本 step 新算的 token 数 = save_end - save_start（实测 chunk1: 4096-0）
+            _step_tokens = max(0, _end - _start)
+            computed_tokens = max(0, _target - _step_tokens)
             if self._reuse_slot_limit():
                 logger.info(
-                    "[PREFIX-CHK] req=%s target=%d save_end=%d computed=%d reuse=%d",
-                    request.req_id, _target, _end, computed_tokens, self._reuse_slot_limit(),
+                    "[PREFIX-CHK] req=%s target=%d save=[%d,%d) step=%d computed=%d reuse=%d",
+                    request.req_id, _target, _start, _end, _step_tokens, computed_tokens, self._reuse_slot_limit(),
                 )
                 group_block_hashes = get_block_hashes(
                     request.block_hashes, self.block_size, self.hash_block_size
