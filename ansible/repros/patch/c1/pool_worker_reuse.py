@@ -1576,22 +1576,25 @@ class KVPoolWorker:
                     _computed = max(
                         0, int(getattr(request, "target_token_len", 0) or 0) - _step_tokens
                     )
-                    _computed_blk = _computed // block_size
-                    if _computed_blk > 0:
-                        _hashes = get_block_hashes(request.block_hashes, block_size, self.hash_block_size)
-                        _end = min(_computed_blk, len(_hashes))
-                        for _i in range(_end):
-                            if _i >= len(request.load_block_keys) or request.load_block_keys[_i] is None:
-                                _key = self._make_layerwise_full_key(
-                                    group_id, block_hash_to_str(_hashes[_i])
-                                )
-                                while len(request.load_block_keys) <= _i:
-                                    request.load_block_keys.append(None)
-                                request.load_block_keys[_i] = _key
+                    # [FIX] 只恢复「确实已上传」的块：用 save 侧记账，避免把本 step
+                    # 尚未上传的新块也拿去 get（那会打到不存在的对象 → 引擎崩溃）。
+                    _saved = getattr(request, "save_block_keys", None) or []
+                    _restored = 0
+                    _first = None
+                    for _i, _skey in enumerate(_saved):
+                        if _skey is None:
+                            continue
+                        while len(request.load_block_keys) <= _i:
+                            request.load_block_keys.append(None)
+                        if request.load_block_keys[_i] is None:
+                            request.load_block_keys[_i] = _skey
+                            _restored += 1
+                            if _first is None:
+                                _first = _skey
+                    if _restored:
                         logger.info(
-                            "[REUSE-PREFIX] layer=%d computed_blk=%d restore=%d first=%s",
-                            layer_id, _computed_blk, _end,
-                            request.load_block_keys[0] if request.load_block_keys else None,
+                            "[REUSE-PREFIX] layer=%d saved_blocks=%d restore=%d first=%s",
+                            layer_id, len(_saved), _restored, _first,
                         )
                 populated_slots = [index for index, key in enumerate(request.load_block_keys) if key is not None]
                 _dump_left = int(getattr(self, "_meta_dump_left", 30) or 0)
