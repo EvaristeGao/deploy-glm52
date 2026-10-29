@@ -1565,6 +1565,32 @@ class KVPoolWorker:
                 # chunked-prefill steps.  A later chunk can therefore have no
                 # new load_spec while still needing to restore the previously
                 # committed prefix into its newly allocated local blocks.
+                # [REUSE] per-step 前缀重载：chunk2+ 需要把「已提交的历史块」重新 load 回槽位。
+                # _prepare_layerwise_get_session 只在请求开始跑一次，不能承担这个职责。
+                if self._reuse_slot_limit() and layer_id not in getattr(self, "independent_layers", ()):
+                    _step_tokens = max(
+                        0,
+                        int(getattr(request, "save_end_token", 0) or 0)
+                        - int(getattr(request, "save_start_token", 0) or 0),
+                    )
+                    _computed = max(
+                        0, int(getattr(request, "target_token_len", 0) or 0) - _step_tokens
+                    )
+                    _computed_blk = _computed // block_size
+                    if _computed_blk > 0:
+                        _hashes = get_block_hashes(request.block_hashes, block_size, self.hash_block_size)
+                        _end = min(_computed_blk, len(_hashes))
+                        for _i in range(_end):
+                            if _i >= len(request.load_block_keys) or request.load_block_keys[_i] is None:
+                                _key = self._make_layerwise_full_key(
+                                    group_id, block_hash_to_str(_hashes[_i])
+                                )
+                                while len(request.load_block_keys) <= _i:
+                                    request.load_block_keys.append(None)
+                                request.load_block_keys[_i] = _key
+                        logger.info(
+                            "[REUSE-PREFIX] layer=%d computed_blk=%d restore=%d", layer_id, _computed_blk, _end
+                        )
                 populated_slots = [index for index, key in enumerate(request.load_block_keys) if key is not None]
                 _dump_left = int(getattr(self, "_meta_dump_left", 30) or 0)
                 if _dump_left > 0:
