@@ -1566,6 +1566,26 @@ class KVPoolWorker:
                 # new load_spec while still needing to restore the previously
                 # committed prefix into its newly allocated local blocks.
                 populated_slots = [index for index, key in enumerate(request.load_block_keys) if key is not None]
+                _dump_left = int(getattr(self, "_meta_dump_left", 30) or 0)
+                if _dump_left > 0:
+                    self._meta_dump_left = _dump_left - 1
+                    try:
+                        _gids = request.block_ids_by_group[0]
+                        _gidn = len(_gids)
+                    except Exception:  # noqa: BLE001
+                        _gidn = -1
+                    logger.info(
+                        "[META-DUMP] layer=%d target=%s save_start=%s save_end=%s computed=%s "
+                        "blocks_in_group=%d block_hashes=%d populated=%d",
+                        layer_id,
+                        getattr(request, "target_token_len", "?"),
+                        getattr(request, "save_start_token", "?"),
+                        getattr(request, "save_end_token", "?"),
+                        getattr(request, "num_computed_tokens", "MISSING"),
+                        _gidn,
+                        len(request.block_hashes),
+                        len("".join("1" for _ in [0])),
+                    )
                 _diag_left = getattr(self, "_load_keys_diag_left", None)
                 if _diag_left is None:
                     _diag_left = 40
