@@ -844,7 +844,7 @@ class KVPoolScheduler:
         skip_save: bool | None,
     ):
         last_chunk_tokens_num = self._get_last_chunk_tokens_num(prompt_token_ids)
-        _meta = ReqMeta.from_request_tracker(
+        return ReqMeta.from_request_tracker(
             request_tracker,
             self.cache_transfer_granularity,
             load_spec=load_spec,
@@ -857,11 +857,6 @@ class KVPoolScheduler:
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
         )
-        # [REUSE] producer 恢复前缀时需要知道本请求已计算的 token 数
-        _meta.num_computed_tokens = int(
-            getattr(request_tracker, "num_computed_tokens_before", 0) or 0
-        )
-        return _meta
 
     def _process_new_request(
         self,
@@ -891,10 +886,6 @@ class KVPoolScheduler:
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
         )
-        try:
-            request_tracker.num_computed_tokens_before = int(request.num_computed_tokens)
-        except Exception:
-            request_tracker.num_computed_tokens_before = 0
         self._request_trackers[request.req_id] = request_tracker
         return self._build_req_meta(
             request_tracker,
@@ -936,10 +927,6 @@ class KVPoolScheduler:
             num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
         )
-        try:
-            request_tracker.num_computed_tokens_before = int(request.num_computed_tokens)
-        except Exception:
-            request_tracker.num_computed_tokens_before = 0
         self._request_trackers[req_id] = request_tracker
         return self._build_req_meta(
             request_tracker,
