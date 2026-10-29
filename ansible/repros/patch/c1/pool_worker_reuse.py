@@ -2472,6 +2472,7 @@ class KVPoolWorker:
         request.load_last_block_key = None
         request.load_keys = []
         current_entries: list[tuple[str, int]] = []
+        restore_entries: list[tuple[str, int]] = []
         load_spec = request.load_spec
         if load_spec is not None and load_spec.can_load:
             cached_tokens = load_spec.kvpool_cached_tokens
@@ -2521,7 +2522,7 @@ class KVPoolWorker:
                 )
                 end_block = min(computed_tokens // self.block_size, len(group_block_hashes))
                 for block_index in range(0, end_block):
-                    current_entries.append(
+                    restore_entries.append(
                         (
                             self._make_mooncake_layerwise_key(
                                 block_hash_to_str(group_block_hashes[block_index])
@@ -2535,6 +2536,16 @@ class KVPoolWorker:
                         request.req_id, computed_tokens, end_block,
                     )
         load_entries = self._layerwise_session_tracker.prepare_load_entries(request.req_id, current_entries)
+        if restore_entries:
+            # [REUSE] 历史块的 key 由生产者自己写过，可能已被 session tracker 的
+            # 当期 committed 集合过滤掉，这里直接并入 get 列表。
+            _have = {idx for _, idx in load_entries}
+            _extra = [(k, i) for k, i in restore_entries if i not in _have]
+            load_entries = list(load_entries) + _extra
+            logger.info(
+                "[REUSE-PREFIX] req=%s restore_entries=%d merged=%d (tracker_kept=%d)",
+                request.req_id, len(restore_entries), len(_extra), len(_have),
+            )
         valid_entries = [
             (key, block_index) for key, block_index in load_entries if 0 <= block_index < len(request.block_ids)
         ]
