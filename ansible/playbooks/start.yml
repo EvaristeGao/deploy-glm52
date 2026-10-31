@@ -46,6 +46,9 @@
 
     - name: 起容器（对照 deploy.sh start_node 的 docker run，无遗漏）
       shell: |
+        # ASCL 设备日志默认只存在于容器内 /root/ascend/log，容器一重建即丢失；
+        # 挂到共享盘按节点分目录，崩溃后仍可回读 run/device-*/device-*.log 与 debug/ plog。
+        mkdir -p {{ logs.dir }}/ascend/{{ inventory_hostname }}
         docker run -itd --name {{ container.name }} \
         --net=host --privileged --shm-size={{ container.shm_size }} \
         {% for i in range(pd_cluster.num_cards) %}--device /dev/davinci{{ i }} {% endfor %}\
@@ -62,6 +65,7 @@
         {% if model.dir_host %}-v {{ model.dir_host }}:/root/.cache {% endif %}\
         {% set _dm = pd_cluster.debug_mounts_decode if ('decode' in group_names and pd_cluster.debug_mounts_decode is defined) else pd_cluster.debug_mounts %}\
         {% if _dm is defined %}{% for _h, _c in _dm.items() %}-v {{ _h }}:{{ _c }}:ro {% endfor %}{% endif %}\
+        -v {{ logs.dir }}/ascend/{{ inventory_hostname }}:/root/ascend/log \
         {{ image }} bash
       tags: container
 
