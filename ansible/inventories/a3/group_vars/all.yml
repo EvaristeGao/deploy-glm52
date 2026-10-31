@@ -245,8 +245,28 @@ _1m_v030:
 # =============================================================================
 _1m_v030_lw:
   pd_cluster:
-    max_model_len: 1048576
+    # ★ 本档不挂 reuse 补丁，KV 预算不做放大：TP16/1M 需要 54.14 GiB > 可用 37.4 GiB，
+    #   实测启动即 ValueError（Engine core initialization failed）。取 256K（约 13.5 GiB）留足余量。
+    max_model_len: 262144
     num_cards: 16
+    # ★ 传输层预设：与业务档无关，但缺了会出大事。
+    #   不带这个时 HIXL 走 hccs P2P，同机 devPhyId 0↔2 建链失败
+    #   （aclrtIpcMemImportByKey 107000 / halDeviceDisableP2P drvRetCode=17）→ segfault。
+    hixl_preset: roce
+    hixl_presets:
+      roce:
+        ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config":{"protocol_desc":"roce:device"}}'
+      ubmem:
+        ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config":{"protocol_desc":"ubmem"}}'
+    extra_env:
+      HCCL_INTRA_ROCE_ENABLE: 1        # A3 模板默认不开 RoCE，显式打开
+      HCCL_INTRA_PCIE_ENABLE: 0
+      ASCEND_LOCAL_COMM_RES: '{"version":"1.3"}'
+      HCCL_BUFFSIZE: 1024
+      ACL_OP_INIT_MODE: 1
+      PYTHONHASHSEED: 0
+      OMP_PROC_BIND: false
+      OMP_NUM_THREADS: 10
     v030_env: true
     layerwise:
       enabled: true
