@@ -25,7 +25,7 @@ ansible_python_interpreter: /usr/bin/python3
 # 参考：https://docs.vllm.ai/projects/ascend/en/v0.30.0rc1/tutorials/models/GLM5.2.html
 #       https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html
 # =============================================================================
-deploy_config: 1m-v030-hyb
+deploy_config: 1m-v030-lw
 
 cluster_type: a3
 image: glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13   # layerwise 需要带 PR #2881 range/session 接口的 mooncake client
