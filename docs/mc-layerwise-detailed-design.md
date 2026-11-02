@@ -589,3 +589,55 @@ pt=1629 → 2.2s，pt=4988 → 4.1s，输出正确
 - 新镜像 + 干净档已验证可用（当前部署状态）；
 - `pd_connector` 开关、`num_shared_buffers`/`independent_layers` 配置、P1 补丁（`probe/patch/m1b/`）均已就绪；
 - dsa-base 自带 c8 支持、Host pool、DSA offload runtime，无需再移植 rc1 的补丁。
+
+### 16.4 M1 打通：layerwise 代理（D-first）是缺的那一环（2026-11-02 验证）
+
+§16.2 里"请求挂住"的根因不是连接器，而是**代理的请求顺序**。换成镜像自带的
+`examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py` 后一次通过。
+
+该代理的机制（读码确认）：
+
+```
+client → proxy
+  ① proxy 生成 request_id，先发给 **D**（kv_transfer_params 带 metaserver URL）
+  ② D 分配 KV 目标块，把 block ids / host / port 等 POST 到 proxy 的 /v1/metaserver
+  ③ proxy 等所有预期 rank 都 POST 完 → dispatch_prefill_batch() 把请求发给 **P**
+  ④ P 拿到 D 的目标后逐层 push；D 解码
+```
+
+而 plain 代理是 P-first（P 返回后才联系 D），P 会永远等不到 D 的目标 → 挂住。
+
+启用方式（已写入 `group_vars`）：
+
+```yaml
+proxy:
+  layerwise: true      # 跑镜像示例目录里的 layerwise 代理
+  script: load_balance_proxy_layerwise_server_example.py
+```
+
+注意 `start.yml` 已经把 layerwise 代理**绑定到 proxy 节点真实 IP**（不能 0.0.0.0），
+因为 D 要回调 `host:port/v1/metaserver`。
+
+### 16.5 M1 实测结果（dsa-base 镜像 + 逐层连接器 + 共享 3 槽）
+
+配置：`pd_connector: layerwise`、`num_shared_buffers: 3`、`prefetch_layers: 1`、
+`independent_layers: [0, -1]`、P1 补丁（`probe/patch/m1b/pool_worker.py`）、layerwise 代理。
+
+| 用例 | 结果 |
+|---|---|
+| 单 chunk pt=509 | ✅ 2.0s |
+| 单 chunk pt=2429 | ✅ 3.2s |
+| **双 chunk pt=4237** | ✅ **3.8s**（此前复用下必乱码） |
+| 双 chunk pt=4989 | ✅ 3.9s |
+| 三 chunk pt=5628 | ✅ 4.6s |
+| 8K pt=8029 | ✅ 5.2s |
+| 4 并发 × pt≈4981 | ✅ 4/4（4.9–7.3s） |
+
+生成脚本确认 `"layerwise_num_shared_buffers": 3` 已渲染，P 日志 5 个 rank 都读到该配置。
+
+### 16.6 尚未做的验收（下一步）
+
+- 对照组：`independent_layers: all`（等价不共享）跑同一批 prompt，逐 token 比对输出；
+- prefix 命中（同 prompt 连发）在复用下的正确性（对应 `b3222a7` 的回归场景）；
+- 取消/抢占、Store 慢 / P-D 慢 交替（设计 §8 的 T7–T9）；
+- `[CREDIT-BAL]` 等旧实验开关在新镜像里已不存在，无需清理。

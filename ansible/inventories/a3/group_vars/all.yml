@@ -268,11 +268,18 @@ _1m_v030_lw:
       OMP_PROC_BIND: false
       OMP_NUM_THREADS: 10
     v030_env: true
+    pd_connector: layerwise            # P/D 交接用逐层连接器（提供 wait_for_layer_reuse 屏障）
     layerwise:
       enabled: true
-      prefetch_layers: 2              # 文档建议先用 2；首次硬件验证可降到 1
+      prefetch_layers: 1
+      num_shared_buffers: 3
+      independent_layers: [0, -1]
       max_transfer_blocks: 64
       max_transfer_bytes: 16777216
+    debug_mounts:
+      /mnt/sfs_turbo/g00832294/probe/patch/m1b/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
+    debug_mounts_decode:
+      /mnt/sfs_turbo/g00832294/probe/patch/m1b/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
     prefill:
       dp_size: 2                      # 2 节点 × 每节点 1 引擎（TP16）
       tp_size: 16                     # 与 decode 的 TP 保持一致（layerwise 硬约束）；
@@ -879,7 +886,10 @@ proxy:
   layerwise: "{{ pd_cluster.decode_kv_offload is defined and (pd_cluster.decode_kv_offload.sfa_remote_d2h | default(false)) }}"
   # 说明：这里刻意不引用 proxy.layerwise、也不用 | bool / | ternary —— 单测/模拟器用纯 Jinja 环境解析
   #   group_vars（无 Ansible 专有 filter），表达式需自包含且只用 Jinja 内置 filter。
-  script: "{{ 'load_balance_proxy_layerwise_server_example.py' if (pd_cluster.decode_kv_offload is defined and (pd_cluster.decode_kv_offload.sfa_remote_d2h | default(false))) else 'load_balance_proxy_server_example.py' }}"
+  # M1：逐层 P/D 必须用 layerwise 专用代理（D-first：D 先 POST /v1/metaserver 发布目标，
+  #     代理再派发 prefill）。plain 代理是 P-first，会让 P 无限等 D 的目标。
+  layerwise: true
+  script: "load_balance_proxy_layerwise_server_example.py"
   layerwise_image_dir: "/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1"   # layerwise 脚本在镜像内的目录（直接容器内起，不落盘到控制机）
   # 接入 proxy 的节点白名单（inventory 节点名）；空/未配置 = 全部接入
   prefill_nodes: []          # 例: [p0]
