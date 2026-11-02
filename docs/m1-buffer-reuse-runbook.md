@@ -560,3 +560,30 @@ vllm_ascend/attention/dsa_v41.py:690   def forward(self, attn, positions, hidden
 - 多 chunk 输出正确 ⇒ 复用链路真正闭环。
 
 现场：已回退 `dsabase-m1`、无挂载；4 引擎 200、`pt=4236 → 4.4s` 正确。
+
+### 11.15 第 10 轮：DSA 钩子也没触发 → 下一步先确认"钩子函数本身是否可达"
+
+给 `AscendDSAImpl.forward`（`dsa_v1.py:1869`）和 `AscendDSAV41Impl.forward`
+（`dsa_v41.py:693`）都加了 `notify_kv_cache_write_begin(...)`，重新部署：
+
+```
+hook=0 | 等待=0 | blocks=32768(5.9x)   ← 仍然一次都没打印
+```
+
+两种可能：
+
+1. 这两个 DSA forward 也不是实际执行路径（可能被 `torch.compile`/ACLGraph 捕获，
+   或走 `dsa_attn_kv_plan` / 自定义算子直接写缓存）；
+2. 钩子被调用了，但 `on_kv_cache_write_begin` 在 **early return** 处静默返回
+   （`providers==0` 或 `layer_name` 为空字符串）。
+
+已把日志移到 early return **之前**并打印 `layer_name` 与 `providers` 数量
+（commit `chore(kv_pool): log the write-begin hook even when it bails out`），
+下一次启动即可区分这两种情况：
+
+- 有 `on_kv_cache_write_begin layer='...' providers=1` ⇒ 钩子可达，问题在 `extract_layer_index`/槽映射；
+- `layer=''` ⇒ 传参问题（`attn.layer_name` 不存在）；
+- **完全没有该日志** ⇒ 这两个 forward 不是执行路径，需要改用
+  `save_kv_layer`（连接器侧，写完但发送前）或由图外的统一入口触发。
+
+现场已回退：`dsabase-m1`、无挂载；4 引擎 200、`pt=4237 → 3.9s` 正确。
