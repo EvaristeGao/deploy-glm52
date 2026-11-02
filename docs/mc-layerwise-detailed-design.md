@@ -484,3 +484,53 @@ def _prepare_layerwise_get_session(request):
 | `kv_pool/ascend_store/pool_worker.py`（rc1 `~1556`） | `load_start_block = 0 if layerwise_offload and 非独立层` |
 | `b3222a7`（本地可 `git show`） | session `start_block = 0 if layerwise_offload` |
 | `1898107`（本地可 `git show`） | waiter 命名对齐 + ToDram 兜底 |
+
+---
+
+## 15. 方案 A（基于 dsa-base 重建镜像）的前置核查（2026-11-02 实测）
+
+### 15.1 不能靠"挂源码"走捷径
+
+容器内 vllm-ascend 是 **editable 安装**（`vllm_ascend.__file__` → `/vllm-workspace/vllm-ascend/vllm_ascend`），
+看上去替换源码树即可，但：
+
+| 检查 | 结果 |
+|---|---|
+| `vllm_ascend/` 内编译产物 | **8 个 `.so`**：`vllm_ascend_C.cpython-312-aarch64-linux-gnu.so`、`libvllm_ascend_kernels.so`、`lib/libvllm_ascend_kernels.so`、`_cann_ops_custom/...` 下 5 个 CANN 算子库 |
+| C++ 源文件（git 跟踪） | rc1 **1771** 个 vs dsa-base **1735** 个，文件名差异 **574 处**（大量重命名/移动） |
+
+→ C++ 树差异过大，rc1 编出的 `.so` 不可能匹配 dsa-base 的 Python 调用约定，**必须重建镜像**。
+
+### 15.2 还依赖版本对齐（比"编译"更大的风险）
+
+| 包 | 镜像现有 | dsa-base `requirements.txt` | 结论 |
+|---|---|---|---|
+| torch | 2.10.0+cpu | `==2.10.0` | ✅ |
+| torch_npu | **2.10.0.post4** | **`==2.10.0.post7`** | ❌ 需升级 |
+| triton-ascend | 未见安装 | `==3.6.0` | ❓ 需补装 |
+| mooncake | 0.3.13.post1 | — | ✅ |
+| compressed-tensors | 0.17.0 | `>=0.11.0` | ✅ |
+| vllm | 0.30.0+empty（editable） | 需与 dsa-base 匹配 | ❓ 需核对 |
+
+`torch_npu` 从 post4 升到 post7 涉及 **CANN 版本匹配**，这正是上游文档提示的
+"不得假定原基线的 CANN、Triton、memfabric 等版本已包含在新分支中"。
+换言之 A 不是"加一层编译"，而是"做一个新基础镜像"。
+
+### 15.3 已验证的中间结论（可用于任何方案）
+
+- rc1 的 `ascend_multi_connector.py` 与 dsa-base 只差两处：
+  `requires_mamba_state_copy_after_load` 聚合、`shutdown()` 顺序；**屏障接线本身在 rc1 上是完整的**；
+- rc1 的逐层连接器缺 dsa-base 的 packed-SFA **c8 支持**（约 15 行，已移植并编译通过，见 `probe/patch/m1/`）；
+- 代理协议缺 `remote_cached_tokens`（已补，见 `load_balance_proxy_server_example.py`）；
+- 两者都补上后，rc1 上逐层连接器仍无法完成请求，并触发
+  `gloo ... Connection closed by peer`（P0/P1 间），说明还差的是**连接器内部的月度修复合集**。
+
+### 15.4 阻塞与待决
+
+需要产品/工程侧决定（A/B/C，见 §1 与 §13 R5）：
+
+- **A** 新建基于 dsa-base 的基础镜像（含 torch_npu/triton 对齐）——代码与设计文档一致，成本最高；
+- **B** 继续在 rc1 上逐个移植——每轮 12 分钟，上限不明；
+- **C** 只保留 blockwise + P1，无复用收益。
+
+在决定之前，环境保持**干净档（blockwise、无复用、无挂载）**，已验证 4 引擎 200、请求正确。
