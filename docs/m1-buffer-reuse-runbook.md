@@ -143,3 +143,63 @@ ssh root@ott9-a31 '/root/bin/rtest 1 60 16; /root/bin/rtest 1 526 24; /root/bin/
 | `kv_pool/ascend_store/layerwise_cache_layout.py:163-215` | 共享槽/独立层/`prefetch_layer_map` |
 | `image_build/m1/pool_worker.py` | 镜像内的 `b3222a7` 补丁（start_block=0） |
 | `examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py` | D-first 代理 + `/v1/metaserver` |
+
+---
+
+## 9. ⚠️ 容量现状：语义已通，但**物理复用目前未生效**（重要）
+
+这一节纠正一个容易误判的结论：**"复用下多 chunk 正确"不能证明复用真的在起作用**。
+
+### 9.1 实测数据
+
+| 指标 | 当前（`num_shared_buffers: 3`） | 若复用真正生效（5 个槽：3 共享 + 2 独立） |
+|---|---|---|
+| KV 内存 | 36.41 GiB | 同 |
+| `num_blocks` | **5509** | 应约为 **12×**（≈ 6.7 万） |
+| 每 block 字节 | **6.77 MB** | 应约 **0.56 MB** |
+| 61 层 × 116736 B | 6.79 MB ← 与实测一致 | — |
+
+也就是说：**61 层仍然各自分配了 KV，没有发生任何跨层别名**。
+
+### 9.2 根因（代码层）
+
+```python
+# backend/mooncake_layerwise.py:77
+def extract_layout_config(extra_config):
+    """Block-key transfer does not opt into GVA-backed physical reuse."""
+    del extra_config
+    return None            # ← mooncake 后端永远返回 None
+```
+
+而 KV 预算缩放依赖它：
+
+```python
+# worker/worker.py:639-657
+extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)   # → None
+if extra_config is not None:
+    layout = build_layerwise_cache_layout(...)
+    factor = num_layers / len(layout.storage_indices)   # 不会执行
+    self.available_kv_cache_memory_bytes *= factor
+```
+
+日志里 `"Layerwise KV cache reuse maps ... scale logical KV budget by ..."` **命中数为 0**，与上面一致。
+
+下游连带影响：
+
+- `layerwise_cache_layout` 仍被 Store worker 使用 → `layerwise_offload=True`（load/restore 语义生效，这就是 `b3222a7` 补丁有意义的原因）；
+- 但逐层连接器的槽位映射来自**实际注册地址**（`_init_layerwise_reuse_state`），地址没别名 ⇒
+  每层仍是 1 个独立 slot ⇒ `wait_for_layer_reuse()` 无槽可等，屏障形同虚设。
+
+### 9.3 结论与下一步（P 侧真正的工作量）
+
+- **已经拿到的**：Store 侧 load/restore 语义正确（`b3222a7`）、D-first 协议、镜像与部署链路、
+  逐层连接器的屏障代码可用；
+- **还没拿到的**：容量收益（这正是 buffer reuse 的意义）；
+- **要做的（P 侧）**：
+  1. 为 block-key 实现 `extract_layout_config()` 的 opt-in 返回（按 `backend` + 显式开关键判断）；
+  2. 让 runner 按**槽**而不是按层分配 KV tensor（真正的别名），否则只放大预算会导致内存爆炸；
+  3. 再验证：`num_blocks` 应放大到 ≈ `num_layers / 槽数`；同时 `wait_for_layer_reuse` 出现真实等待
+     （日志 `Waiting for Mooncake transfer to release physical KV slot %d` 应当能被观测到）。
+
+设计文档 §2 的缺口表里本来就写着这一条：
+"`extract_layout_config()` 当前返回 None；接入布局并修正复用时加载范围"——本次把它定位为**容量收益的关键路径**。
