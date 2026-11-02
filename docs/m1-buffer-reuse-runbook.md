@@ -524,3 +524,39 @@ callable(connector.wait_for_layer_reuse)
 （可临时在 hook 里累加计数，请求结束后打印一次）。
 
 现场：已回退 `dsabase-m1`、无挂载；4 引擎 200、`pt=4236 → 4.3s` 正确。
+
+### 11.14 第 9 轮：屏障钩子挂错了模块——这个模型用的是 DSA 注意力
+
+#### 诊断结果（本轮的关键发现）
+
+1. **provider 注册是好的**（worker 侧）：
+
+```
+Worker_DP0_TP10_EP10: layerwise reuse providers=1
+  details=[('MooncakeLayerwiseConnector', True, True, True, True),
+           ('AscendStoreConnector', False, ...)]
+EngineCore: providers=0（调度器角色没有 connector_worker，正常）
+```
+
+2. **但 `on_kv_cache_write_begin` 一次都没被调用**（hook=0）——说明我把钩子挂在
+   `mla_v1.py` / `attention_c8_mxfp.py` 的 forward 上，而 GLM-5.2 实际走的是
+   **DSA 注意力**：
+
+```
+vllm_ascend/attention/dsa_v1.py:1578   class AscendDSAImpl(AttentionImplBase[Any])
+vllm_ascend/attention/dsa_v41.py:252   class AscendDSAV41Impl
+vllm_ascend/attention/dsa_v41.py:690   def forward(self, attn, positions, hidden_states, output=None)
+```
+
+所以那两处钩子从未执行。
+
+#### 下一轮（一步到位）
+
+把 `notify_kv_cache_write_begin(...)` 加到 **`AscendDSAImpl.forward` 和
+`AscendDSAV41Impl.forward`** 的入口（写 KV 之前），再启动验证：
+
+- `hook>0` ⇒ 钩子路径对了；
+- `slot等待>0` ⇒ 屏障真的在等（说明 send-done 事件被正确 clear/set）；
+- 多 chunk 输出正确 ⇒ 复用链路真正闭环。
+
+现场：已回退 `dsabase-m1`、无挂载；4 引擎 200、`pt=4236 → 4.4s` 正确。
