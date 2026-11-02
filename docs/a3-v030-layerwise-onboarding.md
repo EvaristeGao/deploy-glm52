@@ -44,7 +44,7 @@ GLM-5.2 在 A3 集群上的 **P/D 分离**部署：
 | decode d1 | `ott9-a34` | 172.168.4.226 | 9900 | 同上 |
 | proxy | = p0 | 172.168.4.237 | 8000 | 同容器内进程 |
 
-- 镜像：`glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13`
+- 镜像：`glm52-vllm-ascend:0.30.0-dsabase-m1`（vllm_ascend = dsa-base @4234a1f + M1 补丁；干净档用 `...-dsabase-4234a1f`）
 - 共享盘：`/mnt/sfs_turbo/g00832294/`
 - 引擎日志：`/mnt/sfs_turbo/g00832294/logs/vllm_{p0,p1,d0,d1}.log`、`proxy.log`、`mooncake_{node}.log`
 - **ACL 设备日志**：`/mnt/sfs_turbo/g00832294/logs/ascend/{p0,p1,d0,d1}/`（容器内 `/root/ascend/log` 的持久化挂载，`run/device-N/device-*.log`、`debug/`）
@@ -65,7 +65,8 @@ deploy_config: 1m-v030-lw      # ← 当前档（干净档）
 | `deploy_config` | 用途 | 状态 |
 |---|---|---|
 | `1m-v030-lw` | **干净档**：v0.30 原生 layerwise + mooncake，无 patch / 无 reuse | ✅ 已验收 |
-| `1m-v030-hyb` | 实验档：带 buffer reuse、诊断挂载、`max_num_seqs=1` | ⚠️ reuse 不可用，勿当基线 |
+| `1m-v030-lw`（M1 档） | **P 侧 buffer reuse**：逐层 P/D + D-first 代理 + 共享 3 槽 | ✅ 已验收，见 [m1-buffer-reuse-runbook.md](m1-buffer-reuse-runbook.md) |
+| `1m-v030-hyb` | 旧实验档（自造 reuse 实现） | ❌ 已废弃，勿使用 |
 | `1m-v030` / `1m-v030-hyb-1m` / `1m-v030-hyb-tp8` / `1m-v030-poff` | 其它 TP / offload 变体 | 未在本次验收范围 |
 | `_200k` / `_1m` | v0.23 时代的老档 | 历史参考 |
 

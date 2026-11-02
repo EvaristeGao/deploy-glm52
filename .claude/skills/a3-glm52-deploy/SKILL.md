@@ -40,6 +40,20 @@ grep -cE 'use_layerwise_buffer_reuse|layerwise_num_shared_buffers|probe/patch' $
 判断「集群是否 OK」**不要用日志 mtime**——D 引擎不保证按请求写日志。用
 `curl http://<d_ip>:9900/metrics | grep '^vllm:request_success_total'` 的累计值。
 
+## 两档配置（先确认当前是哪一档）
+
+| 档 | `deploy_config` | 说明 |
+|---|---|---|
+| 干净档 | `1m-v030-lw` + `pd_connector: blockwise` | 只用上游 layerwise+mooncake，无复用 |
+| **M1 档** | `1m-v030-lw` + `pd_connector: layerwise` + `num_shared_buffers: 3` | **P 侧 buffer reuse 已验收**，详见 `docs/m1-buffer-reuse-runbook.md` |
+
+M1 档的三个必要条件（缺一就会挂或乱码）：
+
+1. 镜像 `glm52-vllm-ascend:0.30.0-dsabase-m1`（dsa-base 基线，含 c8 支持与 M1 补丁）；
+2. `pd_connector: layerwise` → P/D 交接用 `MooncakeLayerwiseConnector`（唯一提供槽位屏障的组件）；
+3. `proxy.layerwise: true` → 用 D-first 代理；普通代理是 P-first，会让 P 永远等不到 D 的目标
+   （表现为引擎全 200 但请求永不返回，日志里只有 `/tokenize`）。
+
 ## 部署
 
 ```bash

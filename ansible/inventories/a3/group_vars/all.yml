@@ -28,7 +28,7 @@ ansible_python_interpreter: /usr/bin/python3
 deploy_config: 1m-v030-lw
 
 cluster_type: a3
-image: glm52-vllm-ascend:0.30.0-dsabase-4234a1f          # vllm-ascend = dsa_offload_rebase_30 @4234a1f（见 docs/mc-layerwise-detailed-design.md §15）
+image: glm52-vllm-ascend:0.30.0-dsabase-m1          # dsa-base @4234a1f + M1(b3222a7 start_block) 已固化进镜像
 #                               # （image_build/Dockerfile_mooncake_layerwise 构建；4 台节点本地都已构建）
 image_tar: ""                 # 非空则 pull.yml 改从该 tar docker load（需节点可见路径，如共享目录）；留空则 docker pull image
 
@@ -276,10 +276,6 @@ _1m_v030_lw:
       independent_layers: [0, -1]     # 首尾层独立分配
       max_transfer_blocks: 64
       max_transfer_bytes: 16777216
-    debug_mounts:
-      /mnt/sfs_turbo/g00832294/probe/patch/m1b/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
-    debug_mounts_decode:
-      /mnt/sfs_turbo/g00832294/probe/patch/m1b/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
     prefill:
       dp_size: 2                      # 2 节点 × 每节点 1 引擎（TP16）
       tp_size: 16                     # 与 decode 的 TP 保持一致（layerwise 硬约束）；

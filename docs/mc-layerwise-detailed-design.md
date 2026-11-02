@@ -676,3 +676,20 @@ proxy:
 | 补丁 | `probe/patch/m1b/pool_worker.py`（b3222a7 的 start_block 修正） |
 | 实测 | 单 chunk 2.1s；双 chunk 4237/4989 → 4.6s/4.1s；8K → 4.7s；4 并发 4/4 |
 | 全程 | 未使用 `torch.npu.synchronize()`，未使用自造额度信号量 |
+
+---
+
+## 17. M1 收尾（2026-11-02 完成）
+
+M1 的最终形态与验收记录见 **[m1-buffer-reuse-runbook.md](m1-buffer-reuse-runbook.md)**（运维视角）。
+本节只记结论：
+
+1. `b3222a7` 的 `start_block` 修正已**固化进镜像** `glm52-vllm-ascend:0.30.0-dsabase-m1`
+   （`image_build/m1/pool_worker.py` + Dockerfile COPY 层），运行期不再需要 `debug_mounts`；
+2. 最终部署实测：4 引擎 200、proxy ok、**0 个 patch 挂载**；
+   单 chunk 2.1s、双 chunk 4237 4.4s、8K 5.1s，全部输出正确；
+3. M1 的正确性来自三件事同时成立：dsa-base 基线（c8/Host pool/DSA runtime）、
+   逐层连接器的每槽 send-done 屏障、D-first 代理；
+4. 旧的自造实现（`probe/patch/{c1,reuse}`、`[CREDIT-BAL]`、`reuse_mode.txt`）已全部不再使用。
+
+M2（D 侧 Host offload 与 layerwise 的组合）仍未做：相关代码只挂在 blockwise `dsa_pd_offload` 路径上。

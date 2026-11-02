@@ -36,3 +36,9 @@ RUN pip uninstall -y vllm_ascend >/dev/null 2>&1 || true; \
 RUN python3 -c "import importlib.util as u; \
 s = u.find_spec('vllm_ascend'); print('vllm_ascend at', s.origin); \
 assert 'site-packages' in s.origin, 'still the editable install!'"
+
+# 4) M1 补丁：b3222a7 的 Store Get 会话起点修正（dsa-base 尚未包含）
+#    layerwise offload 会覆写共享 HBM 槽位，本地 prefix 命中也必须从 block 0 做完整 Get。
+#    用 COPY 覆盖安装后的文件（比 Dockerfile 里做字符串替换更可控），并自检。
+COPY m1/pool_worker.py /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
+RUN python3 -c "import pathlib; t = pathlib.Path('/usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py').read_text(); assert 'M1/P1' in t, 'm1 patch missing'; print('m1 patch verified')"
