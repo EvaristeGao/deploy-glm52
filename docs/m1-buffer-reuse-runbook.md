@@ -440,3 +440,45 @@ slot 等待计数 = 0
 3. 加断言：启用复用但 provider 为空 → 启动失败（设计 §5 要求）。
 
 现场已回退：`glm52-vllm-ascend:0.30.0-dsabase-m1`、无挂载；4 引擎 200、`pt=4237 → 4.1s` 正确。
+
+### 11.12 第 7 轮：屏障钩子写好了，卡在 KV 配置的全 rank 一致性
+
+#### 已实现（本轮的核心代码）
+
+**写入前屏障**——layerwise 复用缺的那一环：
+
+1. `attention/utils.py` 新增 `notify_kv_cache_write_begin(layer_name)`；
+2. `attention/mla_v1.py` 的 `forward()` **一开始**就调用它（早于任何 KV 写入）；
+3. `ascend_multi_connector.py` 新增 `on_kv_cache_write_begin()`，把层名解析成层号后
+   转发到 `_wait_for_external_slot_release()` → `provider.wait_for_layer_reuse()`。
+
+这样层 L+N 覆盖共享槽之前，会等层 L 的 send-done 事件，语义上正是设计 §4 要求的
+"每层三件写入（计算 / Store / P-D）都必须计入屏障"里的计算侧入口。
+
+#### 仍然卡住的地方
+
+启用折叠后引擎起不来，断言仍在：
+
+```python
+# vllm/v1/core/kv_cache_utils.py:2353
+assert all(cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs)
+```
+
+尝试过两种让各 rank 一致的办法，都没解决：
+
+| 办法 | 结果 |
+|---|---|
+| 对齐到 128 的倍数 | 值仍有 ±2 → 断言失败 |
+| `dist.all_reduce(MIN)`（我的 try/except 兜底） | 仍然失败，推测配置构建阶段进程组未初始化或不是同一组 |
+
+#### 下轮的正确解法（建议）
+
+不要在 **worker 侧**算块数。`generate_scheduler_kv_cache_config` 的入参就是各 worker 的配置，
+说明块数应当由**引擎侧一次算出**再下发。做法：
+在引擎侧（拿到 workers 的 `available_memory` 之后）调用折叠 builder 一次，
+worker 只按下发值建 tensor；这样天然全 rank 一致。
+
+若不想动引擎侧，退路是：用 `min(available_memory)` 的确定性来源（例如
+`determine_available_memory()` 已经做过的 min 归约结果）而不是各 rank 自己的值。
+
+现场已回退：`dsabase-m1`、无挂载；4 引擎 200、`pt=4236 → 3.9s` 正确。
