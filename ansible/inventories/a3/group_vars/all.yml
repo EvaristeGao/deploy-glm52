@@ -273,7 +273,7 @@ _1m_v030_lw:
       enabled: true
       prefetch_layers: 1
       num_shared_buffers: 3
-      independent_layers: [0, -1]
+      independent_layers: [0, -1]     # 首尾层独立分配
       max_transfer_blocks: 64
       max_transfer_bytes: 16777216
     debug_mounts:

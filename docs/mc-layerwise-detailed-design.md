@@ -641,3 +641,38 @@ proxy:
 - prefix 命中（同 prompt 连发）在复用下的正确性（对应 `b3222a7` 的回归场景）；
 - 取消/抢占、Store 慢 / P-D 慢 交替（设计 §8 的 T7–T9）；
 - `[CREDIT-BAL]` 等旧实验开关在新镜像里已不存在，无需清理。
+
+### 16.7 对照组与非确定性结论（2026-11-02）
+
+用同一组固定 prompt（temperature=0，`FIXED-A/B/C`）分别跑「共享 3 槽」与「所有层独立（不共享）」两组，
+各自重复一次比对文本：
+
+| prompt | 共享 3 槽：两次是否一致 | 不共享（对照）：两次是否一致 | 首次分歧位置（共享/对照） |
+|---|---|---|---|
+| p509（单 chunk） | ✅ 一致 | ✅ 一致 | — |
+| p4237（双 chunk） | ❌ 不一致 | ❌ 不一致 | 144 / 74 |
+| p4989（双 chunk） | ❌ 不一致 | ❌ 不一致 | — / 81 |
+
+结论：**多 chunk 的逐字不一致是模型自身的非确定性**（对照组同样发生，且分歧点更早），
+不是 buffer reuse 引入的。两组输出的语义均正确（都是"总结重复文本"的合理答复）。
+
+因此 M1 的正确性判据采用「语义正确 + 与对照组行为同构」，
+而不是「与对照组逐 token 完全相等」（后者在不共享路径上也不成立）。
+
+### 16.8 取消测试
+
+对复用配置连发 3 次"发 1.5s 后断开"的长请求，随后再发正常请求：
+`pt=499 → 17.5s 输出正确`（17.5s 是重启后首请求的图编译冷启动）。
+引擎未崩溃、proxy 保持 ok，未观察到旧代回调串入新请求。
+
+### 16.9 M1 交付状态
+
+| 项 | 状态 |
+|---|---|
+| 镜像 | `glm52-vllm-ascend:0.30.0-dsabase-4234a1f`（四节点已构建） |
+| 复用 | `num_shared_buffers: 3`、`prefetch_layers: 1`、`independent_layers: [0, -1]` |
+| P/D 交接 | `MooncakeLayerwiseConnector`（提供每槽 send-done 屏障） |
+| 代理 | `load_balance_proxy_layerwise_server_example.py`（D-first + /v1/metaserver） |
+| 补丁 | `probe/patch/m1b/pool_worker.py`（b3222a7 的 start_block 修正） |
+| 实测 | 单 chunk 2.1s；双 chunk 4237/4989 → 4.6s/4.1s；8K → 4.7s；4 并发 4/4 |
+| 全程 | 未使用 `torch.npu.synchronize()`，未使用自造额度信号量 |
