@@ -482,3 +482,45 @@ worker 只按下发值建 tensor；这样天然全 rank 一致。
 `determine_available_memory()` 已经做过的 min 归约结果）而不是各 rank 自己的值。
 
 现场已回退：`dsabase-m1`、无挂载；4 引擎 200、`pt=4236 → 3.9s` 正确。
+
+### 11.13 第 8 轮：引擎能带折叠启动了，但屏障钩子没被触发
+
+#### 关键突破：全 rank 一致性问题解决
+
+把放大后的块数**向下取到 2 的幂**（`1 << (n.bit_length()-1)`），各 rank 无论抖动几块都落到同一个值：
+
+```
+baseline num_blocks : 5508
+folded  num_blocks  : 32768     → 5.9×
+4 引擎 200，折叠生效且启动无断言
+```
+
+#### 但正确性仍然坏，且屏障没触发
+
+```
+pt=509  → 2.1s   ✅
+pt=4237 → ' ThisThis  NONThis'                  ❌
+pt=4988 → 'NON   NON NONThisThis` ` ` ` ` . . ' ❌
+slot等待计数 = 0     ← wait_for_layer_reuse 一次都没进
+```
+
+#### 下一轮的第一个诊断（必须先做）
+
+`AscendMultiConnector._layerwise_slot_release_providers` 很可能为空，判断条件四个都要满足：
+
+```python
+connector.is_producer
+connector.connector_worker is not None
+connector.supports_layerwise_buffer_reuse   # MooncakeLayerwiseConnector 里是 True
+callable(connector.wait_for_layer_reuse)
+```
+
+`supports_layerwise_buffer_reuse = True` 已确认存在（`mooncake_layerwise_connector.py:749`），
+所以嫌疑集中在 `connector_worker` 是否已注入、以及 `_configure_layerwise_reuse_completion()`
+是否在 worker 侧被调用。做法：在该方法末尾加一条 warning 打印
+`len(self._layerwise_slot_release_providers)` 和每个 connector 的四个条件，一次启动即可定位。
+
+另外要确认我加的 `notify_kv_cache_write_begin()` 真的被 MLA 走到了
+（可临时在 hook 里累加计数，请求结束后打印一次）。
+
+现场：已回退 `dsabase-m1`、无挂载；4 引擎 200、`pt=4236 → 4.3s` 正确。
