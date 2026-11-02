@@ -268,9 +268,9 @@ provider.wait_for_layer_reuse(layer_idx)      # 每层前调用
 
 ## 7. 未决与需要确认
 
-1. 文档提到的两个后续修复 **取不到**：`1898107…`、`b3222a7…`（在 fork 的两个可见分支 60/80 条历史里都不是祖先），
-   需要作者提供所在分支或 patch；从代码特征看，`4234a1f` 已含 `_storage_send_errors` 与 `LAYERWISE_REUSE_WAIT`，
-   推测"外部槽位释放接线"的核心语义已在内，但**未证实**；
+1. ~~文档提到的两个后续修复取不到~~ → **已取到**（从 `gitcode.com/shichangzhang064/vllm-ascend` 按 SHA 直接 fetch），
+   见 §9；它们属于 **ToDram 线**（`mte_fuised_rebase_0713...`），不在 `dsa_offload_rebase_30` 的历史里，
+   所以设计文档写"迁移语义，不整体 cherry-pick"；
 2. fork 基线相对 upstream `v0.30.0` 的环境依赖（CANN/Triton/memfabric 版本）未核对，设计文档也提示不能假定；
 3. D 侧 Host offload 与 `kv_cache_dtype=int8` 的组合是否在支持矩阵内，需在阶段 3 前确认。
 
@@ -293,3 +293,98 @@ for s in storage_send_done_events layer_storage_slots wait_for_layer_reuse \
   printf '%-34s %s\n' "$s" "$(grep -rl "$s" --include=*.py vllm_ascend/ | wc -l)"
 done
 ```
+
+
+---
+
+## 9. 本地源码工作区（已就绪）
+
+`src/vllm-ascend` 是上游克隆，已补充 fork remote 并建好本地分支：
+
+```bash
+cd src/vllm-ascend
+git remote -v
+#   origin    git@github.com:vllm-project/vllm-ascend.git      （上游）
+#   maz       https://github.com/mazifan0120/vllm-ascend.git    （设计基线所在 fork）
+#   shichang  https://gitcode.com/shichangzhang064/vllm-ascend.git（ToDram 线与两个修复）
+
+git branch
+#   dsa-base    ← maz/dsa_offload_rebase_30        = 4234a1f（设计基线，当前检出）
+#   design-doc  ← maz/dsa_offload_rebase_30_design_doc = ef674ba（含设计文档 md 源稿 + puml/svg）
+#   ref-todram  ← shichang/mte_fuised_rebase_0713_mooncake_test-0817-both-pd（ToDram 迁移参考）
+#   main        ← origin/main
+```
+
+设计文档的 **markdown 源稿**在 `design-doc` 分支，比 PDF 好读：
+
+```bash
+git show design-doc:mooncake_layerwise_pd_offload_design_v2.md   # 579 行
+git show design-doc:mooncake_layerwise_reuse/reuse_scenario.puml # 时序图源
+```
+
+两个后续修复已 fetch 到对象库（虽不在任何分支 HEAD 上）：
+
+```bash
+git log -1 --format='%h %s' 1898107
+# 189810776 feat(kv_transfer): wire AscendStore external slot release to ToDram
+git log -1 --format='%h %s' b3222a7
+# b3222a75e fix(kv_pool): restore reused shared layers on local prefix hit
+```
+
+---
+
+## 10. 两个修复的实际内容（对我们意味着什么）
+
+### 10.1 `1898107`：外部槽位释放接线（ToDram 线）
+
+改动：`ascend_multi_connector.py`(+83)、`mooncake_layerwise_connector.py`(+39)、
+`mooncake_layerwise_to_dram_connector.py`(+8)、`ascend_store_connector.py`(-11)、`kv_transfer.py`(+39)。
+
+关键点：
+
+- 把 Store 发送线程的 `pd_transfer_waiter` **改名为 `external_slot_release_waiter`**，
+  与上游 `wait_for_layer_reuse` 命名对齐 —— 也就是我们之前发现的"有定义、无调用方"的那个钩子；
+- 新增 `_wait_for_pd_transfer()` **兜底**：当 MultiConnector 没有注入 waiter 时，
+  用共享的 layer transfer 事件（`get_shared_layer_transfer_events` /
+  `get_shared_layer_transfer_pending_events`）判断 P/D 是否读完，超时 30s 报错。
+
+注意：`get_shared_layer_transfer_events` / `pd_transfer_waiter` 这两个符号
+**我们基线与设计基线都没有**，只存在于 ToDram 线。所以这条修复要"迁移语义"：
+
+- 在 DSA 基线上，等价物是 `MooncakeLayerwiseConnectorWorker.wait_for_layer_reuse()`（已有）；
+- 需要补的是**注入与校验**：多连接器把 waiter 装到 Store 侧，且"启用复用但没接线 → 启动失败"。
+
+### 10.2 `b3222a7`：共享层在本地 prefix 命中时仍要恢复（两行核心改动）
+
+```python
+start_block = (
+    0 if self.layerwise_offload else load_spec.vllm_cached_tokens // self.block_size
+)
+```
+
+提交说明写得很直接：
+
+> Layerwise offload overwrites shared HBM slots, so a vLLM prefix hit still needs a
+> full Store Get session. Independent layers continue to skip prefix H2D via hbm_tail ranges.
+
+**这正是我们当初手工实现"per-step 前缀重载"想解决的问题**，而对上游来说只是"session 起点取 0"。
+
+### 10.3 我们基线上已有的对应实现（重要）
+
+我们 rc1（`5f828ad`）的 `pool_worker.py` 里，**层级**规则已经存在：
+
+```python
+load_start_block = (
+    request.load_spec.vllm_cached_tokens // block_size
+    if not self.layerwise_offload or layer_id in self.independent_layers
+    else 0            # ← 共享层永远从 block 0 开始 load
+)
+```
+
+也就是说：**"共享层要从头恢复"这条规则，基线早就写好了**，我们当时绕过了它
+（自己按 `save_block_keys` 造 range 做 per-step 重载），等于把正确实现换成了错的。
+
+结论修正：这条线不需要"重新设计"，需要的是
+（a）走基线既有的 load 路径，不另造 range；
+（b）按 `b3222a7` 把 **session 起点**也对齐到 0；
+（c）按 `1898107` 的语义把槽位释放 waiter 接到 MultiConnector 上。
