@@ -1,3 +1,9 @@
+> ⚠️ **本实现已废弃（2026-11-02）**
+> 这套「单 AscendStoreConnector + 自造 pool_worker + 槽位信号量」的复用实现方向错误：
+> 该路径没有 `wait_for_layer_reuse()` 接线，槽位覆盖前没有任何屏障。
+> 正确设计见 [mc-layerwise-pd-offload-design.md](mc-layerwise-pd-offload-design.md)。
+> 本文保留为**失败路径与证据记录**，供设计对照，代码不应再挂载。
+
 # v0.30 Prefill reuse_buffer 调试状态（截至第 27 轮）
 
 ## 1. 结论摘要
