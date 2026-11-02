@@ -587,3 +587,41 @@ hook=0 | 等待=0 | blocks=32768(5.9x)   ← 仍然一次都没打印
   `save_kv_layer`（连接器侧，写完但发送前）或由图外的统一入口触发。
 
 现场已回退：`dsabase-m1`、无挂载；4 引擎 200、`pt=4237 → 3.9s` 正确。
+
+### 11.16 第 11 轮：连"无条件探针"都不触发 → Python 注意力 forward 不在服务路径上
+
+在 `AscendDSAImpl.forward` 开头加了**无条件** warning（不依赖任何守卫）：
+
+```python
+logging.getLogger(__name__).warning("dsa forward entered layer=%r", layer_name)
+```
+
+部署后（已确认挂载生效：容器内文件里 grep 得到该行、run 脚本里没有 PYTHONPATH 覆盖）：
+
+```
+dsa_forward=0   write_begin=0   等待=0
+```
+
+**结论：服务期的注意力写入根本不经过 Python 的 `forward`。**
+合理推断是走 ACLGraph/自定义算子（`dsa_v41_forward` / `dsa_attn_kv_plan` 里的
+torch_npu 融合算子），Python 那层只在 profiling/capture 阶段跑。
+
+这也解释了为什么 `notify_kv_cache_written` 那条路（Store 上传）能工作——
+它是连接器在**图外**按层调度的，跟模型 forward 无关。
+
+#### 因此屏障必须放到"图外、且每层都会被调用"的位置
+
+候选（按可行性排序）：
+
+1. **连接器侧 `save_kv_layer(layer_name, ...)`**：图外、每层一次、且在发送之前；
+   但它发生在**写之后**，所以只能保证"发送不越界"，不能防止下一层写坏数据；
+   → 需要配合"引擎在每层写之前调用连接器的某个钩子"，而该钩子必须由**图外的调度代码**
+   （model_runner 的逐层循环或 `AscendStoreConnector` 的 layer loop）触发；
+2. **在 `AscendStoreConnector` 的逐层流水里插 wait**（它已有 layer save/load 的逐层循环，
+   且已经注入了 `external_slot_release_waiter`）——最现实；
+3. 若 ACLGraph 完全吞掉逐层语义，则必须退化为"按请求粒度"的屏障：请求结束（或一批
+   layer 组结束）才允许覆盖槽位，容量收益会打折但没有正确性风险。
+
+#### 现场
+
+已回退 `dsabase-m1`、无挂载；4 引擎 200、`pt=4237 → 4.2s` 正确。
