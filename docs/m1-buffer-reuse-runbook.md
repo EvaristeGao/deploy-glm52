@@ -393,3 +393,50 @@ assert all(cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_
 `mazifan0120/vllm-ascend` 的 `dsa_offload_rebase_30` HEAD = **4234a1f18**，与本项目镜像基线一致；
 该分支上没有额外的 reuse 实现（只有 sfa_kv_offload / sparse_kv_offload_manager 的 port 提交），
 所以复用接入确实要在这里自己写。
+
+### 11.11 第 6 轮：容量 8× 稳住，正确性缺口定位到"写入前没有 wait"
+
+#### 做成的事
+
+把折叠块数改成 **基线块数 × (逻辑页/物理页)**，并对齐到 128 的倍数（各 rank 基线块数有 ±2 抖动）：
+
+```
+baseline num_blocks: 5508
+folded  num_blocks: 44288      → 8.04×
+4 引擎 200，启动正常
+```
+
+（之前 356074 那种离群值来自"按各自 rank 内存算块数"，已废弃。）
+
+#### 仍然坏的部分
+
+```
+pt=509  → 1.9s  ✅
+pt=4237 → ' This The    ``````````'      ❌ 乱码
+pt=4989 → 'Moon OurOur Moon$ MoonMoon...' ❌ 乱码
+slot 等待计数 = 0
+```
+
+#### 根因（本轮定位）
+
+`wait_for_layer_reuse()` 在整个仓库里**只有两处调用**：
+
+- `ascend_multi_connector.py:99`（`_wait_for_external_slot_release`），它被注入成
+  **Store 连接器**的 `external_slot_release_waiter`，用在 store 的 load/save 之前；
+- `sfa_pd_rd2h/connector.py:306`（另一套实现）。
+
+也就是说：**计算侧（attention 写 KV cache 之前）没有任何地方等待槽位**。
+现有钩子只有"写完之后"的通知 `notify_kv_cache_written(layer_name)`
+（`attention/utils.py:613`），没有"写之前等上一代读者结束"的钩子。
+
+所以别名一开，层 L+N 覆盖槽位时，层 L 的 P→D 发送和 Store 上传可能都还在进行 → 乱码。
+
+#### 下一步（明确的实现点）
+
+1. 在 attention 写 KV cache **之前**加一个 pre-write hook，例如
+   `wait_kv_cache_reuse(layer_name/layer_idx)`，由 multi-connector 转发到
+   `_wait_for_external_slot_release`（即 `wait_for_layer_reuse`）；
+2. 或在 `save_kv_layer` 之前插入同一等待（若写与发送在同一调用栈）；
+3. 加断言：启用复用但 provider 为空 → 启动失败（设计 §5 要求）。
+
+现场已回退：`glm52-vllm-ascend:0.30.0-dsabase-m1`、无挂载；4 引擎 200、`pt=4237 → 4.1s` 正确。
