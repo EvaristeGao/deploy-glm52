@@ -353,3 +353,43 @@ kv_cache_tensors = [KVCacheTensor(size=page*num_blocks, layers=slot_layers,
 已回退到 `glm52-vllm-ascend:0.30.0-dsabase-m1`（无挂载、无别名），引擎正常。
 诊断用的两处 warning（`kv_cache_config dispatch`、`glm5next layerwise reuse`）
 保留在分支上，便于下次一次启动确认分支走向。
+
+### 11.9 第 5 轮：折叠真的跑了，卡在"各 rank num_blocks 必须一致"
+
+按 §11.7 方案 1 实现了 `get_layerwise_reuse_kv_cache_config()`（按页大小分组 → 取最大组为主层 →
+用 `build_layerwise_cache_layout` 折叠成槽 → 一个槽一个 tensor → `bytes_per_block` 按槽算），
+并挂进 dispatch。首次真正执行到：
+
+```
+layerwise reuse folded 79 main layers into 5 physical slots
+  (page=83968 bytes, others=22, blocks=356074)
+```
+
+两个问题：
+
+1. **折叠了 79 层**（应为 61 个 main；79 含 MTP/draft），导致 `blocks=356074` 明显偏大；
+2. **引擎起不来**，断言在 `generate_scheduler_kv_cache_config`：
+
+```python
+assert all(cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs)
+```
+
+即 **各 TP rank 必须得到相同的 num_blocks**。我的实现按"本 rank 投影到的层"折叠，
+各 rank 的 `main_names` 不同 → 槽数不同 → `num_blocks` 不同 → 断言失败。
+
+修复方向（下轮直接做）：
+
+1. 槽数用**全局**层数推导（`model_config.get_num_layers()`），各 rank 只把**本地存在的层**
+   放进对应槽，保证 `len(slot_layers)` 与 `num_blocks` 全 rank 一致；
+2. 只折叠真正的 main MLA 层（排除 MTP/draft：它们的 spec 页大小相同但语义不同，
+   需要按层名/role 过滤，而不是只按 page size 分组）；
+3. 复核 `bytes_per_block`（5×83968 + 其余）与 `blocks` 的数量级（期望 ~7 万级，不是 35 万）。
+
+现场：已回退 `glm52-vllm-ascend:0.30.0-dsabase-m1`、无挂载；
+4 引擎 200、`pt=507 → 2.0s` 正确。
+
+### 11.10 分支确认
+
+`mazifan0120/vllm-ascend` 的 `dsa_offload_rebase_30` HEAD = **4234a1f18**，与本项目镜像基线一致；
+该分支上没有额外的 reuse 实现（只有 sfa_kv_offload / sparse_kv_offload_manager 的 port 提交），
+所以复用接入确实要在这里自己写。
