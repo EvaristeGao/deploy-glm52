@@ -311,3 +311,45 @@ _glm5_next_reuse_layout(fake_vllm_config)
 3. 若确实走了 glm5next 分支却仍 61 槽 → 检查 `main_slot_count` 是否被 mamba 分组顶回层数。
 
 现场已回退：`glm52-vllm-ascend:0.30.0-dsabase-m1`、无挂载，4 引擎 200、`pt=4237 → 4.4s` 正确。
+
+### 11.6 根因锁定：这份模型根本没走 glm5next 的 KV 配置构建器
+
+诊断（warning 级，单次启动即可见）：
+
+```
+(EngineCore_DP0 pid=730) kv_cache_config dispatch: v41=False glm5next=False available=39093626880
+```
+
+`glm5next=False` ⇒ `patch_kv_cache_utils` 的分派落到 **vLLM 默认构建器**
+（`_orig_get_kv_cache_config_from_groups`），从来没有调用
+`get_glm5_next_kv_cache_config()`。
+
+所以前面几轮改的 `main_slots` / `shared_by` / 按槽 `bytes_per_block` **一次都没执行**：
+`num_blocks` 自然还是 5509（61 层 × 6.79 MB），控制台也看不到任何复用日志。
+
+> 这也解释了为什么"门控探针返回 slots=5"却对线上毫无影响——探针调的是没人用的函数。
+
+### 11.7 正确的落点（下轮直接做）
+
+复用折叠必须在**默认构建器**的产物上做，两个可行方案：
+
+**方案 1（推荐）**：在 `patch_kv_cache_utils` 里加一个复用分支——
+当 `get_layerwise_reuse_config(vllm_config.kv_transfer_config)` 非空且
+`kv_role == kv_producer` 时，接管配置生成：
+
+```python
+base = _orig_get_kv_cache_config_from_groups(...)      # 拿到 specs 与 logical 页大小
+slots = build_layerwise_cache_layout(num_main_layers, extra_config).storage_indices
+phys_page = sum(page of slot[0] for slot in slots) + (非共享部分)
+num_blocks = available_memory // phys_page
+kv_cache_tensors = [KVCacheTensor(size=page*num_blocks, layers=slot_layers,
+                                  block_stride=page) for slot_layers in slots] + 非共享部分
+```
+
+**方案 2**：直接把 `kv_cache_groups` 伪装成 glmnext 形态以复用现有 builder（脆弱，不推荐）。
+
+### 11.8 现场
+
+已回退到 `glm52-vllm-ascend:0.30.0-dsabase-m1`（无挂载、无别名），引擎正常。
+诊断用的两处 warning（`kv_cache_config dispatch`、`glm5next layerwise reuse`）
+保留在分支上，便于下次一次启动确认分支走向。
