@@ -9,3 +9,8 @@ tmp.tar.gz
 
 # ansible 本地临时目录（ANSIBLE_LOCAL_TEMP）
 ansible/.ansible-tmp/
+
+# 上游源码工作区（本地 clone，不入库）
+/src/
+# 设计文档原始 PDF（正文已整理进 docs/）
+/mc.pdf
