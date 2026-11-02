@@ -247,3 +247,42 @@ D 侧: Number of completed KV cache recv requests: 1  （随后停滞）
 2. factor 改用 main 层数（61）而不是总层数（79）；
 3. 传输修好后：验证屏障日志（`Waiting for ... release physical KV slot`）出现、多 chunk 正确；
 4. 再固化进镜像（`docker save` → SFS → 其余节点 `docker load -i`）。
+
+---
+
+## 11. 复用接入第 3 轮（2026-11-02 晚）：别名已生效，屏障仍未接上
+
+### 11.1 本轮修的三个 bug
+
+| # | 现象 | 修复 |
+|---|---|---|
+| 1 | 启动即 `NameError: Any` | `cache_config.py` 补 `from typing import Any` |
+| 2 | 缩放完全没发生（`num_blocks` 仍是 5509） | `kv_role` 是枚举，字符比较永远不等 → 改成按名字比较（`kv_role_name`）；`model_type` 常量写错（实际是 `glm_moe_dsa`）也一并修正 |
+| 3 | 只应在 P 侧复用 | `_glm5_next_reuse_layout()` 增加 `kv_role == kv_producer` 门控 |
+
+另外把 `bytes_per_block` 也改成按槽计算（`layout.main_slot_count`），否则块数不会随槽数放大。
+
+### 11.2 实测结果
+
+- **别名确实生效了**：双 chunk 输出 `NONThe NONNON` / `**YouUserNON``` ……` —— 典型的"物理共享但没有屏障"的乱码；
+- **容量没涨**：`num_blocks` 仍 5508 → 因为
+  ```python
+  main_slot_count = max(len(main_slots), *(len(g.layer_names) for g in mamba_groups))
+  ```
+  mamba 分组仍按 61 层计，把槽数顶回 61；
+- 单 chunk 正常（1.8–2.0s），多 chunk 必坏。
+
+### 11.3 结论：剩下两件必须做的事
+
+1. **槽数**：`main_slot_count` 不能被 mamba 分组顶回层数（本模型 mamba 组应一并按复用计划折叠，或明确不参与）；
+2. **屏障**（核心）：混合链路里 `AscendMultiConnector._wait_for_external_slot_release()` 只在
+   `supports_layerwise_buffer_reuse` 的连接器上调用 `wait_for_layer_reuse()`；
+   当前 P 的逐层发送与 Store 上传没有被该槽位事件串起来 → 别名一开就乱码。
+   这正是设计文档 §4/§6 里"每层三件写入（计算、Store、P/D）都必须计入屏障"的落点。
+
+### 11.4 现场
+
+已回退到已知可用镜像 `glm52-vllm-ascend:0.30.0-dsabase-m1`（无挂载、无别名），
+4 引擎 200、单 chunk 2.0s、双 chunk 4.2s 输出正确。
+复用接入的代码全部在 `src/vllm-ascend` 分支 `m1-prefill-reuse`（4 个 commit），
+镜像 `...-m1c` 已含前三个修复，待第 1/2 项修好后重建分发。
