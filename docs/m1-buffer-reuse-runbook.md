@@ -286,3 +286,28 @@ D 侧: Number of completed KV cache recv requests: 1  （随后停滞）
 4 引擎 200、单 chunk 2.0s、双 chunk 4.2s 输出正确。
 复用接入的代码全部在 `src/vllm-ascend` 分支 `m1-prefill-reuse`（4 个 commit），
 镜像 `...-m1c` 已含前三个修复，待第 1/2 项修好后重建分发。
+
+### 11.5 第 4 轮：门控是通的，但 builder 没被调用
+
+直接进程内探针（容器里构造真实形态的 `kv_transfer_config`）：
+
+```python
+_glm5_next_reuse_layout(fake_vllm_config)
+# → (has_layer_reuse=True, slots=5)     ✅ 门控/布局都对
+```
+
+但真实启动时：
+
+- 新增的诊断日志（`glm5next layerwise reuse: ...`，3 处）**一行都没出现**；
+- `num_blocks` 仍是 5509；
+- 说明 `_get_glm5_next_cache_layout()` 在**真实 KV 配置生成路径上根本没被调用到**
+  （或走了另一条历史/cached 路径），而不是布局算错。
+
+下一轮要做的定位（一次部署即可）：
+
+1. 把诊断日志从 `logging.info` 改成 `logging.warning`（vllm 的 root logger 默认 INFO 以下被丢，
+   本次就是因为 `logger.level=0/handlers=0` + root 级别过滤而看不到）；
+2. 在 `patch_kv_cache_utils` 的分派处加一行 warning，打印 `is_deepseek_v41_cache / glm5next / 默认` 走了哪个分支；
+3. 若确实走了 glm5next 分支却仍 61 槽 → 检查 `main_slot_count` 是否被 mamba 分组顶回层数。
+
+现场已回退：`glm52-vllm-ascend:0.30.0-dsabase-m1`、无挂载，4 引擎 200、`pt=4237 → 4.4s` 正确。
