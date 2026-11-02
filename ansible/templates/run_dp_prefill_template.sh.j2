@@ -284,7 +284,11 @@ vllm serve {{ model_path }} \
     "kv_load_failure_policy": "recompute",
     "kv_connector_extra_config": {
         "connectors": [
-            {
+            {% if (pd_cluster.pd_connector | default('blockwise')) == 'layerwise' %}{
+                "kv_connector": "MooncakeLayerwiseConnector",
+                "kv_role": "kv_producer",
+                "kv_port": "{{ kv_port }}"
+            }{% else %}{
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
                 "kv_port": "{{ kv_port }}",
@@ -292,7 +296,7 @@ vllm serve {{ model_path }} \
                     "prefill": { "dp_size": {{ prefill_dp }}, "tp_size": {{ prefill_tp }} },
                     "decode": { "dp_size": {{ decode_dp }}, "tp_size": {{ decode_tp }} }
                 }
-            },
+            }{% endif %},
             {
                 "kv_connector": "AscendStoreConnector",
                 "kv_role": "kv_producer",

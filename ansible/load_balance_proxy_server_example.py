@@ -618,6 +618,10 @@ async def send_request_to_service(
     req_data["kv_transfer_params"] = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
+        # [M1/P0] MooncakeLayerwiseConnector 的 update_state_after_alloc 读
+        # params["remote_cached_tokens"] 作为 local_transferred_tokens 起点；
+        # 全新 prefill 请求 D 侧尚无缓存 ⇒ 0。
+        "remote_cached_tokens": 0,
         "remote_engine_id": None,
         "remote_block_ids": None,
         "remote_host": None,

@@ -1,0 +1,38 @@
+# =============================================================================
+# Dockerfile_glm52_dsabase —— 在现有镜像上用 dsa-base(4234a1f) 的 vllm-ascend
+#                              替换掉 v0.30.0rc1 的 editable 安装
+#
+# 为什么需要（见 docs/mc-layerwise-detailed-design.md §15）：
+#   - 逐层 P/D（MooncakeLayerwiseConnector）+ 复用屏障 + D 侧 Host offload 只在
+#     mazifan0120/dsa_offload_rebase_30（固定 4234a1f）上；
+#   - 该分支 C++ 树与 rc1 差异 574 处文件、vllm_ascend 内含 8 个 .so
+#     ⇒ 不能靠挂源码，必须用其源码编译出 wheel 再换成镜像内的包。
+#
+# 构建（在 aarch64 节点、已存在 wheel 的前提下）：
+#   docker build -f image_build/Dockerfile_glm52_dsabase \
+#       -t glm52-vllm-ascend:0.30.0-dsabase-4234a1f image_build/
+#
+# wheel 由 build_vllm_ascend_dsabase.sh 产出到 image_build/wheel/。
+# =============================================================================
+ARG BASE_IMAGE=glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="vllm-ascend (dsa_offload_rebase_30 @4234a1f)" \
+      org.opencontainers.image.description="rc1 base + vllm-ascend from dsa-base for layerwise P/D + KV offload"
+
+# 1) 卸载镜像里的 editable 安装，并清掉它的 .pth，避免旧包抢占 import 路径
+# 2) 安装新 wheel（--no-deps：依赖沿用基础镜像，torch_npu/triton 版本差异见设计文档）
+COPY wheel/ /tmp/wheel/
+RUN pip uninstall -y vllm_ascend >/dev/null 2>&1 || true; \
+    find /usr/local -maxdepth 6 -name "__editable__.vllm_ascend*.pth" -delete 2>/dev/null || true; \
+    find /usr/local -maxdepth 6 -name "vllm_ascend*.egg-link" -delete 2>/dev/null || true; \
+    pip install --no-deps --force-reinstall /tmp/wheel/*.whl >/dev/null && \
+    rm -rf /tmp/wheel
+
+# 3) 自检：必须指向 site-packages，且版本可打印
+#    构建期没有 NPU 设备，torch 的 backend autoload 会因 torch_npu 加载失败而报错，
+#    这里关掉 autoload 只做路径/版本校验（运行时不受影响）。
+#    用 find_spec 只解析包位置、不执行模块（构建期无 NPU 设备，import 会拉 torch_npu）
+RUN python3 -c "import importlib.util as u; \
+s = u.find_spec('vllm_ascend'); print('vllm_ascend at', s.origin); \
+assert 'site-packages' in s.origin, 'still the editable install!'"

@@ -534,3 +534,58 @@ def _prepare_layerwise_get_session(request):
 - **C** 只保留 blockwise + P1，无复用收益。
 
 在决定之前，环境保持**干净档（blockwise、无复用、无挂载）**，已验证 4 引擎 200、请求正确。
+
+---
+
+## 16. 方案 A 实施记录（2026-11-02）
+
+### 16.1 新镜像已构建并验证（M0 达成）
+
+```
+glm52-vllm-ascend:0.30.0-dsabase-4234a1f
+  基础：glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13（沿用其 mooncake 0.3.13.post1）
+  替换：vllm_ascend ← dsa_offload_rebase_30 @4234a1f 源码编译的 wheel
+        vllm_ascend-0.30.0rc2.dev319+g4234a1f18.d20261102-cp312-cp312-linux_aarch64.whl
+  自检：find_spec('vllm_ascend') → site-packages（不是旧 editable）
+```
+
+部署后实测（干净档、blockwise、无复用）：
+
+```
+4 引擎 200、proxy ok
+pt=1629 → 2.2s，pt=4988 → 4.1s，输出正确
+（首次请求约 60-90s：新镜像的图编译冷启动，之后恢复）
+```
+
+构建要点（踩过的坑，已固化在 `image_build/Dockerfile_glm52_dsabase` 与构建流程里）：
+
+| 坑 | 处理 |
+|---|---|
+| git "dubious ownership" | `git config --global --add safe.directory "*"` |
+| catlass 子模块拉不到（transport 'file' not allowed） | 直接 clone 到 `csrc/third_party/catlass` 指定 commit，保留 `include/` 即可（构建脚本见目录存在就跳过子模块） |
+| CANN 算子包安装做"加载校验"，构建容器无 NPU | 给 `csrc/build_aclnn.sh` 的 installer 加 `--force`（真正校验留到实机） |
+| CMake 阶段 torch 自动加载 torch_npu 失败（缺 libascend_hal） | 构建时 `TORCH_DEVICE_BACKEND_AUTOLOAD=0` + `LD_LIBRARY_PATH` 指向 `cann-9.1.0/aarch64-linux/devlib/linux/aarch64` |
+| 镜像自检 import 会拉 torch_npu | 自检改用 `importlib.util.find_spec`，不执行模块 |
+
+### 16.2 M1（逐层连接器 + 复用屏障）当前阻塞：代理的请求顺序
+
+在 dsa-base 镜像上启用 `pd_connector: layerwise` + `num_shared_buffers: 3` + P1 补丁，
+引擎全部就绪（4×200、proxy ok），但**请求挂住**：
+
+- P/D 的 API server 日志里只有代理发来的 `/tokenize`，**没有 `/v1/chat/completions`**；
+- 代理日志也只有 healthcheck，说明它卡在等待 prefill 响应；
+- 即 **P 在等 D 发布目标块，而代理是"先 P 后 D"的顺序**。
+
+这与上游设计的时序矛盾：设计明确要求"D scheduler 在 P 开始可复用的逐层执行之前，
+分配并保留整个待传输 prompt 范围的目标 blocks；worker 绑定 TargetLease 并注册成功后发布目标描述"。
+也就是说 **必须由 D 先注册目标**（或经 layerwise rendezvous / metaserver 建立会话），
+而当前代理（`load_balance_proxy_server_example.py`）只在 P 返回之后才联系 D。
+
+→ 这一步属于设计文档中开发者 B 的接口工作（D 目标提前发布 + 代理/Rendezvous 接线），
+不是配置能解决的；M1 需要把"代理/D 侧先建会话"这条链路补上。
+
+### 16.3 已具备的条件（下一步直接用）
+
+- 新镜像 + 干净档已验证可用（当前部署状态）；
+- `pd_connector` 开关、`num_shared_buffers`/`independent_layers` 配置、P1 补丁（`probe/patch/m1b/`）均已就绪；
+- dsa-base 自带 c8 支持、Host pool、DSA offload runtime，无需再移植 rc1 的补丁。

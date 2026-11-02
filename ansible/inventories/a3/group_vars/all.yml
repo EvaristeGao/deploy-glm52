@@ -28,7 +28,7 @@ ansible_python_interpreter: /usr/bin/python3
 deploy_config: 1m-v030-lw
 
 cluster_type: a3
-image: glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13   # layerwise 需要带 PR #2881 range/session 接口的 mooncake client
+image: glm52-vllm-ascend:0.30.0-dsabase-4234a1f          # vllm-ascend = dsa_offload_rebase_30 @4234a1f（见 docs/mc-layerwise-detailed-design.md §15）
 #                               # （image_build/Dockerfile_mooncake_layerwise 构建；4 台节点本地都已构建）
 image_tar: ""                 # 非空则 pull.yml 改从该 tar docker load（需节点可见路径，如共享目录）；留空则 docker pull image
 
