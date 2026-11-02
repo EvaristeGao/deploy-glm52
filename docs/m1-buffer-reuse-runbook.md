@@ -203,3 +203,47 @@ if extra_config is not None:
 
 设计文档 §2 的缺口表里本来就写着这一条：
 "`extract_layout_config()` 当前返回 None；接入布局并修正复用时加载范围"——本次把它定位为**容量收益的关键路径**。
+
+---
+
+## 10. 复用接入（2026-11-02 第 2 轮）：容量已通，P→D 传输待修
+
+### 10.1 已实现（分支 `m1-prefill-reuse`，commit `5423808b0` + `fix: Any`）
+
+1. `backend/mooncake_layerwise.extract_layout_config()`：按显式配置 opt-in（此前恒 `None`，导致整条复用路径失效）；
+2. `models/glm5next/cache_config.py`：`main_slot_count` 由复用计划（`storage_indices`）决定，
+   tensor 的 `shared_by` 改为「该槽容纳的全部层」⇒ 真正的物理别名；
+3. `worker/worker.py`：槽位感知模型（glm5_next）不再做通用预算缩放（避免 double count），
+   并删掉按层数估的 fallback factor。
+
+### 10.2 实测：容量收益确认
+
+| 指标 | 接入前 | 接入后 |
+|---|---|---|
+| `num_blocks` | 5509 | **68882（12.5×）** |
+| 缩放日志 | 0 次 | **16 次**（每 rank 一次，`79 layers onto 5 buffer assignments`） |
+| 4 引擎健康 | 200 | 200 |
+
+### 10.3 阻塞：物理别名下的 P→D 传输失败
+
+```
+[HixlClient] aclrtSynchronizeStreamWithTimeout failed, kernel=HixlBatchPut, list_num=1, slot=16
+Stream synchronize timeout → BatchTransferSync failed
+D 侧: Number of completed KV cache recv requests: 1  （随后停滞）
+```
+
+根因假设（待验证，按优先级）：
+
+1. **重叠区间**：别名后同一块 HBM 被多个层的传输列表引用，HIXL 单批内出现重叠 range → 传输超时；
+2. **D 侧按层记账**：D 期待 61 个层的对象/区间，而 P 只有 5 个物理槽 → 计数在第 1 个后不再推进；
+3. **factor 偏差**：日志按 `79 layers`（含 draft/MTP）计算，而别名只覆盖 main 的 61 层 → 预算略偏大（68882 vs 理论 ~55k）。
+
+已把环境回退到可用版本（`glm52-vllm-ascend:0.30.0-dsabase-m1`，无挂载），
+4 引擎 200、单/双 chunk 请求正常，代码保留在分支上。
+
+### 10.4 下一步
+
+1. 传输计划按**物理槽**去重（同一槽的多层只传一次，或在 D 侧还原成物理槽视图）；
+2. factor 改用 main 层数（61）而不是总层数（79）；
+3. 传输修好后：验证屏障日志（`Waiting for ... release physical KV slot`）出现、多 chunk 正确；
+4. 再固化进镜像（`docker save` → SFS → 其余节点 `docker load -i`）。

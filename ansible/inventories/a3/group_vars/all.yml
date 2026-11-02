@@ -28,7 +28,7 @@ ansible_python_interpreter: /usr/bin/python3
 deploy_config: 1m-v030-lw
 
 cluster_type: a3
-image: glm52-vllm-ascend:0.30.0-dsabase-m1          # dsa-base @4234a1f + M1(b3222a7 start_block) 已固化进镜像
+image: glm52-vllm-ascend:0.30.0-dsabase-m1          # 上一版可用镜像（复用接入在 m1b，待修传输后再启用）
 #                               # （image_build/Dockerfile_mooncake_layerwise 构建；4 台节点本地都已构建）
 image_tar: ""                 # 非空则 pull.yml 改从该 tar docker load（需节点可见路径，如共享目录）；留空则 docker pull image
 
@@ -402,16 +402,16 @@ _1m_v030_hyb:
     # ★ D 侧使用独立挂载集：reuse 补丁的 pool_worker 是 producer 语义，
     # 挂到 decode（kv_consumer）会让 D 启动失败。D 只挂 C1 基线文件。
     debug_mounts_decode:
-      /mnt/sfs_turbo/g00832294/probe/patch/c1/attention_fence.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/attention_fence.py
-      /mnt/sfs_turbo/g00832294/probe/patch/c1/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
-      /mnt/sfs_turbo/g00832294/probe/patch/c1/sfa_v1.py: /vllm-workspace/vllm-ascend/vllm_ascend/attention/sfa_v1.py
-      /mnt/sfs_turbo/g00832294/probe/patch/c1/mla_v1.py: /vllm-workspace/vllm-ascend/vllm_ascend/attention/mla_v1.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/attention_fence.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/attention_fence.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/pool_worker.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/sfa_v1.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/attention/sfa_v1.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/mla_v1.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/attention/mla_v1.py
     debug_mounts:
       # C1-only 基线
-      /mnt/sfs_turbo/g00832294/probe/patch/c1/attention_fence.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/attention_fence.py
-      /mnt/sfs_turbo/g00832294/probe/patch/c1/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
-      /mnt/sfs_turbo/g00832294/probe/patch/c1/sfa_v1.py: /vllm-workspace/vllm-ascend/vllm_ascend/attention/sfa_v1.py
-      /mnt/sfs_turbo/g00832294/probe/patch/c1/mla_v1.py: /vllm-workspace/vllm-ascend/vllm_ascend/attention/mla_v1.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/attention_fence.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/attention_fence.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/pool_worker.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/sfa_v1.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/attention/sfa_v1.py
+      /mnt/sfs_turbo/g00832294/probe/patch/c1/mla_v1.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/attention/mla_v1.py
     extra_env:
       # 2026-10-20 试 RoCE 路（用户要求）：A3 上默认 HCCL_INTRA_ROCE_ENABLE 只在 a2 模板里开，
       # A3 模板从来没设过；这里显式打开 RoCE、关掉 PCIe，配上 hixl_preset=roce（roce:device）。
@@ -561,13 +561,13 @@ _1m_v030_hyb_1m:
     #   `Dest buffer device_id=N >= endpoint count 1, falling back to ...`（没有它每个 segment 只有 1 个 endpoint）。
     # ★ Phase-1 复用补丁：只读挂载三个打过 PR 的模块（R1/R2/R3），不改镜像
     debug_mounts:
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/mooncake_layerwise.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/backend/mooncake_layerwise.py
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_scheduler.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/layerwise_cache_layout.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py
-      /mnt/sfs_turbo/g00832294/probe/patch/d2h/memfabric_transfer_engine.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/utils/memfabric_transfer_engine.py
-      /mnt/sfs_turbo/g00832294/probe/patch/d2h/sfa_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_p2p/sfa_pd_rd2h/worker.py
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/kv_transfer.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/kv_transfer.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/mooncake_layerwise.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/backend/mooncake_layerwise.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_worker.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_scheduler.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/layerwise_cache_layout.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py
+      /mnt/sfs_turbo/g00832294/probe/patch/d2h/memfabric_transfer_engine.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/utils/memfabric_transfer_engine.py
+      /mnt/sfs_turbo/g00832294/probe/patch/d2h/sfa_worker.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_p2p/sfa_pd_rd2h/worker.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/kv_transfer.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/kv_transfer.py
     extra_env:
       # 2026-10-20 试 RoCE 路（用户要求）：A3 上默认 HCCL_INTRA_ROCE_ENABLE 只在 a2 模板里开，
       # A3 模板从来没设过；这里显式打开 RoCE、关掉 PCIe，配上 hixl_preset=roce（roce:device）。
@@ -783,12 +783,12 @@ _1m_v030_poff:
     v030_env: true
     # D2H 档同样挂 Phase-1 复用补丁（只读）
     debug_mounts:
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/mooncake_layerwise.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/backend/mooncake_layerwise.py
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_scheduler.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py
-      /mnt/sfs_turbo/g00832294/probe/patch/reuse/layerwise_cache_layout.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py
-      /mnt/sfs_turbo/g00832294/probe/patch/d2h/memfabric_transfer_engine.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/utils/memfabric_transfer_engine.py
-      /mnt/sfs_turbo/g00832294/probe/patch/d2h/sfa_worker.py: /vllm-workspace/vllm-ascend/vllm_ascend/distributed/kv_transfer/kv_p2p/sfa_pd_rd2h/worker.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/mooncake_layerwise.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/backend/mooncake_layerwise.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_worker.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_worker.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/pool_scheduler.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/pool_scheduler.py
+      /mnt/sfs_turbo/g00832294/probe/patch/reuse/layerwise_cache_layout.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/layerwise_cache_layout.py
+      /mnt/sfs_turbo/g00832294/probe/patch/d2h/memfabric_transfer_engine.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/utils/memfabric_transfer_engine.py
+      /mnt/sfs_turbo/g00832294/probe/patch/d2h/sfa_worker.py: /usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend/distributed/kv_transfer/kv_p2p/sfa_pd_rd2h/worker.py
     layerwise:
       enabled: true
       prefetch_layers: 2
