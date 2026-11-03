@@ -159,6 +159,9 @@ vllm serve {{ model_path }} \
     --trust-remote-code \
     --max-num-seqs {{ pd_cluster.prefill.max_num_seqs | default('64' if cluster_type == "a3" else '256') }} \
     --gpu-memory-utilization {{ pd_cluster.prefill.gpu_memory_utilization | default('0.92' if cluster_type == "a3" else '0.95') }} \
+{% if pd_cluster.prefill.num_gpu_blocks_override is defined %}
+    --num-gpu-blocks-override {{ pd_cluster.prefill.num_gpu_blocks_override }} \
+{% endif %}
 {# ---- safetensors 预取：A2 默认开；A3 由 pd_cluster.prefill.safetensors_prefetch 控制（v0.30 文档为开） ---- #}
 {% if pd_cluster.prefill.safetensors_prefetch | default(cluster_type != "a3") %}
     --safetensors-load-strategy prefetch \
@@ -225,7 +228,7 @@ vllm serve {{ model_path }} \
     '{
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_producer",
-    "kv_load_failure_policy": "recompute",
+    "kv_load_failure_policy": "{{ pd_cluster.prefill.kv_load_failure_policy | default('recompute') }}",
     "kv_connector_extra_config": {
         "lookup_rpc_port":"0",
         "backend": "mooncake",
@@ -244,7 +247,7 @@ vllm serve {{ model_path }} \
     '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_producer",
-    "kv_load_failure_policy": "recompute",
+    "kv_load_failure_policy": "{{ pd_cluster.prefill.kv_load_failure_policy | default('recompute') }}",
     "kv_port": "{{ pd_cluster.prefill_kv_offload.kv_port | default(20050) }}",
     "kv_connector_extra_config": {
         "connectors": [
@@ -281,7 +284,7 @@ vllm serve {{ model_path }} \
     '{
     "kv_connector": "MultiConnector",
     "kv_role": "kv_producer",
-    "kv_load_failure_policy": "recompute",
+    "kv_load_failure_policy": "{{ pd_cluster.prefill.kv_load_failure_policy | default('recompute') }}",
     "kv_connector_extra_config": {
         "connectors": [
             {% if (pd_cluster.pd_connector | default('blockwise')) == 'layerwise' %}{
@@ -337,5 +340,5 @@ vllm serve {{ model_path }} \
     --profiler-config \
     '{{ profiler.config }}' \
 {% endif %}
-    --additional-config '{{ additional_config }}' \
-    --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager":true}'
+    --additional-config '{{ additional_config }}'{% if pd_cluster.prefill.enable_mtp | default(true) %} \
+    --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp", "enforce_eager":true}'{% endif %}

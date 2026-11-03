@@ -1,5 +1,19 @@
 # M1（P 侧 KV Buffer Reuse）工作总览
 
+> **2026-11-03 新基线核对**：后续工作以 `mc.pdf` 与固定 SHA `4234a1f18` 为准，
+> 新工作区 `src/vllm-ascend-reuse` / `p-main-buffer-reuse`，旧分支保留作历史记录。
+> 当前新实现已完成开发与目标配置的真实验收，并部署在独立 r03 容器；
+> 产物、Python 测试环境及原 `/tmp` 资料均已归拢到当前仓库。最新状态见核对文档 §5。
+> 已发现 block-key waiter 注册被 GVA 门控拒绝，首批修补及完整对应表见
+> [P Main shared buffer 核对](p-main-buffer-reuse-audit.md)。NPU 哨兵与 B=3 单/双/三chunk、并发同前缀及断连后恢复均已通过；
+> B=1/32768 的非整block恢复及 r03 B=2 自动52042 blocks、并发与断连恢复均已通过。
+> 当前入口：[运行与验收](p-main-buffer-reuse-usage.md)，配置 `ansible/profiles/p-main-buffer-reuse.yaml`。
+> 源码功能提交 `9824ec91c`，格式提交 `f9b995c68`；111项聚焦UT通过，全仓CI遗留问题单独记录。
+> 下文“缺 reader 登记即乱码病根”“计算读者已覆盖”“forward 不触发必为 ACLGraph”
+> 等属于历史推断，未被本轮证据证明；容量数据也不是正确性验收。
+
+## 以下为旧 M1 实现历史记录
+
 > 生成时间：2026-11-03
 > 状态：**容量路径已完成并验证；正确性屏障未打通（按文档口径重新定位后待续）**
 > 代码分支：`src/vllm-ascend` → `m1-prefill-reuse`，tag `m1-prefill-reuse-wip-20261103`

@@ -14,3 +14,6 @@ ansible/.ansible-tmp/
 /src/
 # 设计文档原始 PDF（正文已整理进 docs/）
 /mc.pdf
+
+# 本地实验环境、迁入的参考资料和验证日志
+/artifacts/

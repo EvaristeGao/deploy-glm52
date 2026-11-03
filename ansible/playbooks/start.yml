@@ -18,6 +18,13 @@
     # mooncake_master 落点：HA → mooncake.ha.nodes；单主 → proxy 节点（p0）
     mooncake_master_nodes: "{{ mooncake.ha.nodes if mooncake.ha.enable_ha else [groups['proxy'][0]] }}"
   tasks:
+    - name: 拒绝把渲染专用实验配置用于通用部署流程
+      assert:
+        that:
+          - not (reuse_render_only | default(false) | bool)
+        fail_msg: "此配置只用于 gen.yml。复用实验请使用 tools/reuse_container_experiment.py 保留基线容器并验证 owner/ID；禁止用 start.yml 删除或重建当前容器。"
+      tags: always
+
     - name: 校验部署模式组合（ha+etcd 依赖 kvpool）
       run_once: true
       assert:

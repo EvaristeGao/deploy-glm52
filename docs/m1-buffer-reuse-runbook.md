@@ -1,5 +1,9 @@
 # M1 Runbook：P 侧 KV Buffer Reuse（逐层 P/D + Mooncake）
 
+> 2026-11-03：已从固定基线建立 `src/vllm-ascend-reuse` / `p-main-buffer-reuse`。
+> 新核对结果与首批修补见 §11.17 和 [对应表](p-main-buffer-reuse-audit.md)；
+> 旧轮次的推断保留作历史，不作为新实现已验证事实。
+
 > 状态：**已实现并验收**（2026-11-02）
 > 适用配置：`deploy_config: 1m-v030-lw`（下称 M1 档）
 > 相关设计：[mc-layerwise-detailed-design.md](mc-layerwise-detailed-design.md)
@@ -625,3 +629,161 @@ torch_npu 融合算子），Python 那层只在 profiling/capture 阶段跑。
 #### 现场
 
 已回退 `dsabase-m1`、无挂载；4 引擎 200、`pt=4237 → 4.2s` 正确。
+
+### 11.17 固定基线重新核对与 block-key waiter 修补（2026-11-03）
+
+- 工作：从 `4234a1f18` 建 `p-main-buffer-reuse` worktree，旧实现保留。
+  按 `mc.pdf` 核对 Main-only 布局、Store 队列、hook 与设备事件，记录于
+  [p-main-buffer-reuse-audit.md](p-main-buffer-reuse-audit.md)。
+- 证据：基线及 p0 安装源码的 `set_external_slot_release_waiter` 均只接受 GVA，
+  Mooncake block-key 注册会返回 False；receiver 构造却同时支持两种数据面。
+  新回归测试在修补前复现该问题。p0 镜像仍为 `dsabase-m1`、无源码调试挂载。
+- 修改：注册门控与 receiver 选择条件对齐；测试正常/晚注册、非适用模式拒绝、
+  block-key GET 等待顺序及 waiter 失败禁止 GET。未启用物理复用，未部署。
+- 验证：聚焦 UT 及既有 transfer/session 共 60 个通过，Ruff lint/format 通过。
+  完整三个模块的 CPU mock 扩展运行存在 tensor 能力等环境/测试问题，未报告全量通过；
+  `format.sh ci` 因缺少 pre-commit 未执行，NPU ST 尚未运行。
+- 认识修正：hybrid 路径提前保存的 `sync_save_events` 是 KV-ready，不能证明 attention-done；
+  Python range API 返回的源静止保证尚未核实，不能先断言 Store 上传一定异步。
+- 下一步：Main-only 唯一布局规划、独立 attention-done、恢复范围及快照版本。
+  硬件验证前继续保持稳定服务配置。
+
+### 11.18 Main-only、计算完成与私有快照实现（2026-11-03，待 NPU 验收）
+
+- 产物全部归拢到当前仓库；40 项迁移清单位于 `artifacts/p-main-buffer-reuse/tmp-migration.json`。
+- 新分支实现 Main-only 统一规划、独立 attention-done、跨 step 不可重置完成对象、启动 waiter 自检、
+  严格 range 错误传播及 request-instance/generation 私有 partial snapshot。目标当前单 manager group；
+  MTP、graph、V2、PP/CP 与未验证多 group 的实际复用显式拒绝。
+- 原生完成语义核查：固定参考 PR #2881 源码和安装库反汇编均证明正常 range write 等待 scatter 完成。
+  原安装库与迁入 wheel 哈希相同；不再沿用“Store API 只提交即返回”的历史假设。
+- 聚焦 UT 107 个通过，metadata/backend 两模块 205 个通过；完整 pool_worker 的 6/1 已用固定基线复现，未宣称全量通过。
+- 模板新选项默认不改变任何四节点启动参数；新实验会关闭 MTP、先固定 block 容量，使用独立容器。
+  四节点基线容器配置和启动文件已备份，尚未停止或修改稳定服务。
+- 下一步：NPU sentinel、独立实验服务、B=1/2/3、多 chunk/prefix/多请求/取消与失败验证、容量扩容和性能记录。
+
+### 11.19 独立开发容器与 NPU sentinel（2026-11-03 12:40 起）
+
+- 四节点构建 Python overlay 镜像 `0.30.0-main-reuse-dev-20261103-r01`，容器内 Python3.12 编译通过。
+  实验模板关闭 MTP、固定5508 blocks、Main shared=3；默认线上配置与基线生成文件未修改。
+- 确认四引擎 running/waiting=0 后，只停止并保留原引擎容器；独立开发容器带 owner 标签。
+  保留 Mooncake master、其他容器；未手工修改 host 日志/文件。回退入口 `tools/reuse_container_experiment.py restore`。
+- NPU sentinel 以 B=1/2/3、6层×3chunk 验证 range PUT 返回后立即污染源，后续 GET 数据仍正确。
+  首轮因 remove 尚有 lease 返回 -706 而停；固定参考源码确认 OBJECT_HAS_LEASE。
+  修正测试按安全延迟清理处理后全通过，未强制删除。日志均在 `artifacts/p-main-buffer-reuse/`。
+- 四实验引擎已提交启动，完整服务、真实多chunk以及容量仍待验收。
+
+### 11.20 Scheduler 合并规格与 worker 物理规格分离（2026-11-03 12:48）
+
+- 首轮 P worker 全部成功规划：78层、Main_slots=5（shared3+独立2）、private_Indexers=21、5508 blocks、
+  849920 physical bytes/block；profiling logical multiplier8.212。D0/D1 均健康200。
+- P engine 初始化 scheduler 时失败：`Main-only reuse has multiple Indexer caches at layer 0`。
+  Scheduler 接收跨rank合并KV规格，不应再次执行仅适用于rank局部的物理内存规划。
+- 修复 scheduler 仅从公共逻辑槽布局判断复用；worker/runner 的严格物理规划、接线检查保持有效。
+  新增禁止 scheduler 调用 worker planner 的回归，聚焦108项通过。
+- 仅重启两个开发P容器，向其site-packages写入修正后的pool_scheduler.py；D与master保持运行。
+  因而当前开发容器带镜像外修补，最终交付镜像仍须重建。
+- 扩展pytest运行scheduler/worker（启用其autouse fixtures）：194 passed、170 subtests passed，13 failed。
+  相同环境在内存载入固定基线scheduler/worker后：193 passed、169 subtests passed，15 failed；
+  相同13项全部复现，额外两项为本次修复的block-key waiter回归。
+  日志：`ut-20261103-125022-777771.log`、`baseline-pytest-comparison.log`。
+  之前直接unittest运行扩展模块忽略pytest fixtures，产生MOONCAKE_CONFIG_PATH等错误，不作为验收结论。
+
+### 11.21 首请求输出正确但 P 收尾死锁（2026-11-03 12:57–13:02）
+
+- Scheduler修正后四引擎健康200。首短请求536输入tokens、15输出tokens，22.5s，输出：
+  “以上资料主要描述 Mooncake 将 KV blocks 作为对象进行保存。”
+- 后续长请求未返回；P0的shared-memory broadcast提示超过60秒等待。
+  不能把首请求输出正确视为step收尾成功，更不能报告多chunk通过。
+- 在开发容器内使用py-spy只读抓取worker线程栈：
+  主线程停在 `_wait_for_final_layer_save` 逐个等待前序层event；Store发送/接收线程均在空队列get。
+  证据 `p0-worker0-stack-r01.txt`，工具下载和校验信息在本仓库packages目录，未安装host工具。
+- 根因：receiver在后层覆写前正确等待并clear前代save event，step末尾却重复等这些已消费的event，永不再set。
+  修复：队列drain确认全部PUT终结后，跳过已被逐层复用消费的source events；独立层检查与逐层屏障保留。
+- 新增回归：已消费event的wait若被调用即失败；聚焦109项通过。正在只重启开发P容器验证修复，D/master不动。
+
+### 11.22 仅重启 P 后 P/D 传输超时（2026-11-03 13:10）
+
+- drain修正后四引擎重新健康200，但新短请求在P0 TP7首层P/D发送超时（native ret=-1，30s）。
+  随后TP7等外部slot释放，其他rank在后续层等待；并非上一轮空队列收尾event问题。
+- `p0-worker0-stack-drain-fix.txt`：P/D发送与Store发送等待NPU event，receiver等source save，主线程等layer load。
+  失败记录包含目标D0原生TE端点15396。尚不能断言为复用代码新问题或旧连接缓存。
+- 为排除保留D、只重启P产生的原生连接状态影响，正在同时重启四个带owner标签的开发引擎容器。
+  不重启主机，不修改master，不操作其他容器，基线容器与文件仍保留。
+- 当前尚未完成drain修正的真实请求验收。后续按干净P/D进程状态重新跑smoke，若重现则继续定位原生链路。
+- 13:13 p1的docker stop一度报告“tried to kill container, but did not receive an exit event”。
+  随后只读inspect确认已exited（137），npu-smi全卡健康且无残留NPU进程；未reset设备或操作host daemon。
+  仅继续启动该带owner标签的开发容器并启动proxy。工具补充“停止报错后检查实际终态”，不升级为host kill。
+
+### 11.23 干净 P/D 进程下 B=3 的真实回归通过（2026-11-03 13:20–13:24）
+
+- 统一重启四开发引擎后均健康200；单/双/三chunk输入537/5017/9656 tokens，分别4.34/6.80/8.38s，
+  输出均为正确的中文Mooncake KV对象存储摘要。证据 `request-smoke-all-reset.log`。
+- P success(length)=3、D success(stop)=3，四引擎running/waiting均0：确认P收尾完成，drain死锁修正生效。
+- 两个同前缀5005-token请求并发、原请求重复前缀、关闭独立长请求连接后的短请求均给出正确内容。
+  并发5.23/23.95s，重复4.50s，断连后短请求5.35s，见 `request-stress-b3-5508.log`。
+  两个P引擎均有实际成功请求；P1日志出现真实Store hit_blocks=32/39。
+- 后续四引擎running/waiting均0。断连探针只证明客户端关闭后服务可继续，不据此声称内部每个abort分支已覆盖。
+  完整counter见 `metrics-after-stress-b3.txt`。
+- 仅重启P时的原生P/D超时，在本次统一重启后未重现；连接状态问题仍是推断，不把它算成已定位的代码根因。
+- 日志量较大，collect改为每容器最近4MiB的有界读取，避免完整cat持续搬运增长日志；容器内完整日志保留。
+- 下一轮：共享槽1、32768 blocks、4100-token预算，验证扩容和非整block恢复。配置已本地Ansible生成，尚未切换。
+
+### 11.24 非整block预算需满足TP padding（2026-11-03 13:31）
+
+- B1/32768实验未进入KV分配，在runner `_dummy_run` 的 `num_tokens_padded <= max_num_tokens` 断言失败。
+  4100不是TP16倍数，padding后4112超过配置；这不是Main buffer容量或恢复失败。
+- 调整实验预算为4112：满足TP16对齐，仍不按block128对齐（余16），继续覆盖partial snapshot。
+  新配置 `profile-b1-expanded-aligned.yaml` 与 `profile-r02-aligned.yaml`，原失败配置保留。
+- r02四节点镜像已构建、10个生产文件SHA一致、109 UT通过，容器已创建但未启动引擎；
+  为不干扰B1重试，先停止这些空闲开发容器。后续使用已校正启动脚本验证r02，无源码补丁。
+
+### 11.25 B1/32768：第三partial chunk暴露非保存rank的旧短快照（2026-11-03 13:43）
+
+- 校正4112后四引擎健康200，真实分配78层、Main_slots=3、private_Indexers=21、32768 blocks、681984 bytes/block。
+  短537 tokens与双chunk5014 tokens输出正确，耗时4.94/6.88s。
+- 三chunk请求在第三步被 `Shared Main snapshot does not cover the required prefix` 拦截。
+  已有日志确认三代partial端点4112→8224→9656，是真实partial恢复路径，未误判为对齐的普通分块。
+- 根因：保存rank会在PUT commit后把旧partial索引更新成Full；非保存rank只经历GET，仍保留上一轮旧partial。
+  下一步prefer_committed把例如block32/end4112优先于新的Full候选（需覆盖到4224），故拒绝恢复。
+- 修复只在旧private snapshot覆盖不足时选择当前Full候选；原生GET失败仍保留旧记录，不提前发布新映射。
+  Full公开键不可读时仍尝试该request-instance的immutable private_full fallback。
+- 新增非保存rank三步回归，公开Full与contention/private Full两个分支均在修复前复现相同错误；
+  再增加GET失败不得提前替换旧partial的用例。修正后111项通过，日志 `ut-20261103-134948-992227.log`。
+- 正在统一重启四开发引擎重跑B1。r02镜像早于该修正，已标记废弃、容器保持停止，不能交付；最终需新镜像。
+
+### 11.26 B1/32768/4112修复后真实验证通过（2026-11-03 13:58–14:01）
+
+- 重跑短/双/三chunk，输入535/5016/9659 tokens，4.56/6.80/9.24s，均输出正确KV对象存储摘要。
+  三chunk已通过曾失败的第三代partial恢复检查，见 `request-smoke-b1-promotion-fix.log`。
+- 并发同前缀两个5000-token请求5.65/6.83s，重复4.33s；关闭长请求连接后短请求5.45s，均正常返回。
+  断连后短回答把Mooncake译作“月饼店”，仍为通顺的KV块对象存储描述；不以逐token匹配判正确性。
+- 四引擎running/waiting最终均0；真实partial代际日志及NPU内存快照已保存。
+  文件：`request-stress-b1-promotion-fix.log`、`metrics-b1-promotion-fix.txt`、
+  `partial-snapshots-b1-promotion-fix.txt`、`npu-memory-b1-32768.txt`。
+- r03镜像包含所有当前源码修正，四节点已构建并创建独立容器；r02保持停止并标记退役，工具拒绝启动。
+  准备停止r01、启动无源码覆盖的r03，B2/4112去掉P的num_gpu_blocks_override，验证原生自动容量预算。
+
+### 11.27 r03最终镜像与自动容量验收通过（2026-11-03 14:05起）
+
+- r03四节点镜像构建与10生产文件SHA校验通过；无源码覆盖。原基线与r01/r02均停止保留，master不动。
+- 新镜像内NPU sentinel B1/2/3、6层×3轮全部通过，lease保护删除返回-706时保留延期处理，不强删。
+- B2/4112移除P的num_gpu_blocks_override。实际32个P rank全部自动52042 blocks；
+  78逻辑层、Main槽4、Indexer21私有、765952 bytes/block。相对旧档5508，当前配置容量约9.45倍；
+  当前关闭MTP、max_num_seqs=4，容量值不作为同配置性能对比或单请求上下文上限。
+- r03单/双/三chunk535/5017/9656 tokens，23.11/6.90/8.91s，输出正常KV摘要。
+  并发同前缀5000-token请求5.47/23.89s，重复3.95s，断连后短请求10.94s，均正常返回。
+- 最终四引擎running/waiting/error counter均0；完整日志ERROR/Traceback/传输失败计数0；
+  两P节点各16条布局记录一致。见 `final-runtime-check.json`、`metrics-r03-final.txt`。
+- 功能提交9824ec91c，随后f9b995c68只整理两处固定Ruff格式，10生产模块与镜像AST等价。
+  r03请求后SHA复核也通过。source工作区干净，旧source分支保持原状。
+- 入口：`docs/p-main-buffer-reuse-usage.md`、`ansible/profiles/p-main-buffer-reuse.yaml`。
+  工具默认r03，正常restart不写源码，旧镜像拒绝启动，回退核对baseline ID与其他开发容器状态。
+
+### 11.28 仓库级检查的证据边界
+
+- 本特性111聚焦UT及205 metadata/backend测试通过；固定Ruff0.14对本次17个Python文件lint/format通过。
+- 独立worktree运行format.sh ci，真实工作区不受自动修复影响。CI修改的9文件与本次17文件无交集。
+  失败包括基线ascend_config长行、sfa_kv_offload未使用变量、mooncake_connector的TE拼写、
+  typos基线文本并被-9终止、shellcheck并发下载触发Text file busy。其余多项hook通过。
+- gitleaks hook显式跳过，未执行其未固定且关闭证书校验的OBS二进制下载；未报告secret scan通过。
+  完整日志 `format-ci.log`，范围对照 `ci-baseline-scope.json`。未把全仓CI报告为全绿。
