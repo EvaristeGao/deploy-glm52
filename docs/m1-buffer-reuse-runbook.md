@@ -787,3 +787,95 @@ torch_npu 融合算子），Python 那层只在 profiling/capture 阶段跑。
   typos基线文本并被-9终止、shellcheck并发下载触发Text file busy。其余多项hook通过。
 - gitleaks hook显式跳过，未执行其未固定且关闭证书校验的OBS二进制下载；未报告secret scan通过。
   完整日志 `format-ci.log`，范围对照 `ci-baseline-scope.json`。未把全仓CI报告为全绿。
+
+### 11.29 1M 验证接入已有 D Host offload（进行中）
+
+- 用户指出 D offload 已存在；源码确认 SparseKVOffloadManager 与 SfaRemoteD2HConnector 可用。
+- r03 D 未启用 Host offload，5508 blocks 的容量不足仅描述该配置，不代表需要新开发 D offload。
+- r04 使用 BF16 Main、int8 Indexer、MemFabric device_rdma，D Host 预算256 GiB，P继续B2共享。
+- SDK原生枚举存在但Python包缺少导出，隔离镜像补公开导出，四节点校验通过。
+- r03停止保留，r04已发起启动；尚无1M请求成功证据。
+- 详细记录：`docs/p-main-buffer-reuse-1m-validation.md`；原始证据：`artifacts/p-main-buffer-reuse/one-million/`。
+
+- 后续实测：补基线CPP后，MemFabric Host因缺libmf_hybm_accoffload.so初始化失败；转Mooncake Host后，
+  D约88GiB Host pool与warmup成功。短请求收到MF_META后DEVICE_RDMA RaInit=328002并Segfault，
+  P屏障等待；停止r04。1M尚未通过，当前卡点为所选传输路径的原生运行时，不是D容量。
+
+- 回退未完成：r04三节点已exited，d1 stop报未收到exit事件且仍running，top仅Zl worker。
+  为防设备重叠未启动r03，整套服务当前不可用；无host reset/驱动/系统服务变更。
+
+- d1随后自行退出；复核r04全部停止后启动r03回退，未执行主机处理。健康恢复待检查。
+
+- 交接时复核r03四引擎health均200，回退完成，未重新跑请求回归。
+  代码与版本入口见 `docs/p-main-buffer-reuse-handoff.md`；附Git bundle、完整patch及SHA256清单。
+
+### 11.30 P独立1M目标启动
+
+- r03直连P的8185-token/32输出请求暴露完整Store前缀恢复失败，保留首个Python异常证据。
+- 改为独立prefill+1token数字检索验收，目标仍为真实1M输入及前中后位置检查。
+- r05基于r03仅加模型别名，两个P镜像构建、容器创建、10生产文件SHA校验通过。
+- 配置保持INT8、B2、4112；无SFA/D offload；D不变，待旧P容器停止后启动r05。
+
+- r05 P健康，8190-token独立prefill+1token数字检索通过，12.13秒。
+  64K起逐级请求已发出，D计数基线为0，当前未报告1M完成。
+
+- r05 65530/131069输入tokens独立prefill通过，耗时87.16/353.77s，1token数字检索正确；
+  262140-token请求进行中。已生成但未应用chunk32784候选，后续需比较显存与吞吐。
+
+- 新增P独立容量流程工具，当前等待256K明确成功且两个P空闲后才切换大chunk。
+  Mooncake connector、B2、INT8、1M上限、MoE预算和模板SHA均有检查；负面拒绝检查通过。
+  运行handle46620，候选未应用；当前请求handle33780仍live。
+
+- 256K真实262140 tokens验证通过，1424.30s；切换前P0/P1 running/waiting均0。
+  首次stop异常后复核状态恢复流程安全终止，两个P确认退出后已启动32784配置。
+  新observe-running模式校验容器脚本SHA，不重复重启；当前等待新档启动与分级验证。
+
+- 32784档8188/65533/131065/262139输入tokens检索通过，3.80/21.40/57.16/209.29s。
+  P0 TP16均30013 blocks、P1观察30010，物理KV预算约21.26GiB，512K进行中。
+
+- 新档512K实际524285 tokens独立prefill通过，813.41s；开始约1M真实输入验证。
+
+- 首个1M实际1048541 tokens继续执行，prefix hit=0，D计数0。
+  后续改为从该完成archive显式复用前缀检查BETA/GAMMA；重建必须匹配原prompt SHA/token数。
+  本地旧调度父进程已SIGSTOP，原1M子进程未停；新后续runner为46414，等待同一1M完成。
+  最终需清理旧父进程并做健康、错误、缓存命中与D无流量审计。
+
+- 首个完整1M请求通过：1048541输入、1输出，3375.79s（56.3分钟），ALPHA数字7正确；
+  继续同archive的BETA/GAMMA检索及最终健康、源码、错误、D无流量审计。
+
+
+### §11.30 收尾：P独立1M验收通过
+
+- 冷prefill：实际1048541输入tokens，3375.79秒，ALPHA=7正确；输入新nonce，历史prefix hits为0。
+- 同archive前缀复用：BETA／GAMMA实际1048542 tokens，189.36／189.54秒，答案1／3正确；累计本地prefix hits2096896，external hits0。
+- 四引擎健康200，P空闲且错误计数0，D成功计数0；P0/P1后续新短请求通过。P1首次SSH255未采集答案，客户端重试通过，无模型重启。
+- 本轮日志从启动偏移扫至EOF无指定错误；镜像SHA、源码AST、纳入版本管理profile生成脚本与实际运行脚本SHA均一致。
+- 本地暂挂调度器已核实子进程退出后清理，无集群信号、reset或主机服务变更。
+- 配置、交付包和限制见[p-only验收文档](p-main-buffer-reuse-p-only-1m.md)。不代表持续decode或P/D 1M通过。
+
+
+### §11.31 P侧源视图与代次协议首版 本地开发
+
+- 新增reuse_source适配层；从真实布局导出Main/Indexer视图，receiver三方等待后、GET前打开新代次，KV-ready发布完整batch并封口。
+- 保留旧waiter，MultiConnector对version=1 provider显式接线；源范围和请求实例校验失败不发布。
+- 增加restore-only显式入口，校验无新token，并记录起始gate放行预取；尚无scheduler自动选择和真实connector联调。
+- 新增确定性CPU测试；初次自动接线测试受上游基类mock缺失影响，补stub后通过。生产源码未部署，集群仍为之前r05/r03。
+- 保守step drain，失败后停止写入并保留分配；不声称原生卡住传输的安全退出已验收。
+- 详细实现入口和约束见[pd接入准备](p-main-buffer-reuse-pd-integration-preparation.md)末节。
+
+本轮最终结果：121项聚焦CPU测试通过（原111项＋新增10项），日志`artifacts/p-main-buffer-reuse/ut-20261103-201322-533491.log`。
+变更模块Ruff lint/format及两个仓库diff检查通过。源码未提交增量已导出`artifacts/p-main-buffer-reuse/handoff/pd-source-contract-wip.patch`和SHA清单，包含新增文件；不覆盖此前已验收bundle。
+
+
+### §11.32 P源接口真实NPU／Store与64K模型验证
+
+- r06首个8192-token请求失败，定位空GET走batch分支未打开新epoch；补齐该分支及真正分发回归，122项CPU测试通过。
+- 独立NPU测试65521-token人工KV、6层、B1/2/3，Main/Indexer恢复、持有reader阻止覆盖、GET故障禁止继续复用均通过。
+- r07模型8190／65532-token冷请求、65533-token同前缀BETA、P1新32762-token请求答案均正确。
+- 32 rank共17472 open/read配对，51520次样本比较无reader错误，两节点均覆盖78层；P错误0、D请求0、四引擎健康200。
+- r06真实失败、harness整数返回误用、replay多完成记录拒绝以及正常malloc告警误匹配均保留证据并区分，不计为通过请求。
+- 完整说明见[p源接口硬件验证](p-main-buffer-reuse-pd-source-hardware-validation.md)。测试的是受控源读者，不代表新P/D网络connector已验收；收尾恢复r05。
+
+§11.32收尾：r05原ID／镜像恢复，10模块SHA通过，新8189-token请求正确，四引擎健康200，P空闲／错误0，D请求0。r06/r07停止保留并退役。
+
+§11.32提交收尾：源码`47f983157`（sign-off）已提交，工作区干净；122项聚焦UT和lint通过。提交前尝试完整pytest，在收集e2e时因缺少huggingface_hub中止，原始日志`artifacts/p-main-buffer-reuse/commit-full-suite-attempt.log`，不报告全量通过。最新bundle／patch另存handoff的latest产物，旧验收包保持冻结。

@@ -1,5 +1,8 @@
 # M1（P 侧 KV Buffer Reuse）工作总览
 
+> **后续PD接入开发中**：源码提交`47f983157`新增源视图／槽位代次／ready协议、receiver写入前接线与显式restore-only入口；已构建独立r07并通过64K模型及受控读者硬件验证，收尾已恢复r05并通过短请求和健康检查。
+> r05的1M证据仍对应此前已验收代码，不代表这些新增接口已有硬件验收。接口与限制见[PD接入准备](p-main-buffer-reuse-pd-integration-preparation.md)。
+
 > **2026-11-03 新基线核对**：后续工作以 `mc.pdf` 与固定 SHA `4234a1f18` 为准，
 > 新工作区 `src/vllm-ascend-reuse` / `p-main-buffer-reuse`，旧分支保留作历史记录。
 > 当前新实现已完成开发与目标配置的真实验收，并部署在独立 r03 容器；
@@ -11,6 +14,13 @@
 > 源码功能提交 `9824ec91c`，格式提交 `f9b995c68`；111项聚焦UT通过，全仓CI遗留问题单独记录。
 > 下文“缺 reader 登记即乱码病根”“计算读者已覆盖”“forward 不触发必为 ACLGraph”
 > 等属于历史推断，未被本轮证据证明；容量数据也不是正确性验收。
+
+> **P侧独立1M已实际通过**：r05 P0/P1、Main B=2、INT8、chunk32784，完整1048541-token冷prefill耗时3375.79秒，首token正确；同前缀BETA/GAMMA检索均正确。
+> 最终健康、错误扫描、D无流量、镜像源码和模板复现审计均通过。D保持r03，master未动。
+> 这是prefill＋首token验收，不包括持续decode或P/D端到端1M；r04 SFA历史不代表Mooncake失败。
+> 当前配置与证据见[P侧独立1M](p-main-buffer-reuse-p-only-1m.md)。
+
+> 代码交接入口：[当前代码与评审指南](p-main-buffer-reuse-handoff.md)，包含源码版本、文件索引、bundle／补丁和验收边界。
 
 ## 以下为旧 M1 实现历史记录
 
@@ -154,3 +164,8 @@ export ANSIBLE_LOCAL_TEMP=$PWD/.ansible-tmp ANSIBLE_HOST_KEY_CHECKING=False
 - 验证必须在跳板机 `ott9-a31` 上 curl（控制机到 `172.168.4.x` 不通）；
 - 判断 D 侧是否有流量看 `/metrics vllm:request_success_total`，不要看日志 mtime；
 - 改动 `group_vars` 后必须先跑 `gen.yml` 再 `start.yml`。
+
+## 当前活动目标：P独立1M（2026-11-03）
+
+按用户最新边界停止SFA路线，开始r05独立P验证；配置、已有失败和验收标准见
+[P独立1M记录](p-main-buffer-reuse-p-only-1m.md)。当前未宣称1M可用。

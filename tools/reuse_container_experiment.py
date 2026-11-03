@@ -25,14 +25,24 @@ IMAGE = f"glm52-vllm-ascend:0.30.0-main-reuse-dev-20261103-{RUN}"
 
 def remote(node, args, data=None):
     result = subprocess.run(
-        ["ssh", f"root@{NODES[node]}", shlex.join(args)],
+        [
+            "ssh",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "ControlPath=none",
+            "-o",
+            "ServerAliveInterval=30",
+            f"root@{NODES[node]}",
+            shlex.join(args),
+        ],
         check=False,
         input=data,
         capture_output=True,
     )
     if result.returncode:
         raise RuntimeError(
-            f"{node}: {args}: {(result.stdout + result.stderr).decode()}"
+            f"{node}: exit={result.returncode}, {args}: {(result.stdout + result.stderr).decode()}"
         )
     return result.stdout
 
@@ -69,7 +79,7 @@ def stop_owned(node):
         print(f"{node}: verified delayed development-container exit", flush=True)
 
 
-def create(node):
+def create(node, template_dir=None):
     saved = baseline(node)
     cfg = saved["HostConfig"]
     args = [
@@ -108,12 +118,15 @@ def create(node):
     owned(node)
     remote(node, ["docker", "start", NAME])
     payload = io.BytesIO()
+    generated = (
+        template_dir
+        if template_dir is not None and node.startswith("p")
+        else ART / f"generated-{RUN}"
+    )
     with tarfile.open(fileobj=payload, mode="w") as archive:
         files = {
-            "run_dp_template.sh": ART
-            / f"generated-{RUN}"
-            / f"run_dp_template_{node}.sh",
-            "mooncake.json": ART / f"generated-{RUN}/mooncake.json",
+            "run_dp_template.sh": generated / f"run_dp_template_{node}.sh",
+            "mooncake.json": generated / "mooncake.json",
             "launch_online_dp.py": ART
             / "baseline-runtime"
             / node
@@ -345,20 +358,57 @@ def main():
     )
     parser.add_argument("--prefill-template-dir", type=Path)
     parser.add_argument(
+        "--nodes",
+        nargs="+",
+        choices=tuple(NODES),
+        help="Limit identity checks and node operations to these nodes",
+    )
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="Do not launch a proxy after a P-only restart or restore",
+    )
+    parser.add_argument(
         "--patch-source",
         action="store_true",
         help="Explicitly overlay local Python files for debugging",
     )
     args = parser.parse_args()
+    nodes = (
+        tuple(args.nodes)
+        if args.nodes
+        else (("p0", "p1") if args.action == "restart-prefill" else tuple(NODES))
+    )
+    if len(set(nodes)) != len(nodes):
+        parser.error("Nodes must be unique")
+    if args.action == "restart-prefill" and any(
+        not node.startswith("p") for node in nodes
+    ):
+        parser.error("restart-prefill accepts only Prefill nodes")
+    if args.no_proxy and args.action not in (
+        "restart-prefill",
+        "restart-all",
+        "restore",
+    ):
+        parser.error("--no-proxy applies only to restarts or restore")
+    if (
+        args.nodes
+        and "p0" not in nodes
+        and not args.no_proxy
+        and args.action in ("proxy", "restart-prefill", "restart-all", "restore")
+    ):
+        parser.error(
+            "Proxy operations require p0 in --nodes; use --no-proxy for a node-only restart"
+        )
     if args.patch_source and args.action not in ("restart-prefill", "restart-all"):
         parser.error("Source overlays are limited to explicit development restarts")
     if args.prefill_template_dir is not None:
-        if args.action not in ("restart-prefill", "restart-all"):
+        if args.action not in ("create", "restart-prefill", "restart-all"):
             parser.error("Template replacement is limited to development restarts")
         template_dir = args.prefill_template_dir.resolve()
         if not template_dir.is_relative_to(ART.resolve()):
             parser.error("Experiment templates must be inside repository artifacts")
-        for node in ("p0", "p1"):
+        for node in (node for node in nodes if node.startswith("p")):
             subprocess.run(
                 ["bash", "-n", str(template_dir / f"run_dp_template_{node}.sh")],
                 check=True,
@@ -368,7 +418,7 @@ def main():
         proxy()
         return
     actions = {
-        "create": create,
+        "create": lambda node: create(node, args.prefill_template_dir),
         "stop-baseline": stop_baseline,
         "stop-development": stop_owned,
         "launch": launch,
@@ -383,17 +433,16 @@ def main():
         ),
     }
     # Check all identities before any cluster transition.
-    for node in NODES:
+    for node in nodes:
         baseline(node)
         if args.action != "create":
             owned(node)
-    nodes = ("p0", "p1") if args.action == "restart-prefill" else NODES
     with ThreadPoolExecutor(max_workers=4) as executor:
         for result in executor.map(actions[args.action], nodes):
             pass
-    if args.action == "restore":
+    if args.action == "restore" and not args.no_proxy:
         proxy(restore=True)
-    elif args.action in ("restart-prefill", "restart-all"):
+    elif args.action in ("restart-prefill", "restart-all") and not args.no_proxy:
         proxy()
 
 

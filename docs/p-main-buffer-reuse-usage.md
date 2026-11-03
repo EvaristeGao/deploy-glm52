@@ -1,8 +1,13 @@
 # P 侧 Main buffer reuse：运行与验收
 
-更新：2026-11-03。当前运行镜像为 `glm52-vllm-ascend:0.30.0-main-reuse-dev-20261103-r03`，
+> 当前P侧已切r05并通过独立1M，见[P独立1M配置与证据](p-main-buffer-reuse-p-only-1m.md)。下文为历史r03运行手册，D仍为r03。
+
+更新：2026-11-03。历史验收镜像为 `glm52-vllm-ascend:0.30.0-main-reuse-dev-20261103-r03`，
 容器为四节点上的 `vllm-ascend-gwh-glm52-reuse-r03`，服务端口保持 P 9081、D 9900、proxy 8000。
 原基线容器完整保留并停止，Mooncake master 保持运行。r01/r02 为停止的历史实验容器。
+
+代码位置、提交和文件评审顺序见 [代码交接文档](p-main-buffer-reuse-handoff.md)。
+1M验证另见 [实验记录](p-main-buffer-reuse-1m-validation.md)，尚未通过端到端验收。
 
 ## 实现与边界
 

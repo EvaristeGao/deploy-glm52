@@ -65,6 +65,7 @@ def main() -> int:
         prefix + "test_main_only_cache_plan",
         prefix + "test_main_compute_completion",
         prefix + "test_main_snapshots",
+        prefix + "test_reuse_source",
     ]
     if args.full:
         tests.append(prefix + "test_pool_worker")
