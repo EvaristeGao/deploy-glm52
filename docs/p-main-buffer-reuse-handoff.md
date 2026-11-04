@@ -10,17 +10,17 @@
 | 源码分支 | `p-main-buffer-reuse` |
 | 固定基线 | `4234a1f1815252e8b52c75d6956d0bdf9ae80cc0` |
 | 功能提交 | `9824ec91c`：Prefill Main reuse 实现及测试 |
-| 当前 HEAD | `47f98315724770372462399d390068cebb7c3c16`：P源视图、槽位代次、ready契约与restore-only入口（带sign-off） |
+| 当前 HEAD | `06e16d717b95f7720c0b85457351a6c27d30576c`：D TargetProvider核心（真实runtime接线仍待完成）；P源接口提交为`47f983157` |
 | 部署与验证工具 | 本仓库 `tools/`，包含本轮P独立容量、前缀复用及受控读者验证入口 |
 | 已验收配置 | [`ansible/profiles/p-main-buffer-reuse.yaml`](../ansible/profiles/p-main-buffer-reuse.yaml) |
 | 旧实现 | `src/vllm-ascend` / `m1-prefill-reuse`，保留历史，未合入当前分支 |
 
-本次核对源码工作区干净。相对固定基线共 **21 个文件，+2644/−51**：13 个生产模块、8 个测试／mock 文件。
+本次核对源码工作区干净。相对固定基线共 **25 个文件，+4177/−51**：15 个生产模块、9 个测试／mock 文件及1份交接文档。
 源码工作区被部署仓库 gitignore；仅提交或复制部署仓库，不会自动携带这些源码。
 
 为避免源码遗漏，已额外导出到当前目录：
 
-- [最新Git bundle](../artifacts/p-main-buffer-reuse/handoff/p-main-buffer-reuse-latest.bundle)：三个新增提交，保留提交历史；接收仓库须已有固定基线。
+- [最新Git bundle](../artifacts/p-main-buffer-reuse/handoff/p-main-buffer-reuse-latest.bundle)：五个新增提交，保留提交历史；接收仓库须已有固定基线。
 - [最新完整补丁](../artifacts/p-main-buffer-reuse/handoff/p-main-buffer-reuse-latest.patch)：固定基线到当前 HEAD 的代码及测试差异；SHA见`latest-manifest.json`。
 - [文件统计](../artifacts/p-main-buffer-reuse/handoff/diff-stat.txt)；同目录 `manifest.json` 记录版本、文件清单与产物 SHA256。
 
@@ -100,7 +100,7 @@ P0/P1后续新短请求通过。该轮源码`f9b995c68`与运行模块AST一致�
 当前配置：`ansible/profiles/p-main-buffer-reuse-p-only-1m.yaml`。
 完整验收边界、复现入口和证据见[P独立1M记录](p-main-buffer-reuse-p-only-1m.md)。
 交付包：`artifacts/p-main-buffer-reuse/handoff/p-only-1m-review.tar.gz`，附逐文件SHA清单。
-旧1M交付包的源码bundle包含两个新增提交；本次最新bundle包含三个提交，均需已有固定基线。
+旧1M交付包的源码bundle包含两个新增提交；本次最新bundle包含五个提交，均需已有固定基线。
 源码分支已提交且干净。新增P源接口的64K硬件记录见[P源接口验证](p-main-buffer-reuse-pd-source-hardware-validation.md)，当前服务已回到r05，不包含这些新增接口。
 
 ## 6. 历史P/D实验与边界

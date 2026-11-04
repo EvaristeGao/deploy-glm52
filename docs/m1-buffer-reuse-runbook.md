@@ -879,3 +879,14 @@ torch_npu 融合算子），Python 那层只在 profiling/capture 阶段跑。
 §11.32收尾：r05原ID／镜像恢复，10模块SHA通过，新8189-token请求正确，四引擎健康200，P空闲／错误0，D请求0。r06/r07停止保留并退役。
 
 §11.32提交收尾：源码`47f983157`（sign-off）已提交，工作区干净；122项聚焦UT和lint通过。提交前尝试完整pytest，在收集e2e时因缺少huggingface_hub中止，原始日志`artifacts/p-main-buffer-reuse/commit-full-suite-attempt.log`，不报告全量通过。最新bundle／patch另存handoff的latest产物，旧验收包保持冻结。
+
+
+### §11.33 TargetProvider首版 2026-11-04
+
+- 原样导入YYangY receipt契约，固定46f045aa0acbe7d26903ff364ea13f652ac29d08；未合并其sender。
+- 实现RegisteredTargetProvider四方法、完整容量／身份／区域校验、真实runtime依赖协议与既有DSA注册布局适配；不分配第二套KV。
+- 添加17项测试，聚焦139项通过；日志ut-20261104-110837-974015.log。自身provider／UT lint通过；共享契约的两处UP042保留原样，未unsafe改写同事类型。
+- 明确阻塞：B当前未传retention token；同backing多region契约限制；D Host Main只支持BF16，与现有P独立INT8档不同。
+- 真实owner引用／可见性／写回静止和scheduler-worker跨进程接线未完成，无NPU验证；未部署，原r05服务未修改。
+
+§11.33提交：源码`06e16d717`（sign-off）；提交前139项聚焦UT通过，日志ut-20261104-111126-012223.log。真实D runtime和receipt模式仍未接通／验收，无部署操作。

@@ -1,5 +1,7 @@
 # M1（P 侧 KV Buffer Reuse）工作总览
 
+> **2026-11-04 TargetProvider开发**：源码已提交`06e16d717`，D目标四方法核心、既有DSA注册布局适配和17项新UT已实现，聚焦测试共139项通过；共享契约按对方固定SHA原样导入。真实owner runtime／scheduler跨进程接线尚未完成，当前r05服务未动。详见源码仓库`PD_TRANSFER_HANDOFF.md` §11。
+
 > **后续PD接入开发中**：源码提交`47f983157`新增源视图／槽位代次／ready协议、receiver写入前接线与显式restore-only入口；已构建独立r07并通过64K模型及受控读者硬件验证，收尾已恢复r05并通过短请求和健康检查。
 > r05的1M证据仍对应此前已验收代码，不代表这些新增接口已有硬件验收。接口与限制见[PD接入准备](p-main-buffer-reuse-pd-integration-preparation.md)。
 
