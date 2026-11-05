@@ -890,3 +890,212 @@ torch_npu 融合算子），Python 那层只在 profiling/capture 阶段跑。
 - 真实owner引用／可见性／写回静止和scheduler-worker跨进程接线未完成，无NPU验证；未部署，原r05服务未修改。
 
 §11.33提交：源码`06e16d717`（sign-off）；提交前139项聚焦UT通过，日志ut-20261104-111126-012223.log。真实D runtime和receipt模式仍未接通／验收，无部署操作。
+
+### §11.34 TargetProvider提交后的既有流程回归 2026-11-04
+
+- r08四节点复制当前提交15个生产模块、逐文件SHA核验；无reader注入，receipt缺省，旧Mooncake layerwise P/D，INT8、eager、无MTP/DCP，P chunk4112。
+- P独立8188／32765-token数字检索及32766-token前缀BETA正确；P/D 536／5017／9656-token持续生成正确，32762-token三词检索全对。
+- P/D两并发、重复前缀、自身连接关闭后的新请求均通过。D0／D1分别7／1个成功stop；结束时四引擎健康200、空闲、error计数0。
+- **失败保留**：65535-token P0预期4却返回`!`；相同提示词P1返回`I`。HTTP正常不代表正确性；整轮candidate-audit的passed为false，根因尚未隔离，不直接归因于未被旧流程引用的TargetProvider。
+- 完整native日志扫描无指定异常；初次SSH255发生在只读预检、无模型请求，工具禁用跳板连接复用后重试。三个工具lint／format通过。
+- 候选空闲后按原ID／镜像／脚本恢复P r05／D r03中；无host reset／主机服务修改。证据`artifacts/p-main-buffer-reuse/target-regression/`，详见[完整回归报告](target-provider-existing-flow-regression.md)。
+
+§11.34收尾：原P r05／D r03恢复完成，ID／image／脚本及源码manifest核验通过，四引擎健康200，新8191-token正确。
+原r05对同一65535-token提示词返回正确4，21.23s；chunk32784且代码/调度参数均不同，不据此单独归因。
+附加请求后四引擎健康、空闲、error0；proxy恢复原未运行状态，r08停止并退役。
+
+### §11.35 精简A3 reuse Ansible交付 2026-11-04
+
+- 从原A3复制节点及公共字段至`ansible/inventories/a3-reuse/`，只保留Main B2、旧Mooncake layerwise PD和单Master；无旧档位选择器、HA、SFA/MemFabric或D Host offload配置。
+- 默认P chunk32784／max_num_seqs1／MoE预算524544，共同模型上限262144，P/D固定r05／r03镜像，单独容器名和日志；与原P独立1M档区别已写明。
+- `usage.md`提供预检、镜像安装、gen/start/stop、32K正确性检查及日志/指标排查；明确现有服务占卡、Master复用和完整部署影响。
+- 已运行本地gen、playbook语法检查及逐节点只读镜像查询；原inventory未修改，未按新inventory启动或停止服务。
+
+
+### §11.36 64K间歇性错误答案／NaN定位 2026-11-04
+
+- r09与r08的15个生产模块相同，4112／4／262144／INT8／MoE8192不变；新命名空间和原命名空间的原8K／32K／64K重放均通过，新增4个64K冷样本也通过，原失败未稳定复现。
+- r10独立MoE计数探针覆盖32 rank×16 chunk×75层、38400次真实prefill调用；峰值5230，超过8192数为0，没有用增大预算冒充修复；65792档只准备未部署。
+- r09将Main设为all独立、4096 blocks的对照仍出现HTTP400 JSON nan，Store当时仍开启。r11彻底移除KV transfer后，7个初始样本通过，但同65532-token失败样本3次随机cache_salt冷重算的第3次再次NaN，prefix hits均为0。
+- r11数值检查启用后3次冷重算通过；r12改为设备标志、forward边界读回，8次P0/P1交替冷重算通过。32 rank、4096个批次、2387968次张量检查没有first_nonfinite；不能据此声称竞态已确定或异常消失。
+- r13追加只在采样点读回raw logits／computed logprobs／sampled ids的诊断，无模型逐层检查kernel。具体算子根因尚未确定，最初`!`／`I`与NaN是否同因也未证明；生产源码保持06e16d717干净，无修复提交。
+- 只操作自有开发容器和诊断镜像，D r03及Master不动。诊断正在继续，结束前必须恢复原P r05并核对ID／image／脚本／manifest及新请求。
+- 证据`artifacts/p-main-buffer-reuse/k64-diagnosis/`；详见[64K定位报告](p-main-buffer-reuse-64k-diagnosis.md)。
+
+§11.36收尾：r13采样点12次冷重算（前5次逐chunk、后7次延后采集）通过，1408对记录无非有限值／argmax差异；关闭采集后2普通＋4流式冷请求通过，包含原失败提示词。没有确定具体算子，也不撤销r11纯计算NaN失败证据。原P r05／D r03的ID、image、owner、脚本与10模块manifest恢复审计通过；四引擎健康空闲、error0，D成功请求仍0，proxy原本未运行。恢复后新8K和已知NaN用64K样本均正确。r09至r13停止并退役，源工作区06e16d717干净，未改生产实现。
+
+
+### §11.37 Receipt交接实现缺口核对 2026-11-04
+
+- 仅fetch远端feat/layerwise-receipt至对象库并固定6c233175d；本地p-main-buffer-reuse仍06e16d717且干净，没有合并、切换或部署远端代码。
+- 远端已包含我方TargetProvider四方法和17项UT，代码相同；真实TargetRuntime、owner facade／IPC、provider构造挂载、Host可见性和取消／写回／DMA安全回收仍未完成。retention token字段签发不等于完整retention runtime验收。
+- 原有27项receipt CPU UT复跑通过；固定源码ledger及AST提取的6个真实connector方法另行复现普通模式无条件带instance、空backing冲突、缺层或failed仍ready、失败terminal错误、无provider仍publish、admission前提交P通知、内部／外部ID清理不一致。
+- 两个harness尝试日志保留，枚举值断言和账本测试的合法scope已校正；不把这些脚本错误计为NPU故障。复现范围为CPU控制流，不是已部署端到端故障声明。
+- 证据artifacts/p-main-buffer-reuse/receipt-handoff-audit，完整说明见[实现缺口核对](receipt-handoff-gap-audit-20261104.md)。不建议以“只差runtime三回调”作为可上线判断；需先修connector关键路径，再共同BF16短请求联调。
+
+
+### §11.38 两分支实现清单整理 2026-11-04
+
+- 用户要求暂不继续64K定位，改为整理P／receipt两分支；本轮没有集群命令。
+- 重新查询远端HEAD仍06e16d717／6c233175d，前者为后者祖先，差异8个文件；独立detached worktree放在src/vllm-ascend-receipt-review，当前P分支未切换／合并。
+- 两边各139项P相关聚焦CPU测试通过，receipt纯账本27项通过；既有协议问题在完整receipt worktree的真实方法CPU复现仍成立。
+- 新增组件映射复现：单Main tensor＋独立Indexer data/scale同group时漏发Indexer回执；默认pytest类前缀Test，现有connector类以Tests结尾，依赖占位收集0项，未运行测试体或NPU测试。
+- 新增源码仓库PD_TRANSFER_IMPLEMENTATION_STATUS.md，列代码入口、已实现／待接线／未闭合、A/B分工及验收顺序；更新旧handoff中retention字段已被远端补齐的事实。
+- 生产源码行为无改动、未提交。CPU日志、分支关系及复现放在artifacts/p-main-buffer-reuse/two-branch-inventory。
+
+### §11.39 A1/A2 target owner runtime 与注册 catalog（2026-11-04）
+
+- 在独立 `src/vllm-ascend-pd-integration` / `reuse-pd-integration`（基于 `6c233175d`）实现；P 分支源码及冻结评审树未改，S1 草稿另存 deferred-s1。
+- 实际 Host 池与 TE 注册 ownership pin、Indexer storage 引用、scheduler 权威 guard；Host-visible fence、原生 Indexer event 与 consumption/compute/writeback 静止后同步 release。异常保留、quarantine 恢复和资源布局变更拒绝均有测试。
+- manager 按真实 spec 导出 Main/Indexer 的层/group、形状/stride、region/backing/代次和容量；TP owner 协商 shared backing 身份。稳定 facade 先注入、真实注册后绑定；scheduler-worker 只传纯数据，生产 IPC 仍待 B/J。
+- 40 项 runtime/provider/lifetime、139 项 P 聚焦、27 项 receipt 账本、16 项 TE/HostPool 和 4 子用例通过。基线旧测试的 7 个失败经冻结分支复现后更新为实际 legacy HostRegister/fallback 语义。
+- r14 仅作小规模合成目标资源测试：最终快照 TP1、TP2 两 rank 通过，真实 native 注册、内容、尚未完成 writeback 的 release 拒绝、同 Host backing/独立注册身份以及真实 connector A2 方法调用顺序均通过。实际 KVCacheManager 分配/追加/retire 验证通过，未触碰 ref_cnt。
+- 实验中 wildcard HostRegister 注册失败、通用 Host alias `.cpu()` 崩溃、TP 配置上下文/Request 签名问题均留失败日志；改正测试条件后复验，不混同于 64K 根因或完整模型 PD 故障。
+- 真实 PD 远端 Host-visible 回执、全模型稀疏 decode/writeback、sender、取消/抢占/远端 DMA 静止仍未联调；没有伪造 receive event、DMA ack 或新分配生产 KV 池。
+- 自有 P r05 在原生目标验证阶段保持运行；D r03 原 ID/镜像/脚本保留。r14 已停止、原 D 已重新启动，健康与源码 manifest/短请求恢复审计进行中；没有 host/device reset、主机配置修改或 Master 清理。
+- 证据 `artifacts/p-main-buffer-reuse/target-owner-runtime/`；详见 [A1/A2 实现与验证](target-owner-runtime-a1-a2.md) 及集成仓 `TARGET_OWNER_RUNTIME_HANDOFF.md`。
+
+§11.39 恢复审计补记：D r03 恢复健康后，审计脚本误用 `max_tokens=16` 普通聊天请求，触发未改动 r05 的 `Main reuse could not open the complete committed Store prefix`；P0 退出，P1 随 DP 连接断开退出。没有把失败算作通过，未启动旧问题定位或修复；正恢复原 ID/镜像/脚本的 P r05 双节点，并将审计修正为已验证的 `max_tokens=1` P-only 请求。失败日志见 target-owner-runtime 下 restoration-audit-multitoken-failed-controller.log 与 restored-smoke-p*-error.log。
+
+§11.39 收尾：原 P r05 双节点恢复，四引擎健康/空闲，原 ID/image/owner/启动脚本及每节点 10 文件源码 manifest 审计通过。正确 max_tokens=1 P-only 检查 P0/P1 均返回 4；D 成功请求仍 0、proxy 维持原未运行状态。r14 停止并标记测试退役。最终源码及手动 NPU 测试脚本摘要与 TP1/TP2 通过快照一致；ruff、format、diff 检查通过。A1/A2 owner 交付完成，B/J 数据面和模型联调仍待接线；没有恢复 64K 定位。
+
+§11.39 分支归并：按用户要求把已验证 A1/A2 和所依赖 receipt 基线归入原 `p-main-buffer-reuse`；当前唯一开发目录为 `src/vllm-ascend-reuse`。原 P 历史保持祖先关系，不 force/reset。迁回后源码/原生脚本摘要一致，40/139/27 项 CPU 和 16 项注册/HostPool（4 子用例）复跑通过。源码仓新增可随 push 交付的 TARGET_OWNER_RUNTIME_VALIDATION.md，并更新计划/交接文件的目录和分支；无集群操作。归并证据位于 artifacts/p-main-buffer-reuse/branch-consolidation。
+
+分支归并收尾：A1/A2、测试、交接/计划/验证文档已在原 p-main-buffer-reuse 提交 e817452b2（Signed-off-by），工作区干净；临时集成目录的16文件未提交副本已备份并stash归档。全量格式检查有继承的基线失败，本次变更manual hooks全部通过。未由本轮执行push；最终只读查询显示远端已包含同一e817452b2提交。
+
+
+### §11.40 4K–128K：Main buffer reuse与原始DCP配置性能对照 2026-11-04
+
+- 当前源码固定`717f6e6e0`，自有r15容器沿用原P镜像/native扩展，复制并核对732个Python文件；原P r05保留，D r03和Master不变。所有配置、脚本、日志和原始请求均在`artifacts/p-main-buffer-reuse/perf-dcp-comparison/`，未修改原inventory或生产源码。
+- 单并发P0直连，max_tokens=1，4096/8192/16384/32768/65536/131072，每长度1次预热+5次正式计时。三组固定相同请求体／nonce／salt，核对真实tokens、零local/external prefix hit、无抢占、每次1请求及数字检索答案；测server prefill与客户端首内容TTFT，不代表PD端到端性能。
+- 辅助1m-v030（DCP16、Main/Indexer INT8）36次HTTP200，但30个计时样本正确数为5/5、5/5、4/5、0/5、0/5、1/5；保留错误答案，不用它宣称长输入的等价正确性能，也没有恢复64K数值根因定位。
+- 未迁移原始1m在VllmConfig初始化因`c8_enable_reshape_optim`未知键失败。保存失败证据并恢复原服务，首次四节点身份／源码／健康／短请求审计PASS后才补测兼容档。兼容档仅删除该过期键，并将原Indexer C8开关等价迁移到CLI int8（当前dtype派生会覆盖旧开关），Main保持auto，DCP16/chunk8192/MTP1等性能设置不变；未覆盖原始配置。
+- 主基线兼容1m与Main B2复用配置各36个请求（含预热）均正确，30对正式样本全部通过采样校验。prefill中位数：原始0.60/0.82/1.62/3.30/6.76/14.19s，reuse1.18/2.30/4.67/9.58/20.80/56.42s；延时+96.3%/+181.2%/+187.7%/+190.3%/+207.7%/+297.5%。双方其他设置差异包括DCP、chunk、MTP、Main精度、Store协议；不能将差值全部归为共享槽净开销。
+- 全矩阵计时已完成，正在恢复原P r05并等待最终身份／manifest／健康／新单token请求审计。收尾审计完成前不将此轮标记退役。完整中位数/min-max/TTFT、迁移说明和原始证据索引见[性能报告](prefill-reuse-dcp-performance.md)。
+
+§11.40收尾：兼容主基线全部计时完成后，原P r05／D r03四节点的ID、image、owner、启动脚本与每节点10文件源码manifest核验通过；四引擎健康200、空闲，P0/P1新单token数学题均返回4。proxy维持原未运行状态，r15停止退役；D三组前后指标均一致。离线证据审计PASS，三组各36条结果／30条正式计时均完整，摘要与真实tokens、计算tokens及指标增量核对一致；辅助组错误答案未被隐藏。原始未迁移1m启动失败证据保留；兼容迁移说明单列。最终源码仍717f6e6e0、原p-main-buffer-reuse分支干净，本轮未改生产实现、未push。
+
+§11.40时延原因分析补充：仅检查相同源码及原始计时数据，无集群操作。原始1m同时开启enable_dsa_cp，prefill的SFA／Indexer使用TP本地token shard；reuse关闭该路径。4K–32K均为单chunk、没有前序chunk历史GET却已变慢，主要候选为计算路径改变和逐层PUT／槽位交接暴露开销。64K两chunk每共享Main层理论恢复约32K历史，128K四chunk累计约192K（约6倍），叠加更长历史Indexer成本；不能将线性外推残差直接当成GET时间。现有数据尚不能量化各项贡献，后续应做同条件全独立Main/B2与纯计算DSA-CP消融、关键路径timeline。细节已写入性能报告，机器可读推算见perf-dcp-comparison/latency-cause-analysis.json；未修改生产代码或重新部署。
+
+§11.40参数优化候选补充：按用户希望接近原始DCP性能的目标，核对B／prefetch约束并执行纯CPU布局解析，B2/P2、B3/P2、B4/P2、B4/P3、B8/P4均被当前解析器接受，未做新NPU实测。代码没有P<B硬限制，实际lookahead受槽位与读者生命周期制约；总Main槽分别为4、5、6、6、10（含首尾独立）。候选及状态保存在tuning-candidates.json，性能报告补了HBM容量公式、先测DCP1参考下限／全独立Main对照、batch64/128/256、chunk与MoE预算协同、计算分片适配及后续减少恢复量的路线。未改生效配置、源码或集群状态；尚无新收益承诺。
+
+
+### §11.41 32K／64K／128K调优与关键路径分析（扫描中止、阶段归因完成） 2026-11-04
+
+- 用户明确本轮不做1M请求回归。新r16 P候选使用原P镜像/native扩展与717f6e6e0源码；原四节点ID／image／脚本及每节点10文件manifest预检通过，候选732文件摘要通过。只操作自有P容器，D r03与Master不动。
+- 统一262144模型上限、DCP1／INT8／chunk32784／seq1／无MTP／MoE524544，pure→全独立Main逐层Store→B2/P1→B4/P2→B8/P4→B4/P2/batch256；用户提供官方latest指南后，在原监督流程末尾追加B3/P3／independent[0]／批次限制0的Mooncake参考组合，不中断当前监督和最终恢复。
+- 每长度1预热+3计时，同一固定case0–3，max_tokens=1；质量和计时同时保留。官方配置有device_sdma／GVA直接batch_copy、默认prefetch3和不拆批差别；RFC报告2–4buffer可掩盖多数加载。并非当前memcache实机对照，没有启动其MetaService或改PD connector。
+- 证据位于artifacts/p-main-buffer-reuse/perf-tuning-32k-128k；详见prefill-reuse-memcache-comparison.md。计时进行中，结束必须恢复原P r05并审计四节点身份、源码、健康和新单token短请求；不把空白行或HTTP200当成通过。
+
+§11.41方向修正：用户指出参数扫描先于时间线归因。六组各12条请求（9次正式）完成后，已主动中止b3p3-guide请求循环、取消BF16组；部分参考请求原样保留，不当完整对照。取消通过校验PID/父进程/命令的本地测量SSH执行，最后请求排空后才停自有r16模型；pipeline-failure为主动取消传播记录，不是NPU崩溃。现先备份/离线解析B2 TP0原始profile，之后恢复原P并审计。没有新增参数实验或重启D/Master。
+
+§11.41收尾：B2独立128K profile的TP0原始数据已备份、离线导出成功。3211935事件流式分析定位：CANN Free 11.466秒，Prolog提交前占11.229秒（97.9%）；真实chunk1–4该阶段Free为0.002／0.466／3.172／7.589秒。Event Synchronize累计54.680秒主要在后台线程且与计算重叠，不能算成净损失。量化SFA／Indexer设备算子累计24.999／9.507秒，不是墙钟因果占比。进一步区分slot gate、metadata和GET完成仍需固定B2的细粒度边界探针，没有继续盲扫或删除I1屏障。原P r05／D r03四节点身份、10文件源码、健康空闲和P0/P1新单token请求恢复审计PASS；六组72条记录／54次正式均有效，主动中止组部分记录与未启动组明确区分，离线证据审计PASS。r16停止退役，源码717f6e6e0／原p-main-buffer-reuse干净，无生产实现改动或push。完整数值、边界与复算脚本见prefill-reuse-critical-path-analysis.md。
+
+### §11.42 固定B2/P1边界探针（诊断完成，原服务恢复） 2026-11-04
+
+用户授权后补队列/旧save/旧compute/attention gate/reader/source代次/地址构造/range拆分/native GET-PUT/ready发布及主线程等待时间戳。仅r17诊断overlay，原732文件基线和分支不变；AST剥离还原及6项CPU验证通过。原四节点ID/image/脚本/源码/健康预检通过，正准备自有P r17。固定原B2/P1参数，128K关闭/开启探针对照与独立TP0 CANN关联；请求均max_tokens1，结束后下一条关闭探针短请求统一导出，避免forward内逐层日志。D r03和Master不动。
+
+时序核对发现GVA在attention gate前构造元数据并在本层聚合groups，range路径在gate/读者屏障后构造、按group提交；FIFO是共性。该差异是探针重点，尚无收益断言。证据prefill-boundary-trace，收尾必须恢复原P并审计。
+
+§11.42收尾：12次请求全部有效，128K off/on两对为56.714/56.551s、56.867/56.195s；独立profile56.736s，P0 16TP四label共64文件无丢失，312个main wait均与同次CPU MLA span对齐。10.361s CANN Free中9.553s在native GET、main load wait内总计9.631s；build_addrs直接暴露0.000464s，FIFO零，reader约0.000003s。后续chunk GET逐层中位47/96/146ms，对应前层SFA约80ms，后两chunk难掩盖。
+
+§11.42时序/组件发现：GVA在attention gate前准备地址、整层聚合并按independent/vllm_cached_tokens过滤；block-key在gate后准备、按group调用，且_process_load_for_layer_batch的block-key分支不经过该驻留起点过滤。实测21独立Indexer仍参与GET，57单段层与16 Main+Indexer data+scale三段层在第4chunk平均129/353ms，后者payload仅多约20%；21层贡献7.402s GET暴露，包含其Main本身，不能全算可省。下一项应验证previous-step独立组件块映射/驻留并过滤range，外部prefix和不确定驻留保留完整GET，Store格式/PUT/offset与I1不变。未做这项生产优化。
+
+§11.42恢复与证据：P r05/D r03四节点原ID/image/owner/脚本与各10文件源码manifest、健康空闲、新P0/P1单token数学题均PASS；D请求指标前后一致、Master不动，proxy维持未运行。r17停止退役，原p-main-buffer-reuse/717f6e6e0和732文件均未改。离线审计初次误将profile_stopped后的最后事件要求为arm_complete，已修正成唯一完整结果/完成事件并复核，日志保留，不是NPU故障。完整结果和复算脚本见prefill-reuse-boundary-trace-results.md及artifacts/p-main-buffer-reuse/prefill-boundary-trace。
+
+
+### §11.43 32K/64K 完整层计算与槽位最早可用时间实测（2026-11-05，完成／原服务恢复）
+
+目的：量每层真实设备计算、GET／PUT、槽位释放与提交时间，验证扩大共享环／lookahead是否能补回等待。计划／源码快照／原始数据在`artifacts/p-main-buffer-reuse/perf-layer-overlap-32k-64k/`。冻结717f6e6e0／原p-main-buffer-reuse；r18诊断overlay共733文件，原732文件不动，4文件剥离探针后AST等价。新增完整decoder层scope及已有KV-ready／compute-done／attention-start的record标记，不新增device同步／poll、不移动gate；正式请求关闭采样，profile另计。
+
+共同配置TP16×DP2、DCP1、eager、Main／Indexer dtype参数INT8、chunk32784、seq1、无MTP、batch64／16MiB、首尾Main独立，max_model_len统一131072。每组每长度1预热＋3正式，再加独立32K／64K profile及flush，共48请求全部答案／实际tokens／computed tokens／零prefix hit／无抢占／单请求校验有效。只测P-only输出1token，不做1M或新PD数据面验收。
+
+| 配置 | 32K prefill中位数 | 64K prefill中位数 |
+| --- | ---: | ---: |
+| pure（相同计算参数，移除KV transfer） | 9.571s | 20.316s |
+| B2/P1 | 9.585s | 20.926s |
+| B4/P1 | 9.583s | 20.952s |
+| B4/P3 | 9.585s | 20.419s |
+
+只加buffer而不加prefetch未见收益；B4/P3追回64K约507.5ms（2.43%），相对pure额外开销约0.51%。代价是Main物理槽4→6，固定KV预算下日志num_blocks30010→24614（约−18%）。没有改生效inventory，未证明B4是最少buffer数，B2/P2尚未测试。
+
+B2 64K真实core区间并集18.901s，其中SFA12.466s、LightningIndexer主核2.445s、MlaProlog主核1.616s；pure对应core18.906s、SFA12.459s，计算大头关闭offload后仍存在。每层core中位数约104.7ms；第二chunk历史恢复每层GET中位50.7ms、最高131.9ms。GET native累计5.272s与模型core重叠约4.575s，不能全部当损失。直接GET等待Free由B2的516.0ms降至B4/P3的69.3ms；其中第0层68.9ms，其余77层合计约0.39ms，层间稳态基本掩盖。最后一轮PUT native累计反而增加但端到端更快，说明累计CPU调用时长不足以定位净开销。
+
+按旧slot compute-done设备事件、保守Store source完成及receiver前序GET完成约束，至实际GET开始的间隔中位数B2 27.0ms、B4/P1 65.7ms、B4/P3 25.9ms；新增空槽只有配合提前调度才被利用。这不是允许无视collective约束移动DMA gate。当前剩余优先候选是证明独立首层／Indexer驻留后过滤GET（64K约69ms首层预算）；更大收益应先同DCP1对比Main BF16与INT8计算路径，或设计计算分片与共享Main解耦。不能将原始DCP／BF16配置的整体差距全归给offload，也不承诺切dtype即追平原始。
+
+采集：P0 16TP两长度每组32份host trace，三复用组共96份，无drop；每个历史层16rank齐全；设备仅TP0。每组78／156个真实层，复用组各702个已有fence记录映射齐全，设备计算关联覆盖率超过99%，pure为100%。CANN按Node@launch／ACL connection关联，排除AI_CPU collective包络和DP dummy；初版reader遗漏Node入口及一次cache版本交接错误已修复重算，记录保留，不是运行请求失败。本地初始监督进程退出时，按实际存活容器与模型进程从pure已启动阶段续接，没有重启该模型或重放前三组；后续监督和解析使用独立会话。
+
+恢复／审计：原P r05、D r03四节点ID/image/owner/脚本、各10文件源码manifest、四引擎健康200且空闲、P0/P1新单token数学题返回4全部PASS；D请求指标前后一致，Master未动，proxy保持未运行，r18停止退役。当前源码分支／HEAD／732摘要不变，733文件实际部署快照与manifest一致，completion-audit.json全部门槛PASS。完整逐层CSV、时序图、预算／memcache核对及限制见[prefill-reuse-layer-overlap-32k-64k.md](prefill-reuse-layer-overlap-32k-64k.md)。
+
+
+### §11.44 Mooncake 池化五部署档比较（2026-11-05，完成／B2-64K 未通过／原服务恢复）
+
+用户确认范围：原始 200K、原始 1M、普通逐层无复用、B2/P1、B4/P3；全部启用 Mooncake，32K／64K，每长度一对预热＋三对正式 P0 冷写入→P1 远端读取，输出固定 1 token。每对相同 prompt/salt、不同对隔离；核验零本地命中、实际 external hit／补算 token 和答案，失败与未命中单列。
+
+保留部署档 DCP／dtype／chunk／MTP 等参数，统一 max_model_len=131072 仅为本轮请求对照；原始档移除旧 c8 开关、显式 Indexer INT8 并使用已验证 RoCE 配置，兼容调整单独记录。此实验不代表原始 1M 容量验收。冻结源码 717f6e6e0／p-main-buffer-reuse，r19 私有诊断 overlay 仅记录保存 handler 最终 target watermark／writer 拓扑，不改搬运或计算同步。候选共 733 Python 文件，剥离探针后 AST 等价及 6 项 CPU 检查通过。
+
+只切原 P r05 和自有 r19，D r03／Master 不动。独立本地监督进程负责逐档验证和 finally 恢复；结束要求原四节点 ID／image／script／各 10 源文件 manifest、健康空闲和两个 P 单 token 数学请求通过。计划／配置／证据：`artifacts/p-main-buffer-reuse/mooncake-pool-deployment-comparison/`。结果未出齐前不沿用上一轮无池 pure 数字，也不把保存完成标记当成功命中。
+
+
+§11.44 采集收尾：实际76次请求尝试／75条结果，73有效（54正式），36对冷／远端双方通过；另有B2隔离64K冷预热单独通过。原始200K .92在首个32K预热的空闲P1 MTP dummy logits all-gather处OOM（申请2.37GiB、仅1.38GiB可用），仅将KV预算降至.88兼容复测，保留原MTP／DSA-CP／chunk等参数；原始失败另存initial092-evidence。一次复测监控误扫残留traceback、尚未发请求即退出，已在自有私有日志清理后重跑，不作为模型失败。原始1M／全独立Main／B4P3各16请求通过，B2P1的32K八请求通过；B2混合序列64K冷请求阻塞>256s，随后同参数隔离重启的64K冷预热22.261s通过、P1远端读取仍达300秒截止，未继续正式64K样本。日志仅能定位逐层load完成等待，未区分软件屏障与native GET，不展开旧64K根因修复。
+
+正式prefill中位数（32K冷／远端，64K冷／远端）：200K兼容.88为2.270／7.689、4.578／15.296s；原始1M为3.286／1.070、6.775／1.492s；全独立Main为9.582／5.378、20.335／10.692s；B2P1为9.587／5.299、64K无正式有效样本；B4P3为9.586／5.159、20.444／10.352s。B4相对全独立Main的冷增量0.04%／0.53%、命中约快4.1%／3.2%；固定KV预算num_blocks由B2的30010降至B4的24614（约−18%）。B4未复现B2的阻塞不是根因已修复的证据。所有有效外部命中达到可匹配块的完整对齐边界、零本地hit、computed=actual−external，答案／实际tokens等检查通过。DCP16的命中单位2048，DCP1为128，补算量区别单列；200K保留legacy DSA-CP与Index cache，因此不能把整套差距称为DCP单变量收益。详见[池化性能报告](mooncake-pool-deployment-performance.md)，逐请求、配对审计、CSV、快照及故障记录在mooncake-pool-deployment-comparison。finally 已恢复原 P，最终恢复审计如下。
+
+
+§11.44 恢复／离线审计：原 P r05、D r03 四节点 ID／image／owner／脚本、各10文件源码、健康200且空闲，以及 P0/P1 新 max_tokens=1 数学题返回4全部 PASS。D 请求计数与预检一致，D／Master 未重启，proxy 保持未运行，r19 停止退役。源 p-main-buffer-reuse／717f6e6e0 与732文件未改，实际733文件部署快照与manifest相符；配对body相同、endpoint不同、salt隔离及有效seed保存证据审计PASS。completion-audit.json 的 PASS 仅代表证据／源码／恢复完整，benchmark_status=COMPLETED_WITH_FAILURES、functional_stability=FAIL（B2 64K混合序列和隔离远端读取阻塞）；B4本轮16请求通过。没有将超时、初始OOM、仅预热样本或上一轮cold-only结果填成B2的64K正常中位数。完整报告、三次样本范围、client/server TTFT与逐请求CSV见mooncake-pool-deployment-performance.md。
+
+
+### 11.45 最新 receipt 分支核对及完整 PD 补齐（2026-11-05，进行中）
+
+前置 Mooncake 五档测试见§11.44，原 P r05／D r03 已恢复。本轮未切换模型部署。
+实际 fetch `maz/feat/layerwise-receipt` 到 `fa5aec40b`，原 P 分支上合入12提交并审查
+25文件；远端 handoff 中接口实现不等于完整调用链已通。已修 metadata 构造失败、HTTP
+lease 编码、真实 scheduler hook、D 错标 restore-only、source有效尾部、source fence
+覆盖和 retirement 失败放行。新增显式 loopback 值类型 IPC，独立子进程双向 RPC 的
+retain／validate／release、超时未决与拒绝重发通过，但尚未接生产 factory。
+P141、receipt37和组合61项／24子用例通过，另1项真实运行时限定用例明确skip。
+原容器内新增独立进程做候选源码内存导入检查，不替换已安装源码、不启动模型／DMA；
+检查结果和完整日志见本轮 artifacts，不作为功能端到端证明。完整模型验收仍待后续
+多 rank owner／Host注册／精确传输与receipt／消费写回／取消抢占接线后执行。
+详见源码仓 PD_TRANSFER_COMPLETION_REVIEW.md；本轮证据目录为
+`artifacts/p-main-buffer-reuse/pd-transfer-completion-20261105/`。
+
+本轮集成基础修复已在原 `p-main-buffer-reuse` 提交 `9cbdde548`（Signed-off-by，双亲717f6e6e0／fa5aec40b），源码工作区干净，未push。实际NPU运行栈的候选739个Python源码内存导入、receipt／普通标准hook、3项真实sender方法的CPU fence测试通过；没有替换服务文件／启动模型或DMA。复核原四容器ID／image／owner和各10源码摘要一致，健康200、running／waiting均0。变更manual hooks全通过；全仓format.sh ci在隔离副本因既有ascend_config／sfa_kv_offload问题失败，未污染交付源码。基础验证摘要foundation-validation.json明确标记完整模型功能／性能NOT_RUN，生产RPC factory未接，活动目标继续。
+
+
+### 11.46 生产 owner／scheduler 接线与控制验证（2026-11-05）
+
+第二阶段生产接线（2026-11-05，完整PD目标继续）：新增ReceiptScheduler与串行KVCacheManager适配器，反向retention RPC和实际分配／free使用同一实例锁；标准GPU fence先于target release，覆盖正常结束/取消延迟free、抢占、强制prefix reset和接收失败。新role factory接入connector/MultiConnector/model_runner初始化；D注册选择已有HostMain+HBMIndexer，不再走进程全局rendezvous；新增全TP原始lease和TargetManifest、HTTP传播及本地lease选择。真实远端静止proof、传输计划、SourceReady直接发送、worker-ready、消费写回和restore-only仍待接线，缺proof时分配保持。P141、组合67项/33子用例通过，1项运行时依赖skip；实际vLLM scheduler/KVCacheManager四条CPU控制路径通过，不代表模型/DMA通过。原环境未切换，证据在pd-transfer-production-wiring-20261105，源码最新说明PD_TRANSFER_COMPLETION_REVIEW.md。
+
+第二阶段收尾：原 p-main-buffer-reuse 已提交 `36e6aa4d3`（Signed-off-by），21文件，工作区干净，未push。743生产Python源码摘要与最终native-stack内存导入快照一致；真实依赖下6项direct/binding/finished hook、3项sender fence、1项CPU真实存储/录制TE的注册选择，以及4条真实vLLM scheduler控制路径通过。Native注册范围测试首次因harness缺少Mock名称失败，修正后通过并保留原日志；不是服务故障。变更manual hooks全部通过；全仓CI继承未改动基线失败，隔离格式化7文件与本轮交付无交集。原四容器身份/image/owner与各10源码摘要匹配，健康200、running/waiting均0，未切模型部署。validation.json明确标记真实新TE注册、完整模型功能与性能NOT_RUN，真实远端proof producer/数据面plan未接，完整活动目标继续。
+
+
+### 11.47 Manifest逐entry计划、碎片MR与receive admission（2026-11-05）
+
+
+第三阶段目标计划与接收确认（2026-11-05，完整PD目标继续）：已补manifest逐entry传输计划及请求级预编译索引，基于既有DSA mapper校验实际MR、页/stride/group/block/tail；worker本地解析真实地址仅走peer数据面，不进入scheduler IPC。同一真实Host backing支持多段不重叠注册，复用bounded DSA packer。新增精确entry覆盖/独立静止判据；scheduler通知P前等待所有TP owner安装ledger和request映射，重复metadata不重置结果，部分admission失败保留目标。真实receiver已校验带明确DMA静止bool的terminal和完整generation，acquire后校验失败保持lease可追踪。CPU组合119项/46子用例通过、1项运行时限定skip，P141通过；原P独立进程747生产Python内存加载、3条实际receiver/early-admission方法、既有hook/fence/注册选择与实际vLLM scheduler控制用例通过，没有模型计算或远端DMA。生产SourceReady直接writer、exact epoch、真实可见性/use/写回、all-rank readiness/free proof、取消抢占与restore-only仍待完成；完整模型功能/性能NOT_RUN。原服务未切换。源码最新说明PD_TRANSFER_COMPLETION_REVIEW.md，证据pd-transfer-data-plane-20261105。
+
+第三阶段收尾：原 p-main-buffer-reuse 已提交 `aca80d8ef`（Signed-off-by），20文件，工作区干净，未push。747生产Python源码摘要与最终native-stack内存加载快照及commit逐文件一致；P141、组合119项/46子用例（另1运行时限定skip）、legacy receipt37项/4子用例通过。实际依赖下3条精确receiver/提前admission方法、6条hook、3条sender fence、1条CPU注册选择和4条真实vLLM scheduler控制路径通过，负向帧错误日志来自注入测试，不是服务请求失败。变更manual hooks全通过，全仓CI仍因未改动基线lint/拼写失败，隔离副本自动格式化7文件与交付无交集。原四容器身份/image/owner/脚本/各10源码摘要匹配，健康200且running/waiting均0，未切部署。validation.json明确真实新注册/远端DMA/模型功能与性能NOT_RUN；SourceReady直接writer、真实receive/use/writeback及全rank静止proof仍待接线，完整活动目标继续。
+
+
+### 11.48 SourceReady writer与exact epoch（2026-11-05）
+
+
+第四阶段SourceReady writer与exact epoch（2026-11-05，完整PD目标继续）：manifest请求保留manager block和原始目标端口，SourceReady直接登记全部read job，在已有NPU sender线程调用batch_transfer_sync_write，Host/device分批，Main只由P0写、Indexer逐rank写；旧save hook排除manifest防止双发，混合batch保留普通路径，未接Store registry时显式拒绝。source consumer改为ready+sealed+所有exact epoch读者完成才可复用，按slot高水位支持旧Indexer重复等待；普通sender也回调确切ticket。原生完成先释放源读者，独立proof线程批量发送逐entry结果并复用REQ socket，不等待D ACK占槽；未知原生异常保持读者。worker完成后完整已登记计划排空再清理，部分计划按cancelled退出且不提交队列中未开始的DMA；这不等于已完成D→P取消协议。CPU组合181项/50子用例（1 runtime skip）及P141通过，真实ZMQ与CPU实际字节/页尾/fence/ACK阻塞/失败/取消测试通过；原P独立进程748生产源码内存导入、9条真实准备/receiver/提前admission方法及既有hook/fence/注册选择和实际scheduler控制路径通过。没有真实远端WRITE/新注册或模型运行，未切服务。D真实可见性/use/写回、全rank readiness/release proof、晚到proof清理、远端取消和restore-only仍待接通，完整模型功能/性能NOT_RUN。证据pd-transfer-source-writer-20261105，源码PD_TRANSFER_COMPLETION_REVIEW.md。
+
+第四阶段收尾：原 p-main-buffer-reuse 提交 `4c455c943`（Signed-off-by），12文件，工作区干净，未push。组合最终182项/50子用例（1运行时限定skip）、P141通过；748生产Python源码与最终native-stack内存加载及commit逐文件摘要一致，9条准备/receiver/提前admission方法及既有hook/fence/CPU注册选择和四条实际scheduler控制路径通过。已补已封口target代际重放拒绝，以及peer操作耗尽重试后不再逐层重复超时。变更manual hooks全通过；全仓CI仍为未改动基线lint/拼写失败，隔离自动格式化7文件与交付无交集。原四容器身份/image/owner/脚本/各10源码摘要匹配，健康200且空闲，未切模型部署。新增真实尺寸元数据probe：TP16×78层、32K prompt、block128、256请求blocks的合法manifest在现有owner codec触发traversal limit，已复现，尚未修复；需要压缩重复block map后再进D/模型接入，不上调限制绕过。真实新注册/远端DMA/完整模型功能与性能NOT_RUN，完整活动目标继续，证据pd-transfer-source-writer-20261105。
+
+
+### 11.49 D消费与回收接线、元数据容量（2026-11-05）
+
+第五阶段D消费/回收接线（2026-11-05，完整PD目标继续）：新增exact原生完成到真实D stream依赖的本地桥、整个execute_model的owner-use及写回尾部fence、全部TP owner就绪门禁和基于静止proof的ReleaseAck。接收完成/失败仍保留内部请求身份、ledger和block map至owner retirement，避免迟到失败遗失与外部ID重用串线；失败通过真实vLLM failed_recving按请求报告，涵盖已经RUNNING的retained请求。关闭地址lookup gate，首次lookup前关闭在P按无native读取取消；已缓存地址的D→P远端取消仍未完成。owner/HTTP wire v2对重复block map引用，保持8MiB/500k node限额并兼容读取v1，TP16×78层32K/64K/128K元数据往返通过。组合CPU284项/76子用例（1 runtime skip）、P141通过；原P独立进程749生产源码内存导入、15条真实connector方法与7条实际scheduler控制路径通过，最终源码摘要匹配。变更manual hooks全过；隔离全仓CI因未改动基线lint/拼写失败，7项自动格式化与交付无交集。原四容器身份/image/owner/脚本/各10源码摘要和健康空闲匹配，没有切换模型服务。真实新注册、远端WRITE、完整模型功能/性能NOT_RUN；远端取消、restore-only调度及跨owner部分release失败的请求隔离仍待完善。证据pd-transfer-decode-wiring-20261105，源码PD_TRANSFER_COMPLETION_REVIEW.md。
+
+
+### 11.50 新 bounded 注册与原生 WRITE 探针（2026-11-05）
+
+第五阶段提交4204f545d（原p-main-buffer-reuse，未push）。独立r20容器实际运行生产worker注册与ManifestSourceWriter，目标注册5个MR，P两层源job都返回成功/静止，D执行prepare_decode并发布；原生日志roce_mode=true、use_fabric_mem=false。整轮FAIL：P在engine disconnect后的清理/退出阶段报malloc(): unsorted double linked list corrupted（-6），父进程断言后139退出。目标字节读取及后续use/writeback/retirement尚未执行，不能记PASS；根因未定位。控制监督已在finally恢复原D容器对，P未停，原D启动后健康审计仍在等待；终态看pd-transfer-native-write-20261105/supervisor-state.json及restoration-audit.json。完整模型功能/性能NOT_RUN。
+
+
+### 11.51 原生 WRITE／读取／回收小探针（2026-11-05）
+
+第六阶段原生小探针（2026-11-05）：使用4204f545d的749生产Python源码，TP1/两层/23有效tokens同机NPU1源进程→NPU0目标进程，实际bounded注册5个MR，生产ManifestSourceWriter及真实ZMQ地址/回执路径完成device RoCE WRITE；D通过exact账本建立真实receive依赖并发布。全部8个Main/Indexer entry、partial尾部及未写区域字节正确，跨层复用Main源buffers；native消费/在途manager写回阻止提前释放，完成后release/retire/unregister/pool close通过，源/目标正常退出。显式保留tensor/context并先校验再析构TE避免了本轮退出崩溃，但尚未隔离具体free地址或修改生产shutdown，不能证明HBM double free。未跑真实GLM forward/decode、TP共享身份、跨节点WRITE或模型功能/性能。入仓测试receipt_transfer_npu.py与实测脚本非import AST一致（仅Ruff格式/排序/unused清理）。r21曾因准备检查早于复制完成而触发多余D重启，无NPU提交，随后原环境恢复；新监督同步prepare/hash/imports后才stop，准备失败仅清理候选，5条生命周期CPU回归通过。r22探针PASS后正在finally恢复原D对，P未停，终态看pd-transfer-native-order-20261105。功能审查六项缺口继续补齐后再做正式完整模型验收。

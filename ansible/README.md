@@ -1,5 +1,8 @@
 # deploy-glm52 Ansible 部署套件
 
+P侧Main KV buffer reuse的精简配置与启动、验证、调试说明见 [a3-reuse/usage.md](inventories/a3-reuse/usage.md)。
+它使用独立inventory，默认chunk32784，不需要选择原A3的`1m-v030-*`档位。
+
 > 用 **Ansible** 完成 GLM-5.2 P/D 分离一键部署（4P/8D 引擎 + mooncake KV 池 + proxy 统一入口）。
 > **agentless**：只控制机装 Ansible，节点无需任何 agent（SSH + 节点 Python 即可）。
 > **完全自包含**：`ansible/` 一个目录即全部交付物（含 venv），无外部 `config.yaml` / `resolve/` / `filter_plugins` 依赖。

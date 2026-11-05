@@ -52,7 +52,19 @@ ask("after-cancellation", "独立请求 "+uuid.uuid4().hex+"\nMooncake stores KV
 if __name__ == "__main__":
     assert_development_cluster()
     subprocess.run(
-        ["ssh", "root@ott9-a31", "python3", "-u", "-"],
+        [
+            "ssh",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "ControlPath=none",
+            "-o",
+            "ServerAliveInterval=30",
+            "root@ott9-a31",
+            "python3",
+            "-u",
+            "-",
+        ],
         input=REMOTE.encode(),
         check=True,
     )

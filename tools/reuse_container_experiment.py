@@ -24,6 +24,16 @@ IMAGE = f"glm52-vllm-ascend:0.30.0-main-reuse-dev-20261103-{RUN}"
 
 
 def remote(node, args, data=None):
+    # ProxyJump starts another ssh process; destination options do not disable
+    # multiplexing on that jump. Isolate both connections for cluster nodes.
+    jump = (
+        [
+            "-o",
+            "ProxyCommand=ssh -o ControlMaster=no -o ControlPath=none -W %h:%p root@ott9-a31",
+        ]
+        if node != "p0"
+        else []
+    )
     result = subprocess.run(
         [
             "ssh",
@@ -33,6 +43,7 @@ def remote(node, args, data=None):
             "ControlPath=none",
             "-o",
             "ServerAliveInterval=30",
+            *jump,
             f"root@{NODES[node]}",
             shlex.join(args),
         ],

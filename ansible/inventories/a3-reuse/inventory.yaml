@@ -1,0 +1,18 @@
+# A3 Main KV buffer reuse: 2 P + 2 D, each node TP16 / one local DP engine.
+# Copied from inventories/a3; only the single Mooncake master on p0 is used.
+all:
+  children:
+    prefill:
+      hosts:
+        p0: {ansible_host: ott9-a31, ip: 172.168.4.237, nic: enp23s0f3, idx: 0}
+        p1: {ansible_host: ott9-a32, ip: 172.168.4.31, nic: enp23s0f3, idx: 1}
+    decode:
+      hosts:
+        d0: {ansible_host: ott9-a33, ip: 172.168.4.230, nic: enp23s0f3, idx: 0}
+        d1: {ansible_host: ott9-a34, ip: 172.168.4.226, nic: enp23s0f3, idx: 1}
+    proxy:
+      hosts:
+        p0: {}
+    mooncake:
+      hosts:
+        p0: {}

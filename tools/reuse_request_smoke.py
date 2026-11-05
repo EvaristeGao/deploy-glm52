@@ -43,7 +43,19 @@ for repeats in (60, 620, 1200):
 if __name__ == "__main__":
     assert_development_cluster()
     subprocess.run(
-        ["ssh", "root@ott9-a31", "python3", "-u", "-"],
+        [
+            "ssh",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "ControlPath=none",
+            "-o",
+            "ServerAliveInterval=30",
+            "root@ott9-a31",
+            "python3",
+            "-u",
+            "-",
+        ],
         input=REMOTE.encode(),
         check=True,
     )

@@ -38,6 +38,8 @@ v0.30.0rc1，带 Mooncake KV 池（block-key 数据面），并在其上开发
 ssh root@ott9-a31 'curl -s http://172.168.4.237:8000/healthcheck'
 ```
 
+**不要在集群上手动执行任何非只读操作！！！**（可以执行和我们开发相关的容器和容器内的操作）如果需要执行其他可写操作，向我申请.
+
 ---
 
 ## 3. 部署
@@ -109,7 +111,8 @@ docker load -i /mnt/sfs_turbo/g00832294/build/images/<tag>.tar
 
 ## 5. 当前在开发的特性：P 侧 KV buffer reuse
 
-**目标**：把多个层折叠到少量共享 HBM 槽（`num_shared_buffers: 3` + 独立层），
+**目标**：参考 mc.pdf 这个设计文档，继续开发在 mooncake 上面的 Prefill 侧的 kvoffloading 特性，
+把多个层的layerwise offload overload到少量共享 HBM 槽（`num_shared_buffers` + 独立层），
 同样显存下放大可用 block 数；必须保证「写共享槽前，上一代所有读者已结束」（设计 I1）。
 
 ### 5.1 已完成（有实测）
