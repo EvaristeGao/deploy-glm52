@@ -208,18 +208,15 @@ def test_a3_receipt_decode_uses_only_the_layerwise_connector(async_scheduling):
     with open(path) as source:
         group_vars = yaml.safe_load(source)
     group_vars["model"]["served_model_name"] = group_vars["model_name"]
+    decode_vars = group_vars["pd_cluster"]["decode"]
+    receipt = decode_vars.pop("receipt_connector_extra")
     assert "--scheduler-cls" not in _render("decode", gv=group_vars)
-    receipt = {
-        "layerwise_receipt_mode": True,
-        "target_owner_rpc_base_port": 33100,
-        "target_retention_rpc_port": 33120,
-    }
-    group_vars["pd_cluster"]["decode"]["receipt_connector_extra"] = receipt
-    group_vars["pd_cluster"]["decode"]["enable_log_requests"] = True
+    decode_vars["receipt_connector_extra"] = receipt
+    decode_vars["enable_log_requests"] = True
     if async_scheduling is None:
-        group_vars["pd_cluster"]["decode"].pop("async_scheduling", None)
+        decode_vars.pop("async_scheduling", None)
     else:
-        group_vars["pd_cluster"]["decode"]["async_scheduling"] = async_scheduling
+        decode_vars["async_scheduling"] = async_scheduling
     decode = _render("decode", gv=group_vars)
     config = json.loads(decode.split("--kv-transfer-config")[1].split("'")[1])
     assert config == {

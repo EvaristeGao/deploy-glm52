@@ -1,5 +1,5 @@
-# A3 Main KV buffer reuse: 2 P + 2 D, each node TP16 / one local DP engine.
-# Copied from inventories/a3; only the single Mooncake master on p0 is used.
+# A3 receipt P/D: 2 P + 2 D, each node TP16 / one local DP engine.
+# The deployment has a dedicated Mooncake master on p0.
 all:
   children:
     prefill:

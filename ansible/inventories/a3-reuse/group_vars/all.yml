@@ -1,5 +1,4 @@
-# A3 Prefill Main KV buffer reuse. Derived from a3/group_vars/all.yml.
-# One explicit configuration: no deploy_config / _1m_* selector, HA or SFA mode.
+# A3 receipt P/D with Prefill Main reuse and Decode Host offload.
 # Operational instructions and validation limits: ../usage.md.
 ansible_user: root
 ansible_python_interpreter: /usr/bin/python3
@@ -13,14 +12,12 @@ ansible_ssh_common_args: >-
      "-o ProxyCommand='ssh -o BatchMode=yes -o ControlMaster=no -o ControlPath=none -W %h:%p root@ott9-a31'" }}
 
 cluster_type: a3
-# Frozen Main-reuse implementation used by the restored development services.
-# These are LOCAL tags, not images published to a registry. Install before start.
-# Neither image activates the new receipt / TargetProvider runtime.
+# The local image contains the full receipt package and proxy at c76f087d2.
 engine_images:
-  prefill: glm52-vllm-ascend:0.30.0-main-reuse-dev-20261103-r05
-  decode: glm52-vllm-ascend:0.30.0-main-reuse-dev-20261103-r03
+  prefill: glm52-vllm-ascend:0.30.0-receipt-c76f087d2
+  decode: glm52-vllm-ascend:0.30.0-receipt-c76f087d2
 image: "{{ engine_images.decode if inventory_hostname in groups['decode'] else engine_images.prefill }}"
-image_tar: ""
+image_tar: /mnt/sfs_turbo/g00832294/build/images/0.30.0-receipt-c76f087d2.tar
 
 model_path: /mnt/sfs_turbo/models/GLM-5.2-w4a8c8
 model_name: glm-52
@@ -32,8 +29,8 @@ model:
     - /mnt/sfs_turbo:/mnt/sfs_turbo
 
 pd_cluster:
-  # P/D smoke and short/medium contexts. This is not a P/D 1M configuration.
-  max_model_len: 262144
+  # Keep the context and capacity from the matched 64K receipt run.
+  max_model_len: 65536
   num_cards: 16
   v030_env: true
   pd_connector: layerwise
@@ -51,6 +48,7 @@ pd_cluster:
     OMP_PROC_BIND: false
     OMP_NUM_THREADS: 10
     GLOG_minloglevel: 2
+    MC_LOG_LEVEL: ERROR
   range_debug: false
   layerwise:
     enabled: true
@@ -59,7 +57,6 @@ pd_cluster:
     independent_layers: [0, -1]
     max_transfer_blocks: 64
     max_transfer_bytes: 16777216
-    # Do not enable buffer_reuse_consumer: D keeps its ordinary HBM cache.
   prefill:
     dp_size: 2
     tp_size: 16
@@ -68,14 +65,14 @@ pd_cluster:
     kv_port: 30000
     rpc_port: 16591
     engine_id: 0
-    # Main regression setting from the P-only 1M validation, not the 4112 test.
     max_num_batched_tokens: 32784
     max_num_seqs: 1
     gpu_memory_utilization: 0.9
     enable_prefix_caching: true
     enable_chunked_prefill: true
     safetensors_prefetch: true
-    kv_cache_dtype: int8
+    num_gpu_blocks_override: 513
+    kv_cache_dtype: auto
     indexer_kv_dtype: int8
     non_master_headless: false
     api_server_count: 1
@@ -94,22 +91,28 @@ pd_cluster:
     rpc_port: 16600
     engine_id: 2
     max_num_batched_tokens: 192
-    max_num_seqs: 4
+    max_num_seqs: 1
     gpu_memory_utilization: 0.92
-    num_gpu_blocks_override: 5508
+    num_gpu_blocks_override: 513
     enable_prefix_caching: false
     enforce_eager: true
-    async_scheduling: false
+    async_scheduling: true
     safetensors_prefetch: true
-    kv_cache_dtype: int8
+    kv_cache_dtype: auto
     indexer_kv_dtype: int8
     non_master_headless: false
     api_server_count: 1
     enable_mtp: false
     additional_config: >-
       {"multistream_overlap_shared_expert": true, "enable_fused_mc2": 1,
-       "enable_mlapo": true, "scheduler_config": {"recompute_scheduler_enable": true},
-       "ascend_compilation_config": {"fuse_muls_add": true}}
+       "enable_mlapo": true, "scheduler_config": {"recompute_scheduler_enable": false},
+       "ascend_compilation_config": {"fuse_muls_add": true},
+       "sparse_kv_offload_config": {"enabled": true, "host_backend": "mooncake",
+                                    "use_fused_overlap": true, "keep_device_kv_cache": false}}
+    receipt_connector_extra:
+      layerwise_receipt_mode: true
+      target_owner_rpc_base_port: 33100
+      target_retention_rpc_port: 33120
 
 runtime:
   ready_timeout: 2400
@@ -124,7 +127,8 @@ proxy:
 
 mooncake:
   enabled: true
-  image: glm52-vllm-ascend:v0.30.0rc1-a3-mc0.3.13
+  image: glm52-vllm-ascend:0.30.0-rx-b5
+  container_name: mooncake-a3-reuse-receipt-p0
   evict: 0.9
   global_segment_size: 40GB
   default_kv_lease_ttl: 300000
@@ -132,17 +136,17 @@ mooncake:
   preferred_segment: true
   ha:
     enable_ha: false
-    rpc_port: 52050
-    metrics_port: 52052
+    rpc_port: 52210
+    metrics_port: 52212
     eviction_ratio: 0.2
     log_dir: /var/log/mooncake_master
 
-# Separate name/logs; NPU devices and ports still overlap the original deployment.
+# Distinct names retain the previous deployment for rollback during cutover.
 container:
-  name: vllm-ascend-glm52-main-reuse
+  name: vllm-ascend-glm52-a3-reuse-receipt
   shm_size: 1024g
 logs:
-  dir: /mnt/sfs_turbo/g00832294/logs/main-reuse
+  dir: /mnt/sfs_turbo/g00832294/logs/a3-reuse-receipt-c76f087d2
   vllm: vllm_{node}.log
   mooncake: mooncake_{node}.log
   proxy: proxy.log

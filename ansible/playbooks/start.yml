@@ -17,6 +17,7 @@
   vars:
     # mooncake_master 落点：HA → mooncake.ha.nodes；单主 → proxy 节点（p0）
     mooncake_master_nodes: "{{ mooncake.ha.nodes if mooncake.ha.enable_ha else [groups['proxy'][0]] }}"
+    mooncake_container_name: "{{ mooncake.container_name | default('mooncake-' ~ inventory_hostname) }}"
   tasks:
     - name: 拒绝把渲染专用实验配置用于通用部署流程
       assert:
@@ -149,8 +150,8 @@
     - name: 起 mooncake 容器（HA：mooncake.ha.nodes；单主：proxy 节点；独立于 vllm-ascend，含 mooncake_master+haproxy+nc）
       when: mooncake.enabled and inventory_hostname in mooncake_master_nodes
       shell: |
-        docker rm -f mooncake-{{ inventory_hostname }} 2>/dev/null || true
-        docker run -itd --name mooncake-{{ inventory_hostname }} --shm-size=500g --network host \
+        docker rm -f {{ mooncake_container_name | quote }} 2>/dev/null || true
+        docker run -itd --name {{ mooncake_container_name | quote }} --shm-size=500g --network host \
           --device=/dev/davinci_manager \
           --device=/dev/hisi_hdc \
           --device=/dev/devmm_svm \
@@ -207,10 +208,10 @@
     - name: docker cp 脚本进 mooncake 容器并生成/启动 haproxy（CacheMaster {{ haproxy.cache_master_port }}）
       when: mooncake.enabled and mooncake.ha.enable_ha and haproxy.mode == 'per_container' and inventory_hostname in mooncake.ha.nodes
       shell: |
-        docker exec mooncake-{{ inventory_hostname }} mkdir -p /home/ma-user/haproxy
-        docker cp /tmp/gen_haproxy_etcd.sh mooncake-{{ inventory_hostname }}:/home/ma-user/haproxy/
-        docker cp /tmp/start-ha.sh mooncake-{{ inventory_hostname }}:/home/ma-user/haproxy/
-        docker exec mooncake-{{ inventory_hostname }} bash -c \
+        docker exec {{ mooncake_container_name | quote }} mkdir -p /home/ma-user/haproxy
+        docker cp /tmp/gen_haproxy_etcd.sh {{ mooncake_container_name | quote }}:/home/ma-user/haproxy/
+        docker cp /tmp/start-ha.sh {{ mooncake_container_name | quote }}:/home/ma-user/haproxy/
+        docker exec {{ mooncake_container_name | quote }} bash -c \
           'export HAP_LISTEN_START_PORT={{ haproxy.cache_master_port }}; \
            export ETCD_SERVER_LIST="{{ etcd_server_list }}"; \
            bash /home/ma-user/haproxy/gen_haproxy_etcd.sh && \
@@ -237,12 +238,12 @@
     - name: 容器内起 mooncake_master（HA：enable_ha+etcd 选主；单主：直连）
       when: mooncake.enabled and inventory_hostname in mooncake_master_nodes
       shell: |
-        docker exec mooncake-{{ inventory_hostname }} mkdir -p {{ mooncake_log | dirname }} 2>/dev/null || true
+        docker exec {{ mooncake_container_name | quote }} mkdir -p {{ mooncake_log | dirname }} 2>/dev/null || true
         # glog 的 -log_dir 默认 /var/log/mooncake_master，镜像里没有该目录 ⇒ 会刷
         # "COULD NOT CREATE A LOGGINGFILE ... No such file or directory"。先建出来（幂等）。
-        docker exec mooncake-{{ inventory_hostname }} mkdir -p {{ mooncake.ha.log_dir }} 2>/dev/null || true
-        docker exec mooncake-{{ inventory_hostname }} pkill -x mooncake_master 2>/dev/null || true
-        docker exec -d mooncake-{{ inventory_hostname }} bash -c \
+        docker exec {{ mooncake_container_name | quote }} mkdir -p {{ mooncake.ha.log_dir }} 2>/dev/null || true
+        docker exec {{ mooncake_container_name | quote }} pkill -x mooncake_master 2>/dev/null || true
+        docker exec -d {{ mooncake_container_name | quote }} bash -c \
           'mooncake_master {% if mooncake.ha.enable_ha %}-enable_ha=true \
             {% endif %}--cluster_id=mooncake \
             {% if mooncake.ha.enable_ha %}--etcd_endpoints="{{ master_etcd_endpoints }}" \
@@ -255,7 +256,7 @@
             -log_dir={{ mooncake.ha.log_dir }} \
             -max_log_size=1800 -stderrthreshold=4 -stop_logging_if_full_disk=true \
             >> {{ mooncake_log }} 2>&1'
-        sleep 2 && docker exec mooncake-{{ inventory_hostname }} pgrep -x mooncake_master >/dev/null
+        sleep 2 && docker exec {{ mooncake_container_name | quote }} pgrep -x mooncake_master >/dev/null
       tags: mooncake
 
     # ==================== 第二阶段：引擎（任务 6，对照 deploy.sh start_engines） ====================

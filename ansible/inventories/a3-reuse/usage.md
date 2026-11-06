@@ -1,43 +1,40 @@
-# A3 Prefill Main KV buffer reuse 使用说明
+# A3 receipt P/D 使用说明
 
 配置入口是 [group_vars/all.yml](group_vars/all.yml)，主机入口是 [inventory.yaml](inventory.yaml)。
-它从原 `a3` 配置复制并精简，只保留 P 侧 Main 共享 HBM 槽、Mooncake Store 和旧 layerwise P/D 流程。
-直接修改 `pd_cluster`，不再选择 `200k`、`1m-v030-*` 等档位。
+本 inventory 使用 P 侧 Main 共享 HBM 槽、Mooncake Store 和 D 侧 Host KV offload。
+配置直接写在 `pd_cluster`。
 
 ## 1. 版本与适用范围
 
-默认镜像固定到目前恢复使用的 Main reuse 实现：P 使用 r05、D 使用 r03，名称在 `engine_images` 中。
-这是各节点本地 Docker tag，不是可从公网拉取的镜像。配置中的 `image` 会按 P/D 角色选择。
-P r05包含已验收的 Main reuse 代码；D r03保留普通 HBM KV，不开启 D Host offload。
-换镜像时必须确认实际安装的源码，不能用原始rc1或旧`dsabase-m1`镜像仅加几个参数代替。
-
-本 inventory 默认使用已验证的普通 layerwise P/D。实验用的 receipt 配置见第 8 节。
+P 和 D 共用本地镜像 `glm52-vllm-ascend:0.30.0-receipt-c76f087d2`。镜像包含该提交的
+804 个包文件和 layerwise 代理脚本。使用 `image_tar` 从共享盘加载即可。
 
 | 项目 | 本配置 |
 |---|---|
 | 节点 | P0/P1：ott9-a31/32；D0/D1：ott9-a33/34 |
 | 并行 | 两侧均TP16 × DP2，每节点1个引擎；CP/DCP保持默认1 |
-| 缓存 | Main与Indexer均INT8，只有P的Main跨层共享，Indexer独立 |
+| 缓存 | BF16 Main、INT8 Indexer，P 的 Main 跨层共享，D 的 Main 落 Host |
 | Main物理槽 | 2个共享槽＋首尾2个独立层，共4槽 |
-| P调度预算 | `max_num_batched_tokens=32784`、`max_num_seqs=1` |
-| 模型长度上限 | 两侧262144；这是配置上限，不是本配置已验收262K端到端的声明 |
-| 执行 | eager、无MTP/speculative；P的KV加载失败策略为fail，D沿用现有模板的recompute |
-| 通信与服务 | RoCE、旧MooncakeLayerwiseConnector＋AscendStoreConnector、D-first代理 |
-| Store | p0单Master，RPC52050；client各贡献40GB，lease TTL300000ms |
+| P 调度预算 | 每引擎 `max_num_batched_tokens=32784`、`max_num_seqs=1` |
+| D 调度预算 | 每引擎 `max_num_batched_tokens=192`、`max_num_seqs=1` |
+| 模型长度上限 | 两侧 65,536，固定 513 blocks |
+| 执行 | eager、关闭 MTP，D 使用 `AsyncReceiptScheduler`，两侧 KV 加载失败策略为 `fail` |
+| 通信与服务 | RoCE、MooncakeLayerwiseConnector receipt、P 侧 AscendStoreConnector、D-first 代理 |
+| Store | p0 独立 Master `mooncake-a3-reuse-receipt-p0`，RPC 52210 |
 | API | P9081、D9900、p0代理8000 |
-| 新容器 | `vllm-ascend-glm52-main-reuse` |
-| 日志目录 | `/mnt/sfs_turbo/g00832294/logs/main-reuse/` |
+| 引擎容器 | `vllm-ascend-glm52-a3-reuse-receipt` |
+| 日志目录 | `/mnt/sfs_turbo/g00832294/logs/a3-reuse-receipt-c76f087d2/` |
 
 32784来自此前P独立1M验收档，保留其MoE预算524544。4112是额外partial-block边界测试档，不作默认性能配置。
 `max_num_batched_tokens`限制每个调度step的新token预算，不是整条请求的总长度。
 增加它通常减少chunk数，也会改变workspace与显存开销；调参后需重新验证。
-`max_num_seqs=1`限制每个P引擎的并行序列数；不要把以前并发4序列的容量/性能直接套过来。
+当前配置用于单请求验收。`a3` 原部署档的每引擎上限为 P64/D32。receipt 按这组上限
+放大 KV 容量时，192 GiB 和 40 GiB 的 D Host KV 预算均在 HIXL 注册阶段失败。
+详细记录见 [runbook §11.62](../../../docs/m1-buffer-reuse-runbook.md)。
 
-本精简文件已经过本地模板生成与语法检查，**尚未按此完整新inventory实机部署验收**。
-四节点按角色选择的本地镜像已通过只读查询；四份生成脚本的Shell语法、连接器及additional-config JSON均已检查。
-它采用当前运行档的P调度参数，将共同模型长度限制为262144以匹配普通D配置。
-既有P独立1M证据见 [验收记录](../../../docs/p-main-buffer-reuse-p-only-1m.md)，不代表P/D 1M。
-最新候选r08的4112档有64K错误答案，见 [回归报告](../../../docs/target-provider-existing-flow-regression.md)；不推荐拿r08作服务镜像。
+同容量候选的 62K 冷请求、回放、生成和全 rank 回收记录见 [runbook §11.60](../../../docs/m1-buffer-reuse-runbook.md)。
+MTP5 压测使用基线镜像叠加源码 `993713305`，配置和结果见
+[runbook §11.71](../../../docs/m1-buffer-reuse-runbook.md#1171-glm-单层-mtp-接入-host-receipt2026-11-07)。
 
 ## 2. 控制机准备和只读检查
 
@@ -59,13 +56,10 @@ SSH使用root，p1/d0/d1显式经ott9-a31跳转；修改主机名或账号时，
 控制机不能直连172.168.4.x，HTTP检查与推理请求必须从跳板机发起。
 
 `check.yml`检查SSH、Docker和各节点需要的镜像。缺镜像时先安装已有构建产物，不能指望公网pull本地tag。
-如已有共享盘镜像tar，可按P/D分别加载（会写Docker镜像存储）：
+可用本 inventory 配置的共享盘 tar 安装镜像：
 
 ```bash
-.venv/bin/ansible-playbook -i "$INVENTORY" playbooks/pull.yml --limit prefill \
-  -e image_tar=/mnt/sfs_turbo/path/to/prefill-image.tar
-.venv/bin/ansible-playbook -i "$INVENTORY" playbooks/pull.yml --limit decode \
-  -e image_tar=/mnt/sfs_turbo/path/to/decode-image.tar
+.venv/bin/ansible-playbook -i "$INVENTORY" playbooks/pull.yml
 ```
 
 tar内的tag必须与 `engine_images` 对上；Mooncake Master镜像也要已存在且与client兼容。
@@ -87,19 +81,16 @@ cat generated/mooncake.json
 `gen.yml`只在控制机写 `ansible/generated/`，不启动集群。所有inventory共用这个输出目录：
 **修改配置后必须用同一个inventory重新gen，再start，不要混用其他inventory生成的mooncake.json。**
 P脚本应包含共享槽数2、独立层`[0,-1]`；D脚本不应包含共享槽参数。
-两侧应有eager、INT8、旧MooncakeLayerwiseConnector和Store；不应有MTP配置、DCP>1或SFA connector。
-`mooncake.json`应直连`172.168.4.237:52050`，协议字段为`ascend`；底层RoCE由环境配置选择。
+两侧应有 eager 和 INT8 Indexer。D 应有 `AsyncReceiptScheduler`、`layerwise_receipt_mode` 和 `sparse_kv_offload_config`。
+`mooncake.json` 直连 `172.168.4.237:52210`，协议字段为 `ascend`。
 
 ## 4. 完整部署与重启
 
-这是会改变服务状态的路径：`start.yml`会删除重建本配置指定的引擎容器，重建`mooncake-p0`，
+这是会改变服务状态的路径。`start.yml`会重建本配置指定的引擎容器与独立 Master，
 在宿主机写日志目录和临时文件，然后启动引擎和proxy。`stop.yml`会删除对应引擎和Master容器。
 按照本项目AGENTS.md的约定，执行这些宿主机写操作前需获得相应授权。
 
-**当前A3已有P r05／D r03在运行，不能直接在它们旁边执行start。**
-新容器名不同，但设备、API端口及Mooncake Master仍共用。先安排维护窗口，检查所有引擎running/waiting均0，
-由原服务负责人按其流程停止原引擎并保留回退容器；再次检查Docker/NPU占用。
-不要用本inventory的`stop.yml`去“清理”原服务，也不要用全局pkill、reset或重启Docker来腾卡。
+从旧 r05/r03 切换时，先确认请求排空，按容器 ID 停止旧引擎并保留回退容器。新旧引擎共用设备和 API 端口。
 
 设备和端口已释放、镜像及生成结果已确认后：
 
@@ -181,21 +172,20 @@ ssh root@ott9-a31 'for h in 172.168.4.230 172.168.4.226; do
 
 ```bash
 .venv/bin/ansible-playbook -i "$INVENTORY" playbooks/logs.yml -e 'target=p0 tail=200'
-ssh root@ott9-a31 'docker exec vllm-ascend-glm52-main-reuse grep -aE "Main-only KV reuse layout|num_blocks:" /mnt/sfs_turbo/g00832294/logs/main-reuse/vllm_p0.log | tail -n 24'
+ssh root@ott9-a31 'grep -aE "Main-only KV reuse layout|NPU KV cache size|num_blocks:" /mnt/sfs_turbo/g00832294/logs/a3-reuse-receipt-c76f087d2/vllm_p0.log | tail -n 24'
 ```
 
 需要看到Main layout实际映射到4槽、Indexer独立及真实block容量；不能只看配置中出现`num_shared_buffers`。
-block数受剩余显存和workspace影响，不要求固定等于历史某个数字。
 验证应包含多chunk、同前缀、并发及断连后请求，且检查答案和错误计数，HTTP200只证明接口成功返回。
-D模板的`kv_load_failure_policy`固定为`recompute`，不能仅靠答案和成功计数证明每个请求都传输了完整KV；
-需要结合D的KV接收记录、external prefix指标及Store range日志确认实际路径。
+按请求 ID 核对 D 的 16 个 rank 的 `published after prepare_decode` 和 `Released target for`。
+前缀回放可结合 P 的 Store 命中记录核对。
 
 ## 6. 常见排查
 
 | 现象 | 优先检查 |
 |---|---|
-| 模型未启动或OOM | 镜像是否真的包含复用代码；共享布局日志；P block预算；D普通HBM容量；chunk和MoE预算 |
-| 200健康但请求一直等 | 是否旧layerwise connector配D-first proxy；D是否先发布目标；两侧TP与地址是否匹配 |
+| 模型未启动或OOM | 共享布局、D Host/NPU 预算、block 数和 MoE workspace |
+| 200健康但请求一直等 | D 是否先发布目标、两侧 TP 与地址、逐 rank 收据 |
 | 首请求原生崩溃 | RoCE preset及额外env是否出现在真实脚本；不要只检查HCCL或随意切HCCS |
 | 缺外部waiter报错 | connector和Store的屏障接线未满足；保留启动拒绝，不要移除断言绕过 |
 | Store前缀/partial覆盖报错 | 保留首次错误、请求身份、token范围和snapshot generation；不要改成忽略KV加载失败 |
@@ -214,9 +204,9 @@ D模板的`kv_load_failure_policy`固定为`recompute`，不能仅靠答案和�
 P独立prefill＋首token已验收的原始配置为 [p-main-buffer-reuse-p-only-1m.yaml](../../profiles/p-main-buffer-reuse-p-only-1m.yaml)。
 其最大长度1048576、chunk32784；只操作两个P，D保持原配置，且P请求只能生成1token。
 该profile设置了`reuse_render_only: true`，通用`start.yml`会拒绝它；完整操作见 [P独立1M文档](../../../docs/p-main-buffer-reuse-p-only-1m.md)。
-不要把本文件的共同`max_model_len`直接改为1M后全量启动普通D，也不要据此声称P/D端到端1M已支持。
+P/D 1M 需要单独验证容量和端到端生命周期。
 
-## 8. Receipt P/D 实验档
+## 8. 独立的 16K receipt 实验档
 
 Decode 模板在 `pd_cluster.decode.receipt_connector_extra` 存在时渲染单个
 `MooncakeLayerwiseConnector`、receipt scheduler 和 `kv_load_failure_policy: fail`。
@@ -226,8 +216,7 @@ Decode 模板在 `pd_cluster.decode.receipt_connector_extra` 存在时渲染单�
 双端使用已验证的同一份 receipt 源码快照、相同 TP、BF16 Main、INT8 Indexer、eager、
 CP/DCP=1、关闭 MTP。P 保留 AscendStore 与逐层 connector，并开启 Main 复用。
 D 的 additional-config 配置 `sparse_kv_offload_config.enabled: true`、
-`host_backend: mooncake` 和 `use_fused_overlap: true`。这两端的镜像底座仍可分别为 r05 和 r03，
-候选的完整源码覆盖包须另外验证，包含 D 运行时需要的 C++ 文件。
+`host_backend: mooncake` 和 `use_fused_overlap: true`。历史实验使用 r05 和 r03 作底座，再覆盖包含 D 运行时 C++ 文件的完整源码包。
 
 实机档的 16,384 上下文、4,112 chunk、B2 及首尾独立层配置保存在
 [`p-main-buffer-reuse-receipt.yaml`](../../profiles/p-main-buffer-reuse-receipt.yaml)。

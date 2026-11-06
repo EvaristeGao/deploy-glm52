@@ -19,6 +19,7 @@ groups / hostvars / pd_cluster 派生，不依赖外部解析脚本。
 """
 import os
 from itertools import product as _itertools_product
+from shlex import quote
 
 import yaml
 from jinja2 import Environment, StrictUndefined
@@ -180,6 +181,7 @@ def _new_env(native=True):
     env.filters["product"] = lambda *iterables: list(_itertools_product(*iterables))
     # Ansible 内置集合过滤（proxy 白名单 assert 校验用）：difference = 差集
     env.filters["difference"] = lambda a, b: [x for x in a if x not in b]
+    env.filters["quote"] = quote
     return env
 
 
@@ -651,18 +653,25 @@ def test_a3_v030_lw_instance_list_and_proxy_endpoints():
     assert pe["decoder_ports"] == "9900 9900"
 
 
+def _render_mooncake_container_shell(playbook, task_prefix, ctx):
+    path = os.path.join(os.path.dirname(START_YML), playbook)
+    with open(path, encoding="utf-8") as source:
+        play = yaml.safe_load(source)[0]
+    env = _new_env(native=False)
+    name = env.from_string(play["vars"]["mooncake_container_name"]).render(**ctx)
+    task = next(task for task in play["tasks"] if task.get("name", "").startswith(task_prefix))
+    return env.from_string(task["shell"]).render(**ctx, mooncake_container_name=name)
+
+
 def test_mooncake_container_certs_bind_only_in_ha_mode():
     """etcd 证书挂载只在 HA 模式出现（start.yml「起 mooncake 容器」）。
 
     单主模式没有 etcd，若仍 bind etcd.certs_dir，docker 会在宿主机创建一个空的
     证书目录；而切回 HA 前又必须确认该目录真实存在。故按 enable_ha 门控。"""
-    env = _new_env(native=False)
-    shell = str(_playbook_task("起 mooncake 容器")["shell"])
-
-    out_ha = env.from_string(shell).render(**_a3_ctx_with_ha(True))
+    out_ha = _render_mooncake_container_shell("start.yml", "起 mooncake 容器", _a3_ctx_with_ha(True))
     assert "certs:/etc/pki/etcd/certs" in out_ha
 
-    out_single = env.from_string(shell).render(**_a3_ctx_with_ha(False))
+    out_single = _render_mooncake_container_shell("start.yml", "起 mooncake 容器", _a3_ctx_with_ha(False))
     assert "certs:/etc/pki/etcd/certs" not in out_single
     # 两种模式都要挂日志目录、用 mooncake 镜像（值从 group_vars 动态读，不硬编码）、只在 proxy 节点起
     mooncake_image = _a3_ctx_with_ha(False)["mooncake"]["image"]
@@ -670,6 +679,17 @@ def test_mooncake_container_certs_bind_only_in_ha_mode():
         assert "/mnt/sfs_turbo/g00832294/logs" in out
         assert mooncake_image in out
         assert "docker run -itd --name mooncake-p0" in out
+
+
+def test_mooncake_start_and_stop_use_the_same_dedicated_container():
+    ctx = _a3_ctx_with_ha(False)
+    name = "mooncake-a3-reuse-receipt-p0"
+    ctx["mooncake"]["container_name"] = name
+    start = _render_mooncake_container_shell("start.yml", "起 mooncake 容器", ctx)
+    stop = _render_mooncake_container_shell("stop.yml", "删 mooncake 容器", ctx)
+    assert f"docker run -itd --name {name} " in start
+    assert f"docker rm -f {name} " in start
+    assert f"docker rm -f {name} " in stop
 
 
 def test_gen_mooncake_json_single_master_points_to_p0():
