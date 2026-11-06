@@ -338,3 +338,15 @@ D 异步调度候选也通过九条 62K 请求和全 rank 回收。冷／回放 
 直接使用协调器持有的快照。九条 62K 实机请求正确并回收，冷目标准备从
 1.36 s 降至 0.75 s，冷／回放 TTFT 中位数为 23.31／4.67 s，同 chunk 一体
 纯 HBM 冷 TTFT 仍领先 3.28 s。见 runbook §11.60。
+
+2026-11-07，并发 10 的 55K 输入、700 token 输出对照中，P 开启 DSA-CP
+并使用 57,344 token budget 后，40 条均完成。TTFT P50/P99 为 10.71/47.41 s，
+原复用档为 37.43/110.41 s，原始 INT8 档为 8.49/49.33 s。见 runbook
+§11.67–70。
+
+GLM MTP 接入了 P 独立 draft 槽和 D Host receipt 生命周期。P 侧使用
+请求内 Store 快照，禁用跨请求前缀缓存，避免复用依赖下一 token 的块尾
+draft KV。并发 10 的短探针 10/10、正式 55K/700 压测 40/40，均通过各自
+D 的 16 个 TP rank receipt 和目标释放检查。D MTP5 将 TPOT P50 从
+349.91 ms 降到 112.80 ms，原始 INT8 档为 44.11 ms。D 候选每台 16 条
+序列、每步 32 token，TopK buffer 实测 33.33 GiB。见 runbook §11.71。

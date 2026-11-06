@@ -1651,3 +1651,317 @@ trace 中 `validate_wire` 对应 scheduler 本地 P/D 检查，`admit` 包含清
 监督脚本退出码为 0，候选容器与独立 Master 已清理。四个原引擎和代理
 恢复健康，两个既有 Master 的 ID 及启动时间与切换前一致。
 本轮生产源码和回归测试见 `vllm-ascend-reuse` 的签署提交 `c76f087d2`。
+
+### 11.61 新镜像部署到 a3-reuse（2026-11-06）
+
+P0 使用 r05 ARM64 底座构建 `glm52-vllm-ascend:0.30.0-receipt-c76f087d2`。
+镜像覆盖 `c76f087d2` 的 804 个 `vllm_ascend` 包文件及 layerwise 代理，
+镜像内清单逐文件校验通过。独立无 NPU 容器通过 9 项 scheduler 生命周期用例。
+四节点加载同一镜像 ID `sha256:1f7fb2c68732a1af9c10ec6ed52aed7f244024ce8b755193f96288224b80ba28`。
+
+`a3-reuse` 采用 65,536 上下文、513 blocks、P chunk 32,784、BF16 Main、
+INT8 Indexer、D Host offload 和 `AsyncReceiptScheduler`。P/D 和代理端口保留
+9081／9900／8000。新的独立 Master 监听 52210。Ansible 停止并保留旧四个引擎
+容器，新四个引擎和代理均就绪，两个既有 Master 的容器 ID 与启动时间一致。
+
+约 4.9K 和 62K 各跑冷请求、前缀回放及 29-token 连续生成，六条结果正确，
+D0 每条均有 16 rank 就绪及目标回收记录，D1 通过健康检查。服务保持运行。
+镜像 tar 位于共享盘 `build/images/0.30.0-receipt-c76f087d2.tar`，构建、
+部署和请求证据在 `artifacts/p-main-buffer-reuse/image-receipt-c76f087d2/`。
+
+### 11.62 55K 输入／700 输出的并发配置（2026-11-06）
+
+§11.61 的单请求验收档将每个引擎限制为一条序列和 513 blocks。首轮压测在
+并发 20 时，每台 D 实际运行 1 条、等待 9 条。这轮已停止，数据不计入并发结果。
+
+`a3-reuse` 改用每 P 64 序列、每 D 32 序列，并移除固定 block 数。上下文仍为
+65,536，P/D 的每步 token 预算分别为 32,784 和 192。D 使用异步 receipt、Host KV
+和每引擎 192 GiB 预算。四个引擎沿用 `c76f087d2` 镜像。Ansible 用独立容器切换，
+保留上一套容器及原 Mooncake Master。实测 KV 容量为 P0 2,884,864、P1 2,884,736，
+两台 D 各 2,097,280 tokens。每台 D 的 16,385 blocks 受调度上限约束，Host 计划占用
+175.51 GiB，另有 0.46 GiB 对齐预留。
+
+192 GiB 档的两台 D 均在启动时失败。共享 Host 池完成分配，HIXL 随后对
+63.11 GiB 的单个 NPU 映射区调用 `HcommMemReg` 失败，原生错误为 503900，
+两个引擎均未就绪。上一套单请求档的同路径成功注册过 5.79 GiB 的区间。
+这两条数据无法确定单区上限或每卡累计上限。完整输出见
+`artifacts/p-main-buffer-reuse/receipt-concurrency-c76f087d2/`。
+
+40 GiB 档沿用原镜像和 P64/D32。两台 D 均规划 3,691 blocks、472,448 KV
+tokens 和 39.54 GiB Host KV，按容量可放约 8 条 55K 请求。实际注册区大小为
+42,529,898,496 字节。D0 的 16 个 rank 中 8 个成功，D1 有 7 个成功。两台机器
+的 8 张物理卡均各有两个 chip，成功的卡都只有一个 chip 的 rank 注册通过。
+现象提示同一物理卡的两个 chip 可能争用注册资源，具体配额仍需单独验证。
+两台 D 均未就绪，端到端探针和压测未发出。证据见
+`artifacts/p-main-buffer-reuse/receipt-host40-c76f087d2/`。
+Ansible 已按原容器 ID 恢复单请求配置，四引擎和代理健康。通过代理的
+4,871-token 检查返回预期答案，D0 的 16 个 rank 均完成准备并回收目标。
+三个 Mooncake Master 的容器 ID 与启动时间一致。
+
+### 11.63 D Host KV 26 GiB 与共享内存大页（2026-11-06）
+
+26 GiB 档保留 P64/D32，D0/D1 各自的 16 个 rank 均成功注册
+27,643,871,232 字节的 Host KV 映射区。每台 D 有 2,384 blocks、305,152 KV
+tokens。代理的 55,273-token 冷请求正确返回，首 token 约 41.54 s，随后完成目标
+回收。抽查两台 D 的共享内存映射时 `ShmemPmdMapped` 为 0，Docker 的
+`/dev/shm` 为私有 tmpfs。
+
+在临时容器内对 `/dev/shm` 设 `huge=always` 后，两台 D 在各执行一次
+`drop_caches=1` 前后均完整映射了 40 GiB 透明大页，`thp_file_fallback` 未增加。
+该对照只运行 Linux mmap 和触页。原始记录见
+`artifacts/p-main-buffer-reuse/receipt-host40-drop1-20261106/`。
+
+### 11.64 D Host KV 256 GiB 与容器透明大页（2026-11-06）
+
+使用 `c76f087d2`，仅替换 D0/D1 容器。D 的 `max_num_seqs` 设为 48，
+使调度容量覆盖 256 GiB Host 预算。在 worker 启动前执行
+`mount -o remount,huge=always /dev/shm`。宿主机 HugeTLB 预留为 0。
+两台 D 的 Host 池创建进程均有 268,433,408 KiB 的共享映射，全部计入
+`ShmemPmdMapped`。
+
+每台 D 的实际规划是 23,856 blocks、3,053,568 KV tokens。每台 D 的
+16 个 rank 均通过 HIXL，单 rank 的 5 个 Host 区间合计 274,640,666,624
+字节。四个引擎和代理均健康，55,273-token 冷请求正确返回并完成目标回收，
+首 token 31.39 s。候选 D 保持运行，P/代理和三个 Mooncake Master 的容器 ID
+与启动时间通过对比。证据在
+`artifacts/p-main-buffer-reuse/receipt-host256-thp-20261106/`。
+
+HIXL 定位手册的 MR 失败场景列出相同的 `-13 / 128102` 错误，建议为大容量
+Host 区间使用 mmap 和预留大页。本轮实测的是容器 tmpfs 透明大页。
+
+### 11.65 55K 输入／700 输出压测及 P 调度观测（2026-11-06）
+
+在 §11.64 的服务上运行 benchmark-tool v1.7。每档计划 40 条请求。
+并发 20 的 40 条均返回完整 SSE 和实际 700 个输出 token。服务端输入范围为
+53,988–55,006 tokens，耗时 762.13 s，输出吞吐 36.74 token/s，
+TTFT P50/P99 为 50.98/210.54 s。首批 20 条 TTFT 为 29.44–211.12 s；
+其余 20 条随完成陆续提交，TTFT 为 21.35–56.84 s。
+
+应用户要求停止客户端。并发 30 留有 21 条完整结果，未形成整档统计，并发 40
+未开始。停测后两台 D 的运行与等待请求清零，代理健康。
+
+15 s 的 Prometheus 采样和 vLLM 自己的 10 s 定时日志均观测到每台 P
+running 峰值为 2，KV 占用峰值约 3%。P 每步 32,784 token 的预算先用于
+running 请求，等待请求只使用剩余预算。每台 P 的 `max_num_seqs=64` 为
+调度上限。采样在 API 进程读取已发布的计数，未做开关采样的时延对照。
+原始日志在
+`artifacts/benchmark-tool-v1.7/run-55k-700-c20-30-40-20261106/host256-thp/`。
+
+### 11.66 原始块级 P/D 性能对照（2026-11-06）
+
+从 `67397b9` 渲染 `1m-v030`，使用原版 `quay.io/ascend/vllm-ascend:v0.30.0rc1-a3`
+和同一份 W4A8C8 权重。P 为 TP16×DP2，D 为 TP8×DP4；两侧保留原档 INT8 KV、
+DCP 和 MTP，使用块级 `MooncakeConnectorV1` 直传。禁用 Store 池化，并用独立容器和
+日志目录。采用 v1.7、同一随机种子、每档 40 条、55K 输入和 700 输出。首轮额外的
+语义探针触发了提前回退；正式轮在服务健康后直接发压测，只按 SSE 与 usage 统计。
+
+| 客户端并发 | 完整 700-token 响应 | 整档耗时（s） | 输出（token/s） | TTFT P50/P99（s） | TPOT P50（ms） |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 | 40/40 | 306.09 | 91.48 | 8.49 / 49.33 | 44.11 |
+| 20 | 40/40 | 225.07 | 124.40 | 33.26 / 70.29 | 37.62 |
+| 30 | 40/40 | 226.90 | 123.40 | 39.72 / 86.64 | 158.72 |
+| 40 | 40/40 | 214.66 | 130.44 | 60.09 / 110.89 | 108.65 |
+
+并发 20 有一条含 `[DONE]`、`finish=length` 和 700 个输出 token 的响应未出现可见正文，
+因此 TTFT／TPOT 使用其余 39 条；usage 计数的总输出吞吐纳入全部 40 条。
+同并发的 §11.65 receipt 档为 36.74 token/s、TTFT P50/P99 50.98/210.54 s。
+原始档每台 P 采样 running 峰值也为 2。两档的 D 拓扑、MTP、图模式、DCP、KV 精度
+和 chunk 同时不同。证据在
+`artifacts/benchmark-tool-v1.7/run-55k-700-c20-30-40-20261106/original-v030-performance/`。
+
+并发 10 在同一原始配置重启后单独运行，沿用随机种子和请求参数，服务端实际输入
+53,988–55,006 tokens，端到端 P50 为 51.35 s。两台 P 的等待队列采样峰值各为 3，
+并发 20 时各为 8。并发 10 的原始记录在
+`artifacts/benchmark-tool-v1.7/run-55k-700-c20-30-40-20261106/original-v030-c10/`。
+
+### 11.67 并发 10 的原始档与复用档对照（2026-11-06）
+
+复用档使用 `c76f087d2`，P 开启 Main reuse，两台 D 各配置 256 GiB Host KV。
+两档服务端逐条输入 token 数一致，范围为 53,988–55,006。40 条均完整返回
+700 个输出 token。原始档 306.09 s、91.48 token/s，复用档 1,175.05 s、
+23.83 token/s。TPOT P50 分别为 44.11 和 330.75 ms。
+
+| TTFT 口径 | 原始档（s） | 复用档（s） |
+| --- | ---: | ---: |
+| 40 条 P50 | 8.49 | 37.43 |
+| 40 条 P99 | 49.33 | 110.41 |
+| 首发 10 条 P50 | 34.48 | 78.16 |
+| 后续 30 条 P50 | 7.82 | 32.54 |
+
+复用档第一条完成请求的 TTFT 为 27.21 s。D 在 13:46:55 开始通知代理，
+13:46:56 发布目标，P 在 13:46:57 完成 Store 查询（0/429），D 的 16 个
+rank 在 13:47:20 完成 `prepare_decode`，13:47:21 报告 KV 接收完成。
+首批 10 条从 D 发布到 P 查询完成为中位 27 s，P 查询完成到 D 全 rank
+接收完成为中位 39 s。后续 30 条对应 4 s 和 25.5 s。秒级日志只区分
+这些边界，后者包含预填充、逐层传输和接收确认。D 目标发布前阶段的中位数
+约为 1 s。复用档 P 的本地及 Store 前缀命中均为零，原始档 P 的定时日志
+也报告零命中。原始档 D 的块级直传日志中，640 次单 rank 传输中位 13.50 ms。
+两档的 P chunk、KV 格式及 DCP，以及 D 拓扑、图模式和 MTP 同时不同。
+
+首次恢复时 P1 的 HIXL 端口 21000 绑定失败。重启 P 后，首轮压测出现 P0
+TP9 KV 写入失败，伴随 HIXL `NOTIFY_WAIT` 超时，停止客户端时 0 条完成。
+完整重启 P/D 后同配置复跑成功，压测后四引擎与代理健康，Mooncake Master
+身份及启动时间一致。日志分别在 `host256-thp-c10/` 和
+`host256-thp-c10-retry/`，均位于上述 benchmark-tool 实验目录下。
+
+### 11.68 并发 10 的同执行配置 HBM 对照（2026-11-06）
+
+独立 Ansible 档使用同一 `c76f087d2` 镜像、W4A8C8 权重、P/D TP16×DP2、
+BF16 Main、INT8 Indexer、CP/DCP=1、eager、无 MTP、异步 D 调度和 65,536 上下文。
+P/D token budget 保持 32,784/192，序列上限保持 64/48。切到块级直传和普通
+HBM KV 后，取消 P Store/共享槽、D Host/receipt 及对应 scheduler，代理切为 P-first。
+两台 D 的实际 HBM 容量各 437,888 tokens，P 为 246,528。整轮零抢占，D 的
+external hit 共 2,197,493 tokens，与 40 条实际输入合计一致。三档逐条输入
+token 数一致，均完成 40 条、每条输出 700 tokens。
+
+| 指标 | 原始 INT8 档 | 同配置 HBM 直传 | 复用 + Host 256 GiB |
+| --- | ---: | ---: | ---: |
+| TTFT P50（s） | 8.49 | 38.83 | 37.43 |
+| 首批 10 条 TTFT P50（s） | 34.48 | 85.29 | 78.16 |
+| 后续 30 条 TTFT P50（s） | 7.82 | 35.14 | 32.54 |
+| 每条首 token 后平均时间（s） | 51.10 | 156.49 | 232.23 |
+| TPOT P50（ms） | 44.11 | 220.55 | 330.75 |
+| 整档耗时（s） | 306.09 | 880.60 | 1,175.05 |
+| 输出吞吐（token/s） | 91.48 | 31.80 | 23.83 |
+
+原始档到复用档每条平均多 209.43 s，其中首 token 后多 181.14 s，占 86.5%。
+同配置 HBM 换到 Host receipt 后，TPOT P50 多 110.20 ms。用 P 空闲、两台 D
+各运行 5 条、窗口两端无 D 等待且 P 完成计数相同的 15 s 采样估算，HBM 和
+Host receipt 的吞吐中位数为 46.67 和 31.00 token/s，对应约 214 和 323 ms/步，
+分别有 6 和 26 个采样窗口。上次同源码单请求审计的 78 层 model submit 中位约
+304 ms，owner 本地校验、可见性和 fence 合计约 1 ms。D Host 路径在每个 decode
+step 为各层准备 TopK 计划、用 fused SFA 取 Host Main KV，并把本步新 KV 写回 Host。
+当前并发采样定位到这条解码路径的净增量，设备搬运、算子和调度的份额未单独计时。
+
+原始档 D 的 MTP 日志合计 67,340 个 draft token、接受 14,584 个，按每步 5 个
+draft 折合每步约产出 2.08 个 token。当前 D receipt 注册要求 eager、CP/DCP=1
+和无 MTP。原始档到同配置 HBM 的 574.52 s 差值同时包含镜像、D 拓扑、图模式、
+MTP、KV 格式和 chunk。原始 P 启用了 DSA-CP、DCP16 和 8,192 chunk，对照 P
+使用普通 SFA、DCP1 和 32,784 chunk。HBM 和 Host receipt 的 TTFT 接近，且 HBM 直传
+的 640 次单 rank 搬运中位数为 337.81 ms。P 端调度到产出首 token 的均值为
+HBM 32.11 s、复用 27.99 s。并发 10 下，换回 HBM 后首 token 差距依然存在，
+对照定位到配置组合，DSA-CP、DCP、chunk 等各项的影响需要单独对照。
+
+原始数据和复算在
+`artifacts/benchmark-tool-v1.7/run-55k-700-c20-30-40-20261106/matched-hbm-eager-c10/`。
+压测后按原容器 ID 恢复复用档，四个引擎和代理通过健康检查，Mooncake Master
+的容器 ID 和启动时间与切换前核验一致。
+
+### 11.69 仅 P 开启 DSA-CP 的并发 10 对照（2026-11-06）
+
+沿用 `c76f087d2`、P Main 复用、BF16 Main、INT8 Indexer、DCP1 和 32,784
+chunk。Ansible 的 P 渲染产物仅增加 `enable_dsa_cp: true`，两个 D 沿用
+原容器。DSA-CP 在 TP 组内切分 query，写回前收齐 KV，继承 SFA 的逐层
+等待和保存入口。启动后每台 P 的逻辑 KV 容量约 246 万 tokens，原档约 288 万。
+
+同 seed 的 40 条请求逐条实际输入长度一致，均完成 700 个输出 token，P 的
+本地、Store 前缀命中及抢占均为零。仅在客户端记录首次非空 SSE 内容的时间。
+
+| TTFT（s） | 原始 INT8 档 | 原复用档 | 复用 + P DSA-CP |
+| --- | ---: | ---: | ---: |
+| 全部 P50 | 8.49 | 37.43 | 10.54 |
+| 全部 P99 | 49.33 | 110.41 | 49.44 |
+| 首发 10 条 P50 | 34.48 | 78.16 | 40.93 |
+| 后续 30 条 P50 | 7.82 | 32.54 | 10.24 |
+
+P 端调度后到首 token 的均值由 27.99 s 降到 7.80 s。首批 P 查完 Store 到
+D 全 rank 收齐 KV 的中位数由 39 s 降到 12.5 s，后续由 25.5 s 降到 5 s。
+开启后首批 D 发布目标到 P 查完 Store 中位 24 s，后续约 2 s。后续请求的
+D 目标准备中位约 1 s，接收完成到首内容约 1.68 s。阶段日志精度为秒，
+P 到 D 的区间包含可重叠的计算和逐层传输。首批 P 阶段也受冷链路影响。
+
+数据在
+`artifacts/benchmark-tool-v1.7/run-55k-700-c20-30-40-20261106/receipt-dsa-cp-c10/`。
+
+### 11.70 DSA-CP 下扩大 P 每步 token 预算（2026-11-06 至 2026-11-07）
+
+两个 P 的渲染脚本仅将 `max_num_batched_tokens` 从 32,784 提到 57,344，
+保留 DSA-CP、Main 复用与 chunked prefill。两个 D 沿用同一组运行中的实例。
+两档与原始 INT8 档逐条实际输入 token 数一致，每条完整输出 700 tokens。
+
+| TTFT（s） | 原始 INT8 档 | DSA-CP 32,784 | DSA-CP 57,344 |
+| --- | ---: | ---: | ---: |
+| 全部 P50 | 8.49 | 10.54 | 10.71 |
+| 全部 P99 | 49.33 | 49.44 | 47.41 |
+| 首发 10 条 P50 | 34.48 | 40.93 | 36.07 |
+| 后续 30 条 P50 | 7.82 | 10.24 | 9.28 |
+
+P 每台逻辑容量由约 246 万降到 235 万 tokens。按每个请求独立的 Store
+snapshot 代次，32,784 档的 40 条分别有 34 条两代、6 条三代，57,344 档
+有 30 条单代、10 条两代。首批 D 发布目标到 P 查完 Store 的中位数由
+24 s 降到 6 s，P 查完到 D 收齐由 12.5 s 增到 20 s。后续 30 条的这两段
+均为 2 s 和 5 s 左右。两档各测一轮，D 在第二轮沿用已热实例。
+
+证据在
+`artifacts/benchmark-tool-v1.7/run-55k-700-c20-30-40-20261106/receipt-dsa-cp-chunk56k-c10/`。
+测试结束按原 ID 恢复两个 P，四引擎和代理健康，D 与 Mooncake Master 的
+容器 ID 和启动时间均通过前后比对。
+
+### 11.71 GLM 单层 MTP 接入 Host receipt（2026-11-07）
+
+P 保留 57,344 token budget 和 DSA-CP，为第 79 个逻辑层单独分配 Main 槽，
+使模型层 `-1` 仍指向第 78 层。D 把 draft KV 纳入现有 receipt 和 Host
+KV 生命周期。draft forward 在 `sample_tokens` 单独登记实际的设备流尾部，
+覆盖主模型 forward 结束后的 KV 访问。测试容器用 `c76f087d2` 镜像叠加
+Python 补丁，最终验证的补丁已提交到 `src/vllm-ascend-reuse` 的
+`993713305`。首轮 P/D 均启用 MTP1。D 仍用 eager、TP16×DP2、BF16 Main、
+INT8 Indexer 和 256 GiB Host 预算。
+
+首轮四引擎启动成功，两个 P 各有 79 个逻辑层、5 个 Main 槽，两个 D
+的 KV 容量各约 181 万 token。10 条 55K 输入、32 token 输出的随机请求
+中，D0 完整返回第一条并累计接受 15/18 个 draft token。其余九条未完成。
+P1 TP3 和 TP11 的 HIXL `HixlBatchPut` 报 `NOTIFY_WAIT` 超时，D 有
+多条 receipt 等待 300 s 后超时。无 MTP 的复用档也曾遇到这类传输超时，
+见 §11.67。首轮只有一个完整样本，需用完整并发结果对比 TPOT。
+
+首轮结束按原 ID 恢复四个引擎和代理，健康检查通过，Mooncake Master
+身份和启动时间核验一致。证据位于
+`artifacts/benchmark-tool-v1.7/run-55k-700-c20-30-40-20261106/receipt-mtp1-probe/`。
+
+MTP1 同档重启后四引擎和代理均健康，D 仍能分配约 181 万 token。新客户端
+漏带模型和驱动目录的只读挂载，在加载 tokenizer 时退出，服务指标确认未
+收到测试请求。后续客户端按首轮挂载重建，离线 tokenizer 与 benchmark
+入口均已通过预检。
+
+块尾的 MTP KV 依赖下一 token，而原公共块键只包含当前块及其前缀。MTP
+候选禁用 P 的跨请求前缀缓存，完整块和部分块都使用请求内快照，同一请求
+跨 chunk 恢复按原版本和租约处理。无 MTP 的档继续使用原公共块键。
+D MTP5 第一次启动配置为 48 条序列、每步 96 token，两台 D 都在分配
+TopK buffer 时 OOM。MTP1 和 MTP5 的每行容量分别为 4,096 和 12,288，
+行数上限同为 96 时，单层申请由约 0.42 GiB 增至 1.27 GiB。只将序列
+上限降到 16 仍允许 96 行。随后只重启候选 D，设为 16 条序列、每步
+32 token，将预分配量恢复到 MTP1 的约 33.33 GiB。该档先跑并发 10 的
+32 token 探针，再跑 40 条 55K 输入、700 token 输出的正式压测。
+
+两台 D 在 16/32 档启动成功，实测各有 1,048,704 token KV 容量。D0
+完整返回两条 55K 请求，记录 27 次投机、135 个 draft token、接受 41 个。
+随后 P1 的跨 chunk 路径在 `save_kv_layer` 访问第 79 层的
+`_compute_done_events` 时越界。连接器注册后更新了 `total_layers`，
+事件列表仍按构造时的 78 层分配。改为每个生产者 step 按注册后的层数
+初始化事件和本步无计算标记。离线复现旧实现的索引错误，并验证修复后的
+第 79 层可以写入。已中止该轮短探针，未启动正式压测。证据位于
+`artifacts/benchmark-tool-v1.7/run-55k-700-c20-30-40-20261106/receipt-mtp5-private-c10/`。
+
+修复后保持 P DSA-CP、57,344 token budget、P MTP1 与 D MTP5 16/32。
+并发 10 的短探针 10/10，D0、D1 各生成 305 个 draft token，分别接受
+109、104 个。正式压测 40/40，每条输出 700 token，三档按提交顺序的实际
+输入长度一致，范围为 53,988–55,006。正式压测 D0 完成 19 条，D1 完成
+21 条，短探针和正式压测的 50 条请求均通过各自 D 的全 16 TP receipt
+及目标释放检查。
+
+| 并发 10 指标 | 原始 INT8 档 | P 优化、D 无 MTP | P 优化、D MTP5 |
+| --- | ---: | ---: | ---: |
+| TTFT P50/P99（s） | 8.49 / 49.33 | 10.71 / 47.41 | 8.97 / 31.72 |
+| 后续 30 条 TTFT P50（s） | 7.82 | 9.28 | 8.86 |
+| TPOT P50/P99（ms） | 44.11 / 149.66 | 349.91 / 364.37 | 112.80 / 188.11 |
+| 输出吞吐（token/s） | 91.48 | 26.28 | 66.15 |
+| 耗时（s） | 306.09 | 1,065.28 | 423.29 |
+
+MTP5 正式压测接在短探针后，首批 TTFT 处于热链路条件。正式阶段两台 D
+合计投机 7,864 次，生成 39,320 个 draft token，接受 20,222 个，按计数
+折合每次投机推进约 3.57 token。P 使用请求内快照，D 每台 KV 容量为
+1,048,704 token。D 16 条序列、每步 32 token 是本次并发 10 的验证配置。
+数据在
+`artifacts/benchmark-tool-v1.7/run-55k-700-c20-30-40-20261106/receipt-mtp5-fence-c10/`。
+压测后停止候选，原四个容器 ID 和启动脚本逐一核验一致，四个引擎与代理
+健康。Mooncake Master 的容器 ID 和启动时间与切换前一致。
