@@ -252,3 +252,89 @@ P 回归141项、receipt37项和组合61项（24子用例、另1项运行时限�
 
 
 第六阶段原生小探针（2026-11-05）：使用4204f545d的749生产Python源码，TP1/两层/23有效tokens同机NPU1源进程→NPU0目标进程，实际bounded注册5个MR，生产ManifestSourceWriter及真实ZMQ地址/回执路径完成device RoCE WRITE；D通过exact账本建立真实receive依赖并发布。全部8个Main/Indexer entry、partial尾部及未写区域字节正确，跨层复用Main源buffers；native消费/在途manager写回阻止提前释放，完成后release/retire/unregister/pool close通过，源/目标正常退出。显式保留tensor/context并先校验再析构TE避免了本轮退出崩溃，但尚未隔离具体free地址或修改生产shutdown，不能证明HBM double free。未跑真实GLM forward/decode、TP共享身份、跨节点WRITE或模型功能/性能。入仓测试receipt_transfer_npu.py与实测脚本非import AST一致（仅Ruff格式/排序/unused清理）。r21曾因准备检查早于复制完成而触发多余D重启，无NPU提交，随后原环境恢复；新监督同步prepare/hash/imports后才stop，准备失败仅清理候选，5条生命周期CPU回归通过。r22探针PASS后正在finally恢复原D对，P未停，终态看pd-transfer-native-order-20261105。功能审查六项缺口继续补齐后再做正式完整模型验收。
+
+### 2026-11-05 Ansible 实机复现 r22
+
+原始 r22 探针已在独立 Ansible 容器复现通过，750 个源码及探针哈希与原始记录一致。
+真实 TP1 device RoCE WRITE、8 个目标 entry 的字节校验及写回／回收通过。随后在隔离 Ansible
+候选上尝试完整 `4204f545d` 模型启动，证据及门禁结果见 runbook §11.52。
+
+接续修复了首请求的 ReceiptScheduler 覆写签名，按实际 vLLM 镜像传递节流参数。
+镜像内 scheduler 控制回归 8 项通过，完整模型重跑见 runbook §11.53。
+
+实机短请求及 5,577／5,578-token 冷请求与重放已通过，D0 全 16 TP receipt 和目标释放
+按请求核对，重放 Store 命中 5,504 token。已修复 P 请求收尾扫描 Store 列表型元数据的问题。
+三 chunk、实际逐层 GET、并发和异常生命周期仍在继续验证，详见 runbook §11.53。
+
+三 chunk 的 8,856／8,857-token 冷／重放请求、78 层实际 Store GET、D0 的 16 rank
+receipt 与释放均通过；重放命中 8,832 token。并发短请求在 D0/D1 分别完整通过。
+取消审计已切换到请求级日志，地址发布前后的取消边界继续验证，见 runbook §11.54。
+
+后续实机重跑再次确认三 chunk 和并发。并发审计曾在采集到 D1 释放日志前超时，
+原始日志已按两个请求 ID 确认 16 rank receipt 和释放，取消用例由下一候选补跑。
+另已在 CPU 和镜像控制测试验证 D 关闭目标的 ACK 会让已有地址缓存的 P writer
+跳过后续写入，完整模型实测待进行。
+
+关闭 ACK 候选已通过三类实机取消，含 Decode 首 token 后断连、地址查询前取消并
+迟到通知，以及首笔真实 RoCE WRITE 后保留目标直至终结证明。最后一例 P0 的
+16 个 writer 均收到目标关闭反馈，D0 随后回收目标，下一请求完整通过。按
+runbook §11.54 接续固定容量的长上下文和普通 HBM 对照。
+
+固定 513 blocks 的 B2/Host 档已通过 4,872、31,754 和 62,474-token
+三组冷请求／前缀重放／连续生成，九条均确认 D0 16 rank receipt 和目标释放。
+62K 重放命中 488/488 Store blocks。旧逐层 P/D 的 HIXL 超时作为旁路故障
+单独记录。普通 HBM 对照按用户口径使用纯一体推理，排在 B1 之后，
+证据见 runbook §11.55。
+
+B1 的三 chunk、双 D 并发、Main 和 Indexer 分别延迟的实机验证均通过。
+P 记录了对应源代次的等待和退休，D 在门闩期间保持未发布，解除后两条
+请求均收齐 16 rank 并回收。
+
+固定 513 blocks 的纯 HBM 对照直接请求原始一体 vLLM，关闭 KV transfer、
+Mooncake、Host offload 和共享槽。与 B2/Host 按实际 token 数配对的九条请求
+均通过。62,474-token 样本的冷请求／重放 TTFT 为纯 HBM 20.80／0.55 s、
+B2/Host 130.28／37.42 s。纯 HBM 重放命中本地 62,464 tokens，外部命中为 0。
+分组数据和按节点的峰值 HBM 见 runbook §11.55。
+
+B3 的三 chunk 冷请求和前缀重放、双 D 并发、Main／Indexer 单路延迟及
+writer 关闭排空均通过，七条请求各收齐 16 rank 并释放。B1/B2/B3 已在
+四节点真实模型上验证 receipt 路径。关闭用例覆盖 native WRITE 成功返回后
+源回调仍在途的竞态，自动 restore-only 和卡死 DMA 的安全终止仍待实机验收。
+详见 runbook §11.56。
+
+62K receipt P/D 首 token 优化已完成实机对照。确认大头是 D 串行目标登记和
+P 的 Mooncake 原生告警输出。按 rank 缩减登记载荷、复用已解析的目标、
+减少 D 清单复制，并用 `MC_LOG_LEVEL=ERROR` 与 32,784 chunk，62K 冷
+TTFT 从 130.28 s 的初始单样本降至 34.29 s 的三次中位数，回放中位数
+15.15 s。D 并行获取的两轮未通过原生链路热身，已撤出工作区。实测阶段、
+样本口径及剩余 HIXL 证据见 runbook §11.57。
+
+独立 Master 上的 TP16 并行获取候选已通过九条 62K 完整 P/D 请求和全 rank
+回收。首条 D 热身请求为 38.19 s，之后两条冷请求为 27.72／28.31 s，
+回放中位数 9.23 s。稳态 D 目标准备约 2.54 s，前轮为 6.39 s。
+后续候选进一步削减租约复制，并行登记及回收已进入验证。见 runbook §11.58。
+
+第二候选并行发送各 D rank 回执，同时并行登记、回收并减少租约复制。
+九条 62K 模型请求正确且全 rank 回收。冷／回放 TTFT 中位数为 24.55／6.01 s，
+冷请求 D 目标准备中位数 1.68 s，D 16 rank 可见性首末相差 12–16 ms。
+同 chunk 纯 HBM 已渲染待复测，长生成 TPOT 单独计。见 runbook §11.58。
+
+32,784 chunk、513 blocks 的同输入纯 HBM 已实测。62K 冷 TTFT 中位数
+20.03 s，完整 P/D 为 24.55 s。29-token 生成的首 token 后中位时长分别为
+5.46 s 和 13.89 s。继续缩减 D 就绪轮询与 lease wire，并采集逐步 decode
+和 fused SFA Host 调用计时。见 runbook §11.59。
+
+D scheduler 单次校验取代逐 rank 的每步保留权 RPC 后，九条 62K 完整 P/D
+请求全部正确并完成回收。冷／回放 TTFT 中位数为 24.00／5.36 s，29-token
+生成的首 token 后中位时长由同探针的 15.40 s 降至 12.87 s。冷 TTFT 距
+同 chunk 纯 HBM 3.97 s，D 目标准备仍占约 1.36 s。模型调用与步间开销
+仍待拆分。D 异步调度已单独渲染候选。见 runbook §11.59。
+
+D 异步调度候选也通过九条 62K 请求和全 rank 回收。冷／回放 TTFT 中位数
+为 23.98／5.28 s。29-token 生成的首 token 后中位时长为 8.91 s，比带同类
+探针的同步候选下降约 31%，纯 HBM 为 5.46 s。异步实现留在独立实验快照。
+
+异步 scheduler 已接入 receipt 源码及 Ansible profile。随后 D 本地清单发布
+直接使用协调器持有的快照。九条 62K 实机请求正确并回收，冷目标准备从
+1.36 s 降至 0.75 s，冷／回放 TTFT 中位数为 23.31／4.67 s，同 chunk 一体
+纯 HBM 冷 TTFT 仍领先 3.28 s。见 runbook §11.60。

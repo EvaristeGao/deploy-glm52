@@ -11,8 +11,7 @@
 P r05包含已验收的 Main reuse 代码；D r03保留普通 HBM KV，不开启 D Host offload。
 换镜像时必须确认实际安装的源码，不能用原始rc1或旧`dsabase-m1`镜像仅加几个参数代替。
 
-新源码提交 `06e16d717` 的 TargetProvider 核心不等于真实receipt接入已完成。
-本配置没有开启新receipt模式，不使用SFA/MemFabric connector；同事的新P/D connector仍需单独联调。
+本 inventory 默认使用已验证的普通 layerwise P/D。实验用的 receipt 配置见第 8 节。
 
 | 项目 | 本配置 |
 |---|---|
@@ -216,3 +215,32 @@ P独立prefill＋首token已验收的原始配置为 [p-main-buffer-reuse-p-only
 其最大长度1048576、chunk32784；只操作两个P，D保持原配置，且P请求只能生成1token。
 该profile设置了`reuse_render_only: true`，通用`start.yml`会拒绝它；完整操作见 [P独立1M文档](../../../docs/p-main-buffer-reuse-p-only-1m.md)。
 不要把本文件的共同`max_model_len`直接改为1M后全量启动普通D，也不要据此声称P/D端到端1M已支持。
+
+## 8. Receipt P/D 实验档
+
+Decode 模板在 `pd_cluster.decode.receipt_connector_extra` 存在时渲染单个
+`MooncakeLayerwiseConnector`、receipt scheduler 和 `kv_load_failure_policy: fail`。
+该字段提供 `layerwise_receipt_mode: true`、`target_owner_rpc_base_port` 和
+`target_retention_rpc_port`。TP16 每台 D 预留 16 个连续 owner 端口和一个独立 retention 端口。
+
+双端使用已验证的同一份 receipt 源码快照、相同 TP、BF16 Main、INT8 Indexer、eager、
+CP/DCP=1、关闭 MTP。P 保留 AscendStore 与逐层 connector，并开启 Main 复用。
+D 的 additional-config 配置 `sparse_kv_offload_config.enabled: true`、
+`host_backend: mooncake` 和 `use_fused_overlap: true`。这两端的镜像底座仍可分别为 r05 和 r03，
+候选的完整源码覆盖包须另外验证，包含 D 运行时需要的 C++ 文件。
+
+实机档的 16,384 上下文、4,112 chunk、B2 及首尾独立层配置保存在
+[`p-main-buffer-reuse-receipt.yaml`](../../profiles/p-main-buffer-reuse-receipt.yaml)。
+从 `ansible/` 渲染，产物写入 `artifacts/p-main-buffer-reuse/receipt-profile-render/`。
+该 profile 默认在 D 选用 `AsyncReceiptScheduler`。将 `pd_cluster.decode.async_scheduling`
+设为 `false` 可切回同步 `ReceiptScheduler`，两者都使用 receipt 的目标保留和回收门禁。
+
+```bash
+.venv/bin/ansible-playbook -i inventories/a3-reuse/inventory.yaml \
+  -e @profiles/p-main-buffer-reuse-receipt.yaml playbooks/gen.yml
+```
+
+该档保留 `reuse_render_only: true`。实机使用监督脚本分阶段启动，先在独立容器和
+Master（52150）验证源码覆盖，再停止已核对 ID 的基线容器并启动引擎。验证结束后
+按相同 ID 恢复基线。候选端口为 P 9181、D 9910、代理 8100。
+短请求、三 chunk 冷请求与重放、双 D 并发和取消记录见 [runbook §11.54](../../../docs/m1-buffer-reuse-runbook.md)。

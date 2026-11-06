@@ -9,6 +9,8 @@
    渲染结果无多余空行）；同一行内仅取值的分支用内联条件表达式（'A' if cond else 'B'）。 #}
 {# v0.30 文档档位标记：开关搬进 additional-config、env 精简集（见 group_vars pd_cluster.v030_env） #}
 {% set v030 = pd_cluster.v030_env | default(false) %}
+{% set receipt_extra = pd_cluster.decode.receipt_connector_extra | default(none) %}
+{% set decode_async = pd_cluster.decode.async_scheduling | default(receipt_extra is none) %}
 nic_name="{{ nic }}"
 local_ip="{{ ip }}"
 
@@ -134,6 +136,12 @@ vllm serve {{ model_path }} \
     --data-parallel-address $5 \
     --data-parallel-rpc-port $6 \
     --tensor-parallel-size $7 \
+{% if receipt_extra is not none %}
+    --scheduler-cls vllm_ascend.core.receipt_scheduler.{{ 'AsyncReceiptScheduler' if decode_async else 'ReceiptScheduler' }} \
+{% endif %}
+{% if pd_cluster.decode.enable_log_requests | default(false) %}
+    --enable-log-requests \
+{% endif %}
     --enable-expert-parallel \
 {# ---- prefix caching：官方 A3 PD 参考的 decode 脚本一律不带此参数（vLLM 默认关，等价 --no-enable-）；
    默认开以保持 A2 与既有渲染不变，A3 各档在 group_vars 里显式给 false ---- #}
@@ -144,9 +152,10 @@ vllm serve {{ model_path }} \
 {% endif %}
     --seed 1024 \
     --served-model-name {{ served_model_name }} \
-{# async-scheduling：默认开；layerwise 验证档关掉（官方要求先纯 eager 验证） #}
-{% if pd_cluster.decode.async_scheduling | default(true) %}
+{% if decode_async %}
     --async-scheduling \
+{% elif receipt_extra is not none %}
+    --no-async-scheduling \
 {% endif %}
     --max-model-len {{ max_model_len }} \
     --max-num-batched-tokens {{ pd_cluster.decode.max_num_batched_tokens | default('192' if cluster_type == "a3" else '256') }} \
@@ -207,7 +216,17 @@ vllm serve {{ model_path }} \
       · 主 KV 必须是 BF16 ⇒ 本档不渲染 --kv-cache-dtype（int8 会被 _validate_preconditions 拒）
    2) mooncake.enabled=true → MultiConnector(Ascend Store KV 池 + MooncakeConnectorV1)
    3) 其余 → 直连 MooncakeConnectorV1 ---- #}
-{% if pd_cluster.single_store_connector | default(false) %}
+{% if receipt_extra is not none %}
+{# Host-offloaded Main has no device tensor for a Decode Store child. #}
+    --kv-transfer-config \
+    '{
+    "kv_connector": "MooncakeLayerwiseConnector",
+    "kv_role": "kv_consumer",
+    "kv_port": "{{ kv_port }}",
+    "kv_load_failure_policy": "fail",
+    "kv_connector_extra_config": {{ receipt_extra | to_json }}
+    }' \
+{% elif pd_cluster.single_store_connector | default(false) %}
 {% set lw = pd_cluster.layerwise | default({}) %}
     --kv-transfer-config \
     '{

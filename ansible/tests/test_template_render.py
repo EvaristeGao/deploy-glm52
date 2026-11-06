@@ -35,7 +35,9 @@ def _env():
     #   块标签独立成行时其尾部换行被吃掉，渲染输出无空行——否则本测试渲染出的空行是
     #   实际 gen 不会产生的假象，测不出模板换行回归。
     # StrictUndefined：模板里引用了未提供的变量会直接抛错，杜绝静默漏替换
-    return Environment(loader=FileSystemLoader(TPL_DIR), undefined=StrictUndefined, trim_blocks=True)
+    env = Environment(loader=FileSystemLoader(TPL_DIR), undefined=StrictUndefined, trim_blocks=True)
+    env.filters["to_json"] = json.dumps
+    return env
 
 
 def _ctx(role, cluster_type=None, mooncake_enabled=None, gv=None, idx=0):
@@ -198,6 +200,43 @@ def test_decode_is_kv_consumer_with_async_load():
     out = _render_decode(mooncake_enabled=True)
     assert '"kv_role": "kv_consumer"' in out
     assert '"load_async": true' in out
+
+
+@pytest.mark.parametrize("async_scheduling", [None, False, True])
+def test_a3_receipt_decode_uses_only_the_layerwise_connector(async_scheduling):
+    path = os.path.join(ANSIBLE_DIR, "inventories", "a3-reuse", "group_vars", "all.yml")
+    with open(path) as source:
+        group_vars = yaml.safe_load(source)
+    group_vars["model"]["served_model_name"] = group_vars["model_name"]
+    assert "--scheduler-cls" not in _render("decode", gv=group_vars)
+    receipt = {
+        "layerwise_receipt_mode": True,
+        "target_owner_rpc_base_port": 33100,
+        "target_retention_rpc_port": 33120,
+    }
+    group_vars["pd_cluster"]["decode"]["receipt_connector_extra"] = receipt
+    group_vars["pd_cluster"]["decode"]["enable_log_requests"] = True
+    if async_scheduling is None:
+        group_vars["pd_cluster"]["decode"].pop("async_scheduling", None)
+    else:
+        group_vars["pd_cluster"]["decode"]["async_scheduling"] = async_scheduling
+    decode = _render("decode", gv=group_vars)
+    config = json.loads(decode.split("--kv-transfer-config")[1].split("'")[1])
+    assert config == {
+        "kv_connector": "MooncakeLayerwiseConnector",
+        "kv_role": "kv_consumer",
+        "kv_port": "30200",
+        "kv_load_failure_policy": "fail",
+        "kv_connector_extra_config": receipt,
+    }
+    scheduler = "AsyncReceiptScheduler" if async_scheduling else "ReceiptScheduler"
+    flag = "--async-scheduling" if async_scheduling else "--no-async-scheduling"
+    assert f"--scheduler-cls vllm_ascend.core.receipt_scheduler.{scheduler}" in decode
+    assert f"    {flag} " in decode
+    assert "--enable-log-requests" in decode
+    prefill = _render("prefill", gv=group_vars)
+    assert '"kv_connector": "AscendStoreConnector"' in prefill
+    assert "layerwise_receipt_mode" not in prefill
 
 
 def test_decode_compilation_config_full_decode_only():
