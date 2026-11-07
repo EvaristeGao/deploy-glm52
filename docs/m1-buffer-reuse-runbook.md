@@ -1965,3 +1965,322 @@ MTP5 正式压测接在短探针后，首批 TTFT 处于热链路条件。正式
 `artifacts/benchmark-tool-v1.7/run-55k-700-c20-30-40-20261106/receipt-mtp5-fence-c10/`。
 压测后停止候选，原四个容器 ID 和启动脚本逐一核验一致，四个引擎与代理
 健康。Mooncake Master 的容器 ID 和启动时间与切换前一致。
+
+### 11.72 三档并发 10/20 复测（2026-11-07）
+
+同一份 GLM-5.2 W4A8C8 权重和 v1.7 `performance-test` 客户端，随机种子
+20261106。每档用新引擎先跑并发 10，再复用引擎跑并发 20。每组 40 条，
+实际输入逐条长度在六组之间一致，为 53,988–55,006 token。六组均完整返回
+40×700 token，按 SSE 和 usage 统计。
+
+| 档位 | P / D 拓扑 | P / D DCP | Main / Indexer | KV 路径 |
+| --- | --- | --- | --- | --- |
+| 原始 v0.30 | TP16×DP2 / TP8×DP4 | 16 / 8 | INT8 / INT8 | 原版 `1m-v030`，块级直传 |
+| `1m(dcp)` | TP16×DP2 / TP4×DP8 | 16 / 4 | BF16 / INT8 | `1m` 兼容档，块级直传 |
+| Main reuse + Host MTP5 | TP16×DP2 / TP16×DP2 | 1 / 1 | BF16 / INT8 | P 复用、D Host receipt |
+
+前两档共用原版 v0.30.0rc1 镜像，关闭 Store 池化，最大上下文均为
+1,048,576。原始档的实际启动脚本与 §11.66 对照一致。`1m(dcp)` 按旧
+`1m` 拓扑渲染，将 Indexer C8 参数迁移为显式 INT8。八个 D 实例各有
+1,476,608 token KV 容量。我们的档使用 `c76f087d2` 镜像叠加
+`993713305` 的已验证源码，最大上下文 65,536。P 开 DSA-CP、MTP1 和
+57,344 token budget，D 开 MTP5、Host 256 GiB，每实例 16 条序列、
+每步 32 token。D 实测每实例 1,048,704 token KV 容量。
+
+| 档位 | 并发 | 完成 | TTFT P50 / P99（s） | TPOT P50 / P99（ms） | 输出吞吐（token/s） | 耗时（s） |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 原始 v0.30 | 10 | 40/40 | 8.03 / 52.23 | 42.32 / 153.48 | 98.90 | 283.12 |
+| 原始 v0.30 | 20 | 40/40 | 14.14 / 63.23 | 132.94 / 181.27 | 107.80 | 259.74 |
+| `1m(dcp)` | 10 | 40/40 | 11.85 / 58.14 | 45.03 / 56.29 | 130.27 | 214.94 |
+| `1m(dcp)` | 20 | 40/40 | 28.16 / 66.98 | 48.78 / 68.75 | 175.88 | 159.20 |
+| Main reuse + Host MTP5 | 10 | 40/40 | 9.00 / 54.49 | 123.01 / 177.33 | 61.27 | 457.01 |
+| Main reuse + Host MTP5 | 20 | 40/40 | 86.31 / 146.68 | 116.44 / 180.76 | 65.37 | 428.30 |
+
+我们的档在并发 10 的首批和后续 TTFT P50 分别为 49.48 s 和 8.39 s，
+原始档为 34.71 s 和 7.34 s。并发 20 时，两台 D 合计 running 峰值仍为
+10。P 空闲的多个采样点中，D0/D1 各有 5 条 running、5 条 waiting，
+后续 20 条 TTFT P50 为 91.01 s。每台 D 的 32 token 预算只能容纳五条
+请求同时执行完整的六位置验证。该档的 80 条请求均逐条核对了各自 D 的
+16 个 TP rank receipt 及目标释放。
+
+原始档上轮并发 20 从冷引擎开始，本轮接在并发 10 后。两轮采样的 D
+running 峰值分别为 13 和 20，按投机日志估算，每步平均推进约 3.1 和
+1.6 token。这两个差异均影响 TPOT，记录只用于比较这两次实测。
+
+可复算数据、实际启动脚本及各档采样位于
+`artifacts/benchmark-tool-v1.7/retest-55k-700-c10-c20-20261107/`。
+测试结束后，原四个容器及启动脚本逐一核验一致，四引擎与代理均健康。
+三轮前后的 Mooncake Master 容器 ID 和启动时间核验一致。
+
+### 11.73 参考 DSA Offload 指南的新 layerwise 拓扑（2026-11-07，已完成）
+
+以 sig-ai-inference 指南固定提交
+`b4965c0625c9f89ffd6c8f61dee6f8ed2f62cc8b` 的脚本与参数为参考，
+创建独立 inventory `ansible/inventories/a3-layerwise-guide/` 和
+`ansible/dsa-layerwise/` playbooks。开发源码仍为
+`p-main-buffer-reuse@993713305`，其与 `maz/dsa_offload_rebase_30`
+的 merge-base 为 `4234a1f18`。
+
+保留 P MultiConnector、Main reuse、逐层 Store 与 PD SourceReady，D
+Mooncake Host、AsyncReceiptScheduler、全 TP receipt 及 D-first 代理。
+当前 registered target owner 要求 eager，SourceReady writer 要求等 TP 和
+CP/DCP1，因此采用 P/D 各 TP8×DP4，每节点两个显式隔离设备的外部 DP
+实例。每个 D 实例的 owner RPC/retention 端口独立。P 开 enable_dsa_cp，
+其余主要参数为 1M 上下文、16K chunk、P/D MTP1/3、D 8 seq/32 token、
+Host 100 GiB/实例、TopK4096、LRU16，P/D utilization 0.75/0.88。
+完整差异见 `ansible/dsa-layerwise/README.md`。
+
+首轮镜像基于已验证的 `c76f087d2` 镜像，保持 CANN9.1、
+Mooncake0.3.13.post1 和已有编译算子，复制开发提交完整源码与代理，
+校验 807 个源文件。镜像
+`glm52-vllm-ascend:0.30.0-layerwise-guide-993713305` 的 ID 为
+`sha256:1f324cd039ed7a7388dd41484aa57b99b565048289c40485363a2803dc3e52d3`。
+构建日志与镜像导出在
+`/mnt/sfs_turbo/g00832294/layerwise-guide/build/993713305/`。
+本轮 CANN9.2/pr3952 的兼容性尚待验证。
+
+gen 的四节点 shell 语法检查和 playbook 语法检查通过，镜像构建完成，
+正在 prepare。prepare 捕获原容器 ID 和实际启动命令，新容器使用独立标签
+和 private IPC，D 在容器内为 shm 设置 huge=always。start 仅切换捕获的
+四个 vLLM 容器，先检查原引擎空闲及 NPU 进程归属，再启动独立 Master、
+八个引擎与代理。新服务的实测容量、请求和性能结果待启动后补充。
+
+首次切换时旧 D 容器的 Docker stop 返回 exit-event 超时，稍后两台均确认
+exited。容器管理脚本增加按捕获 ID 等待实际退出状态的逻辑。
+首轮 P 启动遇到 vLLM 0.30 的加载参数校验，
+`enable_multithread_load does not support safetensors_load_strategy='prefetch'`。
+已按指南保持 P 的多线程 lazy 加载，D 使用 prefetch。首轮 P 日志保存在
+`artifacts/layerwise-guide/20261107/first-prefill-failure.tar.gz`，
+当前仅重启 P 两节点，D 继续完成本轮权重加载。
+
+第二轮 P 在 KV 布局阶段命中
+`Mooncake Main-only reuse with MTP requires prefix caching disabled`。
+已关闭 P 跨请求 prefix caching，同一请求跨 chunk 的 Store 快照仍保留。
+第三轮八个引擎与代理全部就绪，代理报告 P/D 各四个实例。P 各有
+79 个逻辑层、5 个 Main 槽和 22 个私有 Indexer，block 数为
+14,887／14,888，约 190 万 token。D 各有 9,174 个 block，
+1,174,272 token，Host 实际约 99.53 GiB。DCP1、eager 与 MTP1/3 均在
+实际进程参数和日志中确认。
+
+初步功能验证共 12 条，含短请求、四并发 33,661 token 多 chunk 请求、
+重复前缀的新请求，全部返回 MAPLE／QUARTZ。四个 D 实例均有流量，每条
+请求的 8 TP rank 发布与目标释放检查通过。首次脚本即时扫描共享日志时漏读
+部分释放记录，已改为有界等待日志可见，使用原请求记录重新核验通过。
+请求与审计证据为 `artifacts/layerwise-guide/20261107/smoke*.json*`。
+
+1,047,256 token 首测在约 305 秒结束、零输出，D 明确记录固定
+300 秒 receipt watchdog 超时。P 收到 `Peer closed target` 后仍在完成剩余
+prefill。为覆盖长 prefill，开发分支新增已签名提交 `15d342c0b`，通过
+`layerwise_receipt_timeout_s` 显式配置总交付期限，默认维持 300 秒，
+新 1M 档设为 7,200 秒。连接器实际依赖环境的 44 项测试全部通过，新增
+默认期限、自定义期限及非法值回归。旧 no-compute 测试夹具补齐有效元数据，
+源实现行为保持原逻辑。修改文件的 pre-commit 检查全部通过。扩大 Store CPU
+检查为 268 项，候选与干净 `993713305` 的 6 个 failure、1 个 error 完全一致，
+属于既有 KVPP／测试夹具问题。
+
+最新 inventory 指向 `15d342c0b`，新容器名带 `-wd`、日志目录为
+`tp8-dp4-1m-wd`。镜像构建、四节点准备和切换均完成，八个引擎及代理健康。
+实际 P 布局仍为 79 逻辑层／5 Main 槽／22 私有 Indexer；独立 Master 总容量
+640 GiB。修复版再次通过 12 条请求，含四并发 33,660 token 多 chunk 和重复
+前缀新请求，四个 D 的每条请求均有全 8 rank receipt 和目标释放。
+首轮短请求的 `MAPLE.` 被脚本的严格字面比较误判，调整为只容许目标词后单个
+句末标点，重跑完整请求集与生命周期审计通过。证据为
+`artifacts/layerwise-guide/20261107/wd-smoke-r2.jsonl`，stderr 为空。
+共享日志可见性等待仍保持有界。1M 端到端尚未复测，不能据此宣称修复已通过
+1M 验收。首测日志和旧容器保留。
+CANN9.2＋pr3952 的独立构建在进行，节点访问 GitHub 失败后，改用已验证镜像内
+干净的 vLLM `ced6857` 提交归档，以及控制机分发的 Mooncake、pybind11、
+yalantinglibs 固定版本源码。P 初始化期间曾仅暂停私有 PID namespace 内的
+构建进程，短回归结束后已恢复，并限定该构建容器 16 CPU；未修改宿主内核或
+其它服务。构建的实际存活进程与日志需继续跟踪。
+
+原生依赖栈后续遇到两项可复现的构建问题。FLA 下载 URL 的目录应为
+`flash-linear-attention-npu-a3`，不是下划线形式；镜像脚本中注释掉的旧摘要
+也与现有 Release 不一致。控制机实际下载的 SHA256 为
+`0e0febfe0b524df54c02dead985b787cf51f276ef904e4c2f88c5d43707a370b`，
+与官方 GitHub `v26.9.1-release` 的 aarch64 asset digest 一致，已固定并启用
+校验。首次修正构建上下文导致 `COPY .` 缓存失效，已在重复编译前停止该构建，
+从已完成编译、仅 FLA 下载失败的构建容器快照继续安装，没有修改服务容器。
+恢复记录在共享构建目录的 `Dockerfile.ascend-recover` 和 `build-recover.log`。
+
+Mooncake 的 `dependencies_openeuler.sh` 未安装 `msgpack.hpp`，openEuler RPM
+仓库也没有对应包。按其上游 `dependencies.sh` 已有做法，补充固定
+`msgpack-c@919908742b4fdbc575e77fe1a8657e70c9573c44`（cpp-7.0.0）头文件，
+已通过先前失败位置，完整编译仍在进行。构建入口已同步修正上述依赖，拆开
+依赖安装、编译和 wheel 打包层；源码差异校验确保 Python 镜像不会引用不同
+C++／构建依赖的 SDK。依赖 SDK 与最终服务镜像使用独立标签。
+
+CANN9.2 的 SDK 构建、wheel 打包和导出已完成，SDK ID 为
+`sha256:04b8019a8292542a3f6e82109c875ca829d36855a7155c81e4461da5744e89c6`。
+最新服务镜像 `glm52-vllm-ascend:0.30.0-layerwise-guide-15d342c0b-cann92`
+的 ID 为 `sha256:d805ff2d015abfbfd780dcffb1b46790f62fc150538677064153895832af39da`，
+已通过完整源码摘要检查并导出，正在分发。运行包为 vLLM 0.30.0+empty、
+vLLM-Ascend 0.30.0、torch-npu 2.10.0.post7、Triton-Ascend 3.6.0.post2、
+MemFabric 1.3.0、FLA 26.9.1。新 Mooncake 的包版本仍为 0.3.13，因此用
+固定提交 `7bfe1cc` 和 wheel SHA256
+`78811cbb73d08fe47a3e52e26cc76c096af015f0d706352f582c876fc02c74e3`
+区分实际实现。元数据证据为 `native-sdk-metadata.json`，运行验证尚未开始。
+
+随后四节点镜像 ID、807 文件摘要、私有 shm 配置均通过，旧引擎空闲检查、
+停止和 NPU 归属检查通过。Ansible 启动完成，八个引擎及代理健康。新栈的 P
+仍为 79 逻辑层／5 Main 槽／22 私有 Indexer、14,883／14,884 block；D 各有
+9,174 block（1,174,272 token）和 99.99 GiB Host pool，Master 总容量 640 GiB。
+新栈再次通过 12 条请求，含四并发 33,664 token 多 chunk 和重复前缀回放；
+四 D 全 8 rank receipt 和 target 释放审计通过，证据为
+`cann92-smoke.jsonl`，stderr 为空。实际 Store 分配量也已增长，数据面不是空跑。
+
+将 CANN9.2 配置合并为新 inventory 默认，`cann92.yml` 保留为空的兼容参数
+文件。重新 gen 四节点均 changed=0，生成脚本与已部署版本一致。1M 长测新增
+`long.yml`／`long_probe.py`，初次启动发现 Ansible `script` 不支持 async，
+该次未发送推理请求；已将 long 和 smoke playbooks 改为 copy＋command。
+1M 复测仍进行中，需跟踪异步作业和独立 JSONL 日志，不能据短回归宣称 1M 通过。
+
+实际 1M 输入为 1,047,254 token；P0 DP0 计算、D0 DP0 等待 KV。异步作业为
+`j510195889183.1654235`，控制机日志 `/tmp/layerwise-cann92-long-r2.log`，
+探针 PID 1654269，结果文件为 P0 日志目录的
+`probe_1m_34c895e2cc3d4c9481d50553552448cd.jsonl`。14:27 CST 已超过原先
+300 秒超时点，探针仍活跃、D 目标保留，P 的 KV 分配约对应 475K token，
+尚未产生首 token。低频观测在 `long-progress.jsonl`；应继续跟踪同一作业，
+不能因控制机观察会话丢失或等待超时而重启它。
+
+新栈出现过私有快照 remove=-706，已核对其含义为 `OBJECT_HAS_LEASE`。
+当前 Store 删除使用 force=False，并保留重试，符合租约保护；没有绕过租约
+或强制清理。`published after prepare_decode` 在 `_maybe_publish()` 中发生于
+完整 receipt 数据 ready 之后，长 prefill 期间没有这条发布日志属于预期。
+待长测完成后仍需核对全 TP 发布、target 释放，并实际运行修正后的 Ansible
+`smoke.yml`，验证测试入口和长请求之后的新请求，再做最终健康／空闲审计。
+
+**最终验收结果：**同一 1M 作业于 15:00 前完成，Ansible 返回 rc=0。
+请求 `chatcmpl-3c3aab8c-bc56-4800-a1f1-9e2ed1a6e523` 的真实输入为
+1,047,254 token，输出 MAPLE（3 token）、finish_reason=stop，
+TTFT=2,266.031416764 秒，总耗时 2,266.043837352 秒。全 8-rank
+`published after prepare_decode` 与 target 释放审计通过。
+证据为 `cann92-long.jsonl` 和 `cann92-long-receipt-audit.json`。
+
+随后实际执行修正后的 Ansible `smoke.yml`，copy＋command＋async 流程通过，
+12 条短／四并发多 chunk／前缀回放请求及四 D 全 TP receipt、target 释放通过。
+证据为 `cann92-post-long-smoke.jsonl`，控制机原始输出为
+`/tmp/layerwise-cann92-post-long-smoke.log`。新栈合计 25 条请求，P/D 成功计数
+均为 25，无 error／abort。最终八个 API 为 200，running／waiting／KV 使用
+均归零，代理报告 P/D 各四实例；八份引擎日志无 ERROR／Traceback。
+见 `final-health.json`。前后四节点容器 ID、镜像 ID、启动时间及 24 份生成配置
+全部一致，见 `identity-{node}.json`／`identity-final-{node}.json`。
+九个 playbook 语法、三个 Python 文件的 Ruff／format 和 git diff 检查通过。
+
+当前服务使用新 inventory 默认，容器名为
+`vllm-ascend-glm52-layerwise-guide-cann92`，代理在 P0 的 8333。
+旧 WD／初版 guide 容器与日志保留，新的服务保持运行。只保留最终服务镜像的
+分发 tar，已通过 Ansible 清理本轮重复的 SDK tar；SDK 镜像本体仍在 P0。
+没有修改宿主全局 THP、驱动或其它服务。本轮是功能验收，未进行吞吐基准对照。
+
+### 11.74 新 layerwise 拓扑 55K／700、10／20 并发性能测试（2026-11-07）
+
+在 §11.73 的服务上直接测试，未重启或修改服务配置。P/D 各 TP8×DP4、
+CP/DCP1、eager，P chunk16384／seq8／MTP1，D token budget32／seq8／MTP3，
+Host100 GiB。镜像和开发提交仍为 `15d342c0b-cann92`。
+
+复用前次 v1.7 镜像 `99bd08d5f3b7f`、相同 vendor bench SHA256 `b109ab8e` 和
+checked-bench 包装器，接口为新代理 8333。每档 40 条，seed20261106，
+random-input-len55000、output-len700、range-ratio1、request-rate inf、
+warmup0，ignore_eos 保持开启，关闭 thinking，启用 SSE usage。
+每档独立 cache_salt，P 的 HBM／外部前缀命中增量均为零。只检查响应完整和
+实际 token 计数，不检查随机乱码内容的语义或精度；未开启 profiler，只在测试
+前后读取服务指标。客户端数据准备时间不计入 benchmark duration。
+
+| 并发 | 成功 | 压测耗时 s | TTFT 均值 s | TTFT P50 s | TTFT P99 s | TPOT P50 ms | TPOT P99 ms | 输出 token/s |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 10 | 40/40 | 445.969 | 16.987 | 16.140 | 33.432 | 123.312 | 147.614 | 62.785 |
+| 20 | 40/40 | 282.760 | 27.986 | 23.025 | 53.378 | 125.205 | 184.185 | 99.024 |
+
+两档实际输入总量均为 2,197,493 token，单条范围 53,988–55,006；输出均为
+28,000 token，80 条请求均完整输出 700 token、finish=length，无失败。
+TPOT 使用 `(e2e-ttft)/(usage.output_tokens-1)`；MTP 流式分块的 ITL 不是单 token
+TPOT。D 实际每轮草拟 3 token，平均接受长度（含基准 token）为 2.899／2.966，
+draft token 接受率 63.31%／65.52%，并非只配置了 MTP 而未执行。
+
+与 §11.72 的旧 receipt MTP5 整体配置相比：10 并发 TTFT P50 从 9.000 增至
+16.140 秒，吞吐从 61.268 至 62.785（+2.48%），TPOT 基本不变；20 并发 TTFT
+P50 从 86.309 降至 23.025 秒（-73.32%），吞吐从 65.374 至 99.024（+51.47%），
+TPOT 从 116.439 增至 125.205 毫秒（+7.53%）。拓扑、SDK、chunk、Host、MTP
+均有变化，不能将差异当作某一个代码优化的净收益。解码 TPOT 仍约 125ms。
+
+前后四节点容器 ID、镜像、启动时间和生成脚本核对一致。P/D 成功计数各增
+80，error／abort 增量为零，最终八个 API 健康、running／waiting／KV 使用归零。
+只停止了本次独立的 CPU 压测客户端，推理服务保持运行。
+完整命令、原始 JSONL、SSE 计数日志、前后指标、可复算 summary 和 comparison
+位于 `artifacts/benchmark-tool-v1.7/layerwise-guide-55k-700-c10-c20-20261107/`。
+
+
+### 11.75 Main reuse + P MTP1 的跨请求前缀（2026-11-07）
+
+用户要求保留当前 P/D MTP1/3，先实现跨请求前缀，再重测约 50% 命中的性能。
+原 `15d342c0b` 把 MTP 完整块与部分块全部设为请求私有，scheduler 明确返回
+零外部命中；仅预热不能产生 50% 命中。HBM prefix caching 仍须关闭。
+
+开发提交 `fe559c440` 增加 MTP1 的 Mooncake 公共前缀。公共完整块身份为
+`mtp_prefix_v1:<block_index>:<successor_chain_hash>`；MTP 块尾消耗下一输入
+token，因此使用完整后继块的链式 hash 保守覆盖该依赖，继承 cache_salt
+和 vLLM hash extras。prompt 末尾、部分块与生成区间仍用私有快照。查询、
+保存及恢复使用同一函数；公开前缀比纯 Main 匹配最多少一块。其他 P draft
+方法或多步 MTP 暂时维持原先禁用跨请求查询的行为。
+
+公共 PUT 争用可回退到该请求的私有完整块，非保存 TP rank 可推导相同回退
+身份；同一请求跨 chunk 优先使用已提交版本。查询后淘汰会在 attention 前
+失败，不借用别的请求的私有对象。清理只处理私有 key，公共对象交由 Store
+管理。未改变 Main 共享槽、registered target、全 TP receipt 与生命周期屏障。
+
+控制机聚焦测试扩大至 83 项及 44 个子用例，全部通过。完整 scheduler 套件
+有 6 个失败在未修改 HEAD 同样复现，另 74 项通过；全仓库 format 检查遇到
+既有 lint 问题，其对无关文件的自动改动已撤回。未声称全套测试或 lint 全绿。
+
+Ansible 使用独立容器 `vllm-ascend-glm52-layerwise-guide-mtp-prefix`，旧
+`...-cann92` 容器停机保留；四节点同一镜像
+`glm52-vllm-ascend:0.30.0-layerwise-guide-fe559c440-cann92`，ID
+`sha256:8dad7347dd0d2728206f058b20e0f2f0fa7cfd6d6f9ea984fd28dfcfd1e0f74b`。
+保持 CANN9.2/pr3952、TP8×DP4、1M、eager、P chunk16384/seq8/MTP1、
+D budget32/seq8/MTP3/Host100GiB。新部署 P 约 14,880 blocks，D 9,174。
+所有 gen/build/prepare/start 检查通过；八引擎与代理健康。默认 inventory
+已更新为此部署，重现实验覆盖参数在 `artifacts/mtp-prefix-20261107/override.yml`。
+
+真实功能探针 13 条全部通过：部分前缀实测 19,072/33,655 token（56.67%，
+这是功能探针，不是正式 50% 性能组）、完整回放、salt 隔离、四并发缓存读取
+与四并发冷写争用；输入、预期命中量和输出分别核验。Ansible 另 12 条短/
+多 chunk/前缀回放全部通过。两组共 25 条请求逐条检查全 8-rank receipt 与
+target 释放，覆盖四 D 引擎，无请求错误。
+
+正式性能使用 v1.7 客户端、同一 seed 的 40 条约 55K 输入、每条 700 输出、
+10/20 并发。每请求独立 salt，分别跑新代码下 0% 与约 50% 命中；50% 组在
+原生计时前预热，每条按实际 chat token 边界校准，匹配量向下按 128 对齐。
+以 P 侧实际 external hits 增量对照逐请求预期总量；预热不计入正式吞吐和
+延迟。功能正确性探针与随机性能请求分开；正式阶段只检查 SSE、usage、
+700 输出及失败计数。
+
+四组均 40/40 成功，每组实际输入 2,197,493、输出 28,000 token。两组缓存
+实际命中均为 1,094,912 token，即 49.8255%，逐请求预期和 P 计数完全一致；
+0% 两组命中均为零。40 条输入的 SHA256 向量在四组完全相同，所有正式响应
+均完整返回 700 token，预热和功能探针不计入性能统计。
+
+| 并发 | 实际命中 | TTFT均值/P50/P99(s) | TPOT P50/P99(ms) | 输出吞吐(token/s) | 正式耗时(s) |
+| --- | --- | --- | --- | --- | --- |
+| 10 | 0.00% | 12.92/10.81/27.85 | 118.51/157.59 | 67.76 | 413.23 |
+| 10 | 49.83% | 8.84/7.13/19.05 | 115.60/138.49 | 74.46 | 376.07 |
+| 20 | 0.00% | 24.06/17.23/52.48 | 120.62/150.66 | 111.10 | 252.03 |
+| 20 | 49.83% | 17.06/10.37/38.77 | 117.72/164.52 | 116.44 | 240.46 |
+
+相对同源码同配置 0% 组，10/20 并发 TTFT P50 降低 34.00%/39.85%，均值
+降低 31.60%/29.11%，输出吞吐提升 9.88%/4.81%。TPOT P50 降低约 2.4%；
+20 并发 TPOT P99 从 150.66 增至 164.52 ms，因此不声称所有尾延迟都改善。
+TPOT 使用 `(e2e-ttft)/699`，不把 MTP 的流式分块间隔当作单 token 延时。
+D 侧平均接受长度依表格顺序为 2.9648/3.0054/3.0123/3.0127，每步 draft
+计数均为 3，证明 MTP3 在执行，并未为前缀测试关闭投机。
+
+265 条请求（25 功能、80 预热、160 正式）的全 8-rank receipt 和 target 释放
+全部通过，覆盖四 D 引擎；P/D 各 success=265，error/abort=0。八引擎和代理
+健康、空闲，KV 使用归零，八份引擎日志 ERROR=0。测试前后四容器 ID、镜像
+ID、启动时间和启动脚本 hash 完全相同。只停止本次 CPU 性能客户端，保留
+已验证 vLLM 服务。默认 inventory 已与运行配置一致，用户无需额外覆盖参数。
+本轮未重复近 1M 长请求，不能将前任的长测结果标成新代码已重测。
+
+
+证据与可复现脚本：`artifacts/mtp-prefix-20261107/`；日志：
+`/mnt/sfs_turbo/g00832294/layerwise-guide/tp8-dp4-1m-cann92-mtp-prefix/`。

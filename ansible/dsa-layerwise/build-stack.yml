@@ -1,0 +1,164 @@
+---
+- name: Build the guide's CANN 9.2 stack with the development branch
+  hosts: p0
+  gather_facts: false
+  vars:
+    stack_source_revision: "{{ native_source_revision | default(source_revision) }}"
+    stack_dir: "{{ deployment_root }}/build/{{ stack_source_revision[:9] }}-cann92"
+    stack_image: "glm52-vllm-ascend:0.30.0-layerwise-sdk-{{ stack_source_revision[:9] }}-cann92"
+    mooncake_revision: 7bfe1cc2d6c15a6763f469854f78e6cdd401d7a8
+    vllm_revision: ced6857afa0ea7b2e3f0846a62e1394e90f15607
+    catlass_revision: 41bf90da655bba3c66d0acd7e00abe33960ecfd6
+    ylt_revision: 7801bc9ad9021781f15217552214e325a1cf7373
+    msgpack_revision: 919908742b4fdbc575e77fe1a8657e70c9573c44
+  tasks:
+    - name: Create controller source archive
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .tar.gz
+      delegate_to: localhost
+      register: archive
+
+    - name: Stage and build the full pinned stack
+      block:
+        - name: Prepare pinned Mooncake with its pybind11 submodule on controller
+          ansible.builtin.git:
+            repo: https://github.com/mazifan0120/Mooncake.git
+            version: "{{ mooncake_revision }}"
+            dest: "{{ playbook_dir }}/../../src/mooncake-guide"
+            update: false
+            recursive: true
+          delegate_to: localhost
+
+        - name: Prepare pinned yalantinglibs on controller
+          ansible.builtin.git:
+            repo: https://github.com/alibaba/yalantinglibs.git
+            version: "{{ ylt_revision }}"
+            dest: "{{ playbook_dir }}/../../src/yalanting-guide"
+            update: false
+          delegate_to: localhost
+
+        - name: Prepare the MessagePack version required by Mooncake on openEuler
+          ansible.builtin.git:
+            repo: https://github.com/msgpack/msgpack-c.git
+            version: "{{ msgpack_revision }}"
+            dest: "{{ playbook_dir }}/../../src/msgpack-guide"
+            update: false
+          delegate_to: localhost
+
+        - name: Archive dependencies for the isolated builder
+          ansible.builtin.command:
+            argv: [tar, -czf, "{{ archive.path }}.{{ item }}", -C, "{{ playbook_dir }}/../../src", "{{ item }}"]
+          loop: [mooncake-guide, yalanting-guide, msgpack-guide]
+          delegate_to: localhost
+
+        - name: Archive all committed source
+          ansible.builtin.command:
+            argv: [git, -C, "{{ playbook_dir }}/../../src/vllm-ascend-reuse", archive, -o, "{{ archive.path }}", "{{ stack_source_revision }}"]
+          delegate_to: localhost
+
+        - name: Prepare separate full-stack build context
+          ansible.builtin.file:
+            path: "{{ stack_dir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Stage full source and dependencies
+          ansible.builtin.copy:
+            src: "{{ item.src }}"
+            dest: "{{ stack_dir }}/{{ item.name }}"
+            mode: "0644"
+          loop:
+            - {src: "{{ archive.path }}", name: source.tar.gz}
+            - {src: "{{ archive.path }}.mooncake-guide", name: mooncake.tar.gz}
+            - {src: "{{ archive.path }}.yalanting-guide", name: ylt.tar.gz}
+            - {src: "{{ archive.path }}.msgpack-guide", name: msgpack.tar.gz}
+
+        - name: Stage Mooncake build
+          ansible.builtin.copy:
+            src: Dockerfile.mooncake
+            dest: "{{ stack_dir }}/Dockerfile.mooncake"
+            mode: "0644"
+
+        - name: Build CANN 9.2, vLLM 0.30 and pinned Mooncake
+          ansible.builtin.shell:
+            executable: /bin/bash
+            chdir: "{{ stack_dir }}"
+            cmd: |
+              set -euo pipefail
+              exec > >(tee build.log) 2>&1
+              mkdir -p source/_vllm_source mooncake/Mooncake mooncake/ylt mooncake/msgpack
+              tar -xzf source.tar.gz -C source
+              # The validated image contains a clean checkout of this exact vLLM commit.
+              docker run --rm --network none --entrypoint git "$BASE_IMAGE" \
+                -C /vllm-workspace/vllm archive --format=tar.gz {{ vllm_revision }} > vllm-source.tar.gz
+              tar -xzf vllm-source.tar.gz -C source/_vllm_source
+              tar -xzf mooncake.tar.gz -C mooncake/Mooncake --strip-components=1
+              tar -xzf ylt.tar.gz -C mooncake/ylt --strip-components=1
+              tar -xzf msgpack.tar.gz -C mooncake/msgpack --strip-components=1
+              sha256sum source.tar.gz vllm-source.tar.gz mooncake.tar.gz ylt.tar.gz msgpack.tar.gz > SOURCE_ARCHIVES_SHA256SUMS
+              if ! test -d source/csrc/third_party/catlass/.git; then
+                git init source/csrc/third_party/catlass
+                git -C source/csrc/third_party/catlass fetch --depth 1 https://gitcode.com/cann/catlass.git {{ catlass_revision }}
+                git -C source/csrc/third_party/catlass checkout --detach FETCH_HEAD
+              fi
+              python3 - <<'PY'
+              from pathlib import Path
+              dockerfile = Path("source/Dockerfile.a3.openEuler")
+              text = dockerfile.read_text().replace(
+                  'WORKDIR /workspace',
+                  'ENV SETUPTOOLS_SCM_PRETEND_VERSION=0.30.0 TORCH_DEVICE_BACKEND_AUTOLOAD=0 '
+                  'MAX_JOBS=16 CMAKE_BUILD_PARALLEL_LEVEL=16 CARGO_BUILD_JOBS=16\nWORKDIR /workspace',
+                  1,
+              )
+              start = text.index('RUN if [ -n "$VLLM_COMMIT" ]')
+              end = text.index('\n\n# In x86', start)
+              text = text[:start] + 'COPY _vllm_source/ /vllm-workspace/vllm/\n' + text[end:]
+              # The repository directory uses hyphens; the wheel uses underscores.
+              text = text.replace(
+                  'repos/pypi/flash_linear_attention_npu_a3/',
+                  'repos/pypi/flash-linear-attention-npu-a3/',
+              ).replace(
+                  'db137e15852a395adca3d54aeeaac68f931a119b4953f0388c2694245ed9aa98',
+                  '0e0febfe0b524df54c02dead985b787cf51f276ef904e4c2f88c5d43707a370b',
+              ).replace(
+                  'a21fcb404405bfe44aef1a05beaa04c4e543f05749abf8cedde091dc409ccf1f',
+                  '18b8c9d54eadbefb264fd5989577e3bbdb6f2e5cfc8d60d86a0887f2d8a2f26a',
+              ).replace('# echo "${FLA_SHA256}  /tmp/${FLA_WHL}"',
+                        'echo "${FLA_SHA256}  /tmp/${FLA_WHL}"')
+              dockerfile.write_text(text)
+              installer = Path("source/csrc/build_aclnn.sh")
+              text = installer.read_text().replace(
+                  '"${installer_candidates[0]}" --install-path=',
+                  '"${installer_candidates[0]}" --force --install-path=',
+              )
+              installer.write_text(text)
+              PY
+              docker build --network host --build-arg VLLM_COMMIT={{ vllm_revision }} \
+                -f source/Dockerfile.a3.openEuler -t "$STACK_IMAGE-ascend" source
+              mkdir -p mooncake
+              cp Dockerfile.mooncake mooncake/Dockerfile
+              docker build --network host --build-arg ASCEND_IMAGE="$STACK_IMAGE-ascend" \
+                --build-arg SOURCE_REVISION="$SOURCE_REVISION" \
+                --build-arg MOONCAKE_REVISION="$MOONCAKE_REVISION" -t "$STACK_IMAGE" mooncake
+              docker save -o image.tar.tmp "$STACK_IMAGE"
+              mv image.tar.tmp image.tar
+              docker image inspect --format '{% raw %}{{.Id}}{% endraw %}' "$STACK_IMAGE" > image.id
+          environment:
+            STACK_IMAGE: "{{ stack_image }}"
+            BASE_IMAGE: glm52-vllm-ascend:0.30.0-receipt-c76f087d2
+            SOURCE_REVISION: "{{ stack_source_revision }}"
+            MOONCAKE_REVISION: "{{ mooncake_revision }}"
+          async: 14400
+          poll: 15
+      always:
+        - name: Remove controller archive
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ archive.path }}"
+            - "{{ archive.path }}.mooncake-guide"
+            - "{{ archive.path }}.yalanting-guide"
+            - "{{ archive.path }}.msgpack-guide"
+          delegate_to: localhost

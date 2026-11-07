@@ -1,3 +1,29 @@
+> **2026-11-07 P MTP1 跨请求前缀已验证**：开发提交 `fe559c440` 使用后继块链式 hash 隔离 MTP 公共前缀，保留私有尾块与本地 HBM prefix 关闭。83 项测试/44 子用例通过；独立 Ansible 新镜像四节点一致，P/D MTP1/3 不变。25 条真实功能请求（部分/完整前缀、salt 隔离、并发读写与多 chunk）及逐条全 8-rank receipt、target 释放均通过，覆盖四 D。55K/700、10/20 并发同配置对照共160/160成功，实际命中49.83%时 TTFT P50 为7.13/10.37秒（0%组10.81/17.23秒），输出吞吐74.46/116.44 token/s（+9.88%/+4.81%）。含预热和功能探针共265条的全TP receipt/释放通过，P/D错误0，服务健康空闲并保持运行。见 runbook §11.75 与 `artifacts/mtp-prefix-20261107/`。
+
+> **2026-11-07，新拓扑性能测试完成。** 使用相同 v1.7 客户端、seed20261106、
+> 随机 55K 输入／700 输出，每档 40 条，10／20 并发均 40/40 成功。
+> TTFT 中位数为 16.140／23.025 秒，P99 为 33.432／53.378 秒；
+> TPOT 中位数为 123.312／125.205 毫秒，输出吞吐为 62.785／99.024 token/s。
+> P 前缀命中增量为零，MTP 平均接受长度 2.90／2.97。相对前一轮 receipt MTP5，
+> 20 并发吞吐 +51.47%、TTFT 中位数 -73.32%；10 并发吞吐基本持平、TTFT 增大。
+> 这是拓扑、SDK、chunk、Host、MTP 同时变化的整体配置对照。服务身份未变，
+> 最终八引擎健康空闲，临时客户端已停止。详见 runbook §11.74 和
+> `artifacts/benchmark-tool-v1.7/layerwise-guide-55k-700-c10-c20-20261107/summary.json`。
+
+> **2026-11-07，新拓扑部署和功能验收完成。** 独立 Ansible 入口为
+> `ansible/dsa-layerwise/`，inventory 为 `a3-layerwise-guide`，开发源码
+> `p-main-buffer-reuse@15d342c0b`，基于 `dsa_offload_rebase_30@4234a1f18`。
+> CANN9.2＋Mooncake pr3952 已部署，保留 layerwise、P Main reuse、D Host receipt、
+> D-first 和 P/D MTP1/3。两侧均 TP8×DP4、CP/DCP1、eager，每 D 实例 100 GiB Host。
+> 原固定 300 秒 watchdog 已修复为可配置；本档使用 7,200 秒。
+> 新栈先通过 12 条短／四并发 33.7K 多 chunk／前缀回放请求，再通过真实
+> 1,047,254-token P/D 请求，正确返回 MAPLE、stop，首 token 2,266.031 秒。
+> 1M 全 8-rank receipt 和 target 释放通过；长测后的 Ansible 12 条回归也通过。
+> 共 25 条请求，四 D 均有流量，最终八引擎和代理健康、空闲、KV 使用归零，日志无 ERROR。
+> 四节点镜像、源码与 24 份启动脚本身份核对通过，服务保持运行。
+> 配置、指南差异和操作见 [新部署说明](../ansible/dsa-layerwise/README.md)，
+> 证据与排障过程见 runbook §11.73；本轮结果属于功能验收。
+
 > **2026-11-05：32K／64K完整层计算、GET／PUT和槽位时序实测完成。** B4/P3的prefill中位数9.585／20.419s，相对同计算配置pure约+0.15%／+0.51%；64K其余77层GET直接Free合计0.39ms，第0层约69ms。pure的SFA仍约12.46s／64K，进一步大收益应看计算路径。48/48请求有效，原P r05／D r03身份、源码、健康和新短请求恢复PASS，r18停止；717f6e6e0／原p-main-buffer-reuse未改，无生产源码提交。详见[完整报告](prefill-reuse-layer-overlap-32k-64k.md)与runbook §11.43。
 
 # M1（P 侧 KV Buffer Reuse）工作总览

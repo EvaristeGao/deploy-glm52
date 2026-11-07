@@ -1,0 +1,74 @@
+ansible_user: root
+ansible_python_interpreter: /usr/bin/python3
+ansible_ssh_retries: 3
+ansible_ssh_common_args: >-
+  -o BatchMode=yes -o StrictHostKeyChecking=accept-new
+  -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=3
+  -o ControlMaster=no -o ControlPath=none
+  {{ '' if inventory_hostname == 'p0' else
+     "-o ProxyCommand='ssh -o BatchMode=yes -o ControlMaster=no -o ControlPath=none -W %h:%p root@ott9-a31'" }}
+
+guide_revision: b4965c0625c9f89ffd6c8f61dee6f8ed2f62cc8b
+source_revision: fe559c440e680e938b1baf0d3bd217b309ecf09d
+native_source_revision: 9937133058b417e6238e238e44277998ee541e79
+base_image: "glm52-vllm-ascend:0.30.0-layerwise-sdk-{{ native_source_revision[:9] }}-cann92"
+package_root: /vllm-workspace/vllm-ascend/vllm_ascend
+image: "glm52-vllm-ascend:0.30.0-layerwise-guide-{{ source_revision[:9] }}-cann92"
+container_name: vllm-ascend-glm52-layerwise-guide-mtp-prefix
+deployment_root: /mnt/sfs_turbo/g00832294/layerwise-guide
+build_dir: "{{ deployment_root }}/build/{{ source_revision[:9] }}-cann92"
+run_dir: "{{ deployment_root }}/{{ run_name }}/{{ inventory_hostname }}"
+run_name: tp8-dp4-1m-cann92-mtp-prefix
+generated_dir: "{{ playbook_dir }}/../generated/layerwise-guide"
+model_path: /mnt/sfs_turbo/models/GLM-5.2-w4a8c8
+model_name: glm-52
+max_model_len: 1048576
+block_size: 128
+tp_size: 8
+dp_size: 4
+dp_local: 2
+ready_retries: 240
+
+prefill_config:
+  api_port: 8100
+  rpc_port: 17591
+  kv_port: 56000
+  max_num_batched_tokens: 16384
+  max_num_seqs: 8
+  gpu_memory_utilization: 0.75
+  mtp: 1
+decode_config:
+  api_port: 8200
+  rpc_port: 17660
+  kv_port: 57000
+  max_num_batched_tokens: 32
+  max_num_seqs: 8
+  gpu_memory_utilization: 0.88
+  mtp: 3
+  host_gib: 100
+  topk_buffer_size: 4096
+  lru_threads: 16
+  owner_rpc_port: 34100
+  receipt_timeout_s: 7200
+master_port: 52551
+master_metrics_port: 52553
+store_segment_bytes: 21474836480
+proxy_port: 8333
+shared_buffers: 2
+
+# Captured and stopped only during an explicit cutover.
+previous_containers:
+  p0: vllm-ascend-glm52-layerwise-guide-cann92
+  p1: vllm-ascend-glm52-layerwise-guide-cann92
+  d0: vllm-ascend-glm52-layerwise-guide-cann92
+  d1: vllm-ascend-glm52-layerwise-guide-cann92
+previous_engine_endpoints:
+  - 172.168.4.237:8100
+  - 172.168.4.237:8101
+  - 172.168.4.31:8102
+  - 172.168.4.31:8103
+  - 172.168.4.230:8200
+  - 172.168.4.230:8201
+  - 172.168.4.226:8202
+  - 172.168.4.226:8203
+previous_proxy_url: http://172.168.4.237:8333/healthcheck

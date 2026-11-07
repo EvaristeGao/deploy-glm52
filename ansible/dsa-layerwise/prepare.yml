@@ -1,0 +1,77 @@
+---
+- name: Stage image and scripts in separate development containers
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Create per-node deployment directory
+      ansible.builtin.file:
+        path: "{{ run_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Allocate controller script archive
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .tar.gz
+      delegate_to: localhost
+      register: scripts_archive
+
+    - name: Transfer node scripts together
+      block:
+        - name: Archive generated scripts
+          ansible.builtin.command:
+            argv: [tar, -czf, "{{ scripts_archive.path }}", -C, "{{ generated_dir }}/{{ inventory_hostname }}", "."]
+          delegate_to: localhost
+
+        - name: Stage generated scripts
+          ansible.builtin.unarchive:
+            src: "{{ scripts_archive.path }}"
+            dest: "{{ run_dir }}/"
+      always:
+        - name: Remove controller script archive
+          ansible.builtin.file:
+            path: "{{ scripts_archive.path }}"
+            state: absent
+          delegate_to: localhost
+
+    - name: Check image ID
+      ansible.builtin.command:
+        argv: [docker, image, inspect, "{{ image }}", --format, "{% raw %}{{.Id}}{% endraw %}"]
+      register: local_image
+      failed_when: false
+      changed_when: false
+
+    - name: Load the same image from shared storage
+      ansible.builtin.command:
+        argv: [docker, load, -i, "{{ build_dir }}/image.tar"]
+      when: local_image.rc != 0
+      async: 1800
+      poll: 15
+
+    - name: Verify image identity against P0 export
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          test "$(docker image inspect --format '{% raw %}{{.Id}}{% endraw %}' {{ image | quote }})" = "$(cat {{ (build_dir ~ '/image.id') | quote }})"
+      changed_when: false
+
+    - name: Create labelled development container and capture predecessor
+      ansible.builtin.script:
+        cmd: >-
+          container.py prepare --name {{ container_name | quote }}
+          --previous {{ previous_containers[inventory_hostname] | quote }}
+          --directory {{ run_dir | quote }} --image {{ image | quote }}
+        executable: python3
+
+    - name: Verify source checksums inside development container
+      ansible.builtin.command:
+        argv: [docker, exec, -w, /, "{{ container_name }}", sha256sum, --check, /opt/layerwise-guide/SOURCE_SHA256SUMS]
+      register: source_check
+      changed_when: false
+      no_log: true
+
+    - name: Enable transparent huge pages on this container's private shm
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ container_name }}", mount, -o, "remount,huge=always", /dev/shm]
+      when: inventory_hostname in groups['decode']

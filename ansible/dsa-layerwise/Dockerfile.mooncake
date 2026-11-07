@@ -1,0 +1,47 @@
+ARG ASCEND_IMAGE
+FROM ${ASCEND_IMAGE} AS wheel
+ARG MOONCAKE_REVISION
+ARG MSGPACK_REVISION=919908742b4fdbc575e77fe1a8657e70c9573c44
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
+COPY Mooncake/ /tmp/Mooncake/
+COPY ylt/ /tmp/ylt/
+COPY msgpack/ /tmp/msgpack/
+RUN cd /tmp/Mooncake && test "$(git rev-parse HEAD)" = "${MOONCAKE_REVISION}" && \
+    source /usr/local/Ascend/cann/set_env.sh && \
+    bash scripts/ascend/dependencies_openeuler.sh -y && yum install -y yaml-cpp-devel && \
+    test "$(git -C /tmp/msgpack rev-parse HEAD)" = "${MSGPACK_REVISION}" && \
+    cmake -S /tmp/msgpack -B /tmp/msgpack/build -DMSGPACK_BUILD_TESTS=OFF && \
+    cmake --build /tmp/msgpack/build --parallel 16 && cmake --install /tmp/msgpack/build
+RUN cd /tmp/Mooncake && source /usr/local/Ascend/cann/set_env.sh && \
+    cmake -S . -B build -GNinja \
+      -DUSE_ASCEND_DIRECT=ON -DUSE_ETCD=OFF -DSTORE_USE_ETCD=OFF \
+      -DBUILD_UNIT_TESTS=OFF -DBUILD_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release \
+      -DPython3_EXECUTABLE="$(command -v python3)" -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=OFF \
+      -DCMAKE_BUILD_WITH_INSTALL_RPATH=OFF -DCMAKE_SKIP_INSTALL_RPATH=ON \
+      -DFETCHCONTENT_SOURCE_DIR_YALANTINGLIBS=/tmp/ylt && \
+    cmake --build build --parallel 16
+RUN cd /tmp/Mooncake && source /usr/local/Ascend/cann/set_env.sh && \
+    NPU_BUILD=1 PYTHON_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" \
+      OUTPUT_DIR=/wheel bash scripts/build_wheel.sh
+
+FROM ${ASCEND_IMAGE}
+ARG SOURCE_REVISION
+ARG MOONCAKE_REVISION
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      mooncake.revision="${MOONCAKE_REVISION}" \
+      glm52.deployment="layerwise-guide-cann92"
+COPY --from=wheel /wheel/ /opt/layerwise-guide/mooncake/
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
+RUN source /usr/local/Ascend/cann/set_env.sh && \
+    yum install -y yaml-cpp && \
+    python3 -m pip uninstall -y mooncake-transfer-engine mooncake-transfer-engine-npu && \
+    wheels=(/opt/layerwise-guide/mooncake/*.whl) && test "${#wheels[@]}" -eq 1 && \
+    python3 -m pip install --no-deps "${wheels[0]}" && \
+    cd /opt/layerwise-guide/mooncake && sha256sum ./*.whl > SHA256SUMS && \
+    command -v mooncake_master && \
+    printf '%s\n' "${SOURCE_REVISION}" > /opt/layerwise-guide/SOURCE_REVISION && \
+    find /vllm-workspace/vllm-ascend/vllm_ascend \
+      /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1 \
+      -type f \( -name '*.py' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) \
+      -exec sha256sum {} + > /opt/layerwise-guide/SOURCE_SHA256SUMS
+ENV TORCH_DEVICE_BACKEND_AUTOLOAD=1

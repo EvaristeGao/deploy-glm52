@@ -1,0 +1,53 @@
+---
+- name: Render independent layerwise deployment scripts
+  hosts: all
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Validate supported topology and layerwise contracts
+      ansible.builtin.assert:
+        that:
+          - tp_size * dp_local == 16
+          - dp_size == dp_local * 2
+          - prefill_config.max_num_batched_tokens % tp_size == 0
+          - prefill_config.mtp == 1
+          - decode_config.mtp > 0
+          - decode_config.max_num_batched_tokens >= decode_config.max_num_seqs * (decode_config.mtp + 1)
+        quiet: true
+
+    - name: Create isolated generated directory
+      ansible.builtin.file:
+        path: "{{ generated_dir }}/{{ inventory_hostname }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render node scripts
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "{{ generated_dir }}/{{ inventory_hostname }}/{{ item }}"
+        mode: "0755"
+      loop: [settings.sh, start_engines.sh, engine.sh, start_master.sh, start_proxy.sh]
+      vars:
+        node_role: "{{ 'prefill' if inventory_hostname in groups['prefill'] else 'decode' }}"
+
+    - name: Render Mooncake Store configuration
+      ansible.builtin.copy:
+        dest: "{{ generated_dir }}/{{ inventory_hostname }}/mooncake.json"
+        mode: "0644"
+        content: |
+          {
+            "metadata_server": "P2PHANDSHAKE",
+            "protocol": "ascend",
+            "device_name": "",
+            "master_server_address": "{{ hostvars['p0'].ip }}:{{ master_port }}",
+            "global_segment_size": {{ store_segment_bytes }},
+            "default_kv_lease_ttl": 300000,
+            "prefer_alloc_in_same_node": true,
+            "preferred_segment": true
+          }
+
+    - name: Validate rendered shell syntax
+      ansible.builtin.command:
+        argv: [bash, -n, "{{ generated_dir }}/{{ inventory_hostname }}/{{ item }}"]
+      loop: [settings.sh, start_engines.sh, engine.sh, start_master.sh, start_proxy.sh]
+      changed_when: false

@@ -1,0 +1,12 @@
+---
+- name: Stop only labelled layerwise guide containers
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Stop development container
+      ansible.builtin.script:
+        cmd: >-
+          container.py stop --name {{ container_name | quote }}
+          --previous {{ previous_containers[inventory_hostname] | quote }}
+          --directory {{ run_dir | quote }} --image {{ image | quote }}
+        executable: python3

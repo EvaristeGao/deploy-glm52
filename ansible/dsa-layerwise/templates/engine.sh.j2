@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -eo pipefail
+source /root/pd/settings.sh
+rank=$1
+port=$2
+export ASCEND_RT_VISIBLE_DEVICES=$3
+export VLLM_WORKDIR="/tmp/layerwise-guide-dp$rank"
+mkdir -p "$VLLM_WORKDIR"
+cd "$VLLM_WORKDIR"
+{% set role = prefill_config if node_role == 'prefill' else decode_config %}
+{% if node_role == 'prefill' %}
+additional_config='{
+  "enable_flashcomm1": true,
+  "enable_shared_expert_dp": true,
+  "enable_dsa_cp": true,
+  "enable_fused_mc2": 1,
+  "multistream_overlap_shared_expert": false,
+  "enable_cpu_binding": true,
+  "scheduler_config": {"recompute_scheduler_enable": false},
+  "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false, "fuse_muls_add": true},
+  "mega_moe_max_tokens": 131072
+}'
+kv_config='{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_producer",
+  "kv_load_failure_policy": "fail",
+  "kv_connector_extra_config": {"connectors": [
+    {"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_producer", "kv_port": {{ role.kv_port }}},
+    {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer",
+     "kv_connector_extra_config": {
+       "backend": "mooncake", "lookup_rpc_port": "0", "use_layerwise": true,
+       "layerwise_prefetch_layers": 1, "layerwise_max_transfer_blocks": 64,
+       "layerwise_max_transfer_bytes": 16777216, "layerwise_num_shared_buffers": {{ shared_buffers }},
+       "layerwise_independent_layers": [0, -1]
+     }}
+  ]}
+}'
+{% else %}
+additional_config='{
+  "enable_fused_mc2": 1,
+  "enable_mlapo": false,
+  "scheduler_config": {"recompute_scheduler_enable": false},
+  "ascend_compilation_config": {"enable_npugraph_ex": true, "fuse_muls_add": true},
+  "sparse_kv_offload_config": {
+    "enabled": true, "use_fused_overlap": true,
+    "topk_buffer_size": {{ role.topk_buffer_size }}, "dram_size_per_dp_GB": {{ role.host_gib }},
+    "host_backend": "mooncake", "keep_device_kv_cache": false, "lru_max_threads": {{ role.lru_threads }}
+  },
+  "mega_moe_max_tokens": 131072
+}'
+# Explicitly isolate the receipt owner and retention ports of each DP engine.
+owner_port=$(({{ role.owner_rpc_port }} + rank * 32))
+retention_port=$((owner_port + {{ tp_size }}))
+kv_config=$(cat <<EOF
+{
+  "kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_consumer",
+  "kv_port": {{ role.kv_port }}, "kv_load_failure_policy": "fail",
+  "kv_connector_extra_config": {
+    "layerwise_receipt_mode": true, "target_owner_rpc_base_port": $owner_port,
+    "target_retention_rpc_port": $retention_port,
+    "layerwise_receipt_timeout_s": {{ role.receipt_timeout_s }}
+  }
+}
+EOF
+)
+{% endif %}
+exec vllm serve {{ model_path | quote }} \
+  --host {{ ip }} --port "$port" --api-server-count 1 \
+  --trust-remote-code --served-model-name {{ model_name | quote }} \
+  --distributed-executor-backend mp --enable-expert-parallel \
+  --data-parallel-size {{ dp_size }} --data-parallel-rank "$rank" \
+  --data-parallel-address {{ hostvars['p0' if node_role == 'prefill' else 'd0'].ip }} \
+  --data-parallel-rpc-port {{ role.rpc_port }} --tensor-parallel-size {{ tp_size }} \
+  --prefill-context-parallel-size 1 --decode-context-parallel-size 1 \
+  --max-model-len {{ max_model_len }} --block-size {{ block_size }} \
+  --max-num-batched-tokens {{ role.max_num_batched_tokens }} --max-num-seqs {{ role.max_num_seqs }} \
+  --gpu-memory-utilization {{ role.gpu_memory_utilization }} \
+  --kv-cache-dtype auto --attention_config.indexer_kv_dtype int8 \
+  --quantization ascend --enforce-eager \
+  --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm45 --seed 1024 \
+{% if node_role == 'prefill' %}
+  --no-enable-prefix-caching --enable-chunked-prefill \
+  --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":8}' \
+{% else %}
+  --safetensors-load-strategy prefetch \
+  --no-enable-prefix-caching --async-scheduling \
+  --scheduler-cls vllm_ascend.core.receipt_scheduler.AsyncReceiptScheduler \
+  --no-disable-hybrid-kv-cache-manager --hf-overrides '{"use_index_cache":true}' \
+{% endif %}
+  --speculative-config '{"method":"deepseek_mtp","num_speculative_tokens":{{ role.mtp }},"enforce_eager":true}' \
+  --additional-config "$additional_config" --kv-transfer-config "$kv_config"

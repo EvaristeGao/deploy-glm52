@@ -1,0 +1,60 @@
+---
+- import_playbook: stop.yml
+
+- name: Restore a Master captured inside the predecessor P0 container
+  hosts: p0
+  gather_facts: false
+  tasks:
+    - name: Restore captured Master if present
+      ansible.builtin.script:
+        cmd: >-
+          container.py restore-master --name {{ container_name | quote }}
+          --previous {{ previous_containers[inventory_hostname] | quote }}
+          --directory {{ run_dir | quote }} --image {{ image | quote }}
+        executable: python3
+
+- name: Restore each captured predecessor engine
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Restore saved launch command in the captured container
+      ansible.builtin.script:
+        cmd: >-
+          container.py restore-engine --name {{ container_name | quote }}
+          --previous {{ previous_containers[inventory_hostname] | quote }}
+          --directory {{ run_dir | quote }} --image {{ image | quote }}
+        executable: python3
+
+- name: Restore previous proxy after engine readiness
+  hosts: p0
+  gather_facts: false
+  tasks:
+    - name: Wait for previous engines
+      ansible.builtin.uri:
+        url: "http://{{ item }}/health"
+        use_proxy: false
+        timeout: 10
+      loop: "{{ previous_engine_endpoints }}"
+      register: restored
+      until: restored.status | default(0) == 200
+      retries: 240
+      delay: 10
+
+    - name: Restore proxy command captured from P0
+      ansible.builtin.script:
+        cmd: >-
+          container.py restore-proxy --name {{ container_name | quote }}
+          --previous {{ previous_containers[inventory_hostname] | quote }}
+          --directory {{ run_dir | quote }} --image {{ image | quote }}
+        executable: python3
+
+    - name: Verify previous proxy
+      ansible.builtin.uri:
+        url: "{{ previous_proxy_url }}"
+        use_proxy: false
+        timeout: 10
+      register: restored_proxy
+      until: restored_proxy.status | default(0) == 200
+      retries: 30
+      delay: 5

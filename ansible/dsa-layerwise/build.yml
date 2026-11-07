@@ -1,0 +1,105 @@
+---
+- name: Build the immutable development image on P0
+  hosts: p0
+  gather_facts: false
+  vars:
+    source_tree: "{{ playbook_dir }}/../../src/vllm-ascend-reuse"
+  tasks:
+    - name: Require the pinned SDK to cover all native compilation inputs
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - "{{ source_tree }}"
+          - diff
+          - --exit-code
+          - "{{ native_source_revision }}"
+          - "{{ source_revision }}"
+          - --
+          - csrc
+          - cmake
+          - CMakeLists.txt
+          - setup.py
+          - pyproject.toml
+          - 'requirements*.txt'
+          - Dockerfile.a3.openEuler
+          - .gitmodules
+      delegate_to: localhost
+      changed_when: false
+      when: native_source_revision is defined
+
+    - name: Prepare build directory
+      ansible.builtin.file:
+        path: "{{ build_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Create pinned source archive on controller
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .tar.gz
+      delegate_to: localhost
+      register: source_archive
+
+    - name: Build from the committed source snapshot
+      block:
+        - name: Archive development source
+          ansible.builtin.command:
+            argv: [git, -C, "{{ source_tree }}", archive, -o, "{{ source_archive.path }}", "{{ source_revision }}", vllm_ascend, examples/disaggregated_prefill_v1]
+          delegate_to: localhost
+
+        - name: Stage source archive
+          ansible.builtin.copy:
+            src: "{{ source_archive.path }}"
+            dest: "{{ build_dir }}/source.tar.gz"
+            mode: "0644"
+
+        - name: Stage Dockerfile
+          ansible.builtin.copy:
+            src: Dockerfile
+            dest: "{{ build_dir }}/Dockerfile"
+            mode: "0644"
+
+        - name: Verify source and build image
+          ansible.builtin.shell:
+            executable: /bin/bash
+            chdir: "{{ build_dir }}"
+            cmd: |
+              set -euo pipefail
+              exec > >(tee build.log) 2>&1
+              tar -xzf source.tar.gz
+              printf '%s\n' "$SOURCE_REVISION" > SOURCE_REVISION
+              python3 - <<'PY'
+              import hashlib
+              import os
+              from pathlib import Path
+              roots = {
+                  Path("vllm_ascend"): os.environ["PACKAGE_ROOT"],
+                  Path("examples/disaggregated_prefill_v1"): "/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1",
+              }
+              with open("SOURCE_SHA256SUMS", "w") as output:
+                  for root, target in roots.items():
+                      for path in sorted(root.rglob("*")):
+                          if path.is_file():
+                              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                              output.write(f"{digest}  {target}/{path.relative_to(root)}\n")
+              PY
+              docker build --build-arg BASE_IMAGE="$BASE_IMAGE" \
+                --build-arg SOURCE_REVISION="$SOURCE_REVISION" \
+                --build-arg PACKAGE_ROOT="$PACKAGE_ROOT" -t "$IMAGE" .
+              docker save -o image.tar.tmp "$IMAGE"
+              mv image.tar.tmp image.tar
+              docker image inspect --format '{% raw %}{{.Id}}{% endraw %}' "$IMAGE" > image.id
+          environment:
+            BASE_IMAGE: "{{ base_image }}"
+            SOURCE_REVISION: "{{ source_revision }}"
+            IMAGE: "{{ image }}"
+            PACKAGE_ROOT: "{{ package_root | default('/usr/local/python3.12.13/lib/python3.12/site-packages/vllm_ascend') }}"
+          async: 3600
+          poll: 15
+      always:
+        - name: Remove controller archive
+          ansible.builtin.file:
+            path: "{{ source_archive.path }}"
+            state: absent
+          delegate_to: localhost

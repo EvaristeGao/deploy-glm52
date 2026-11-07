@@ -1,0 +1,35 @@
+---
+- name: Verify a real near-1M layerwise P/D request
+  hosts: p0
+  gather_facts: false
+  tasks:
+    - name: Stage the long prompt probe
+      ansible.builtin.copy:
+        src: long_probe.py
+        dest: "{{ run_dir }}/long_probe.py"
+        mode: "0644"
+
+    - name: Allocate a unique output file name
+      ansible.builtin.command:
+        argv: [python3, -c, "import uuid; print(uuid.uuid4().hex)"]
+      register: probe_nonce
+      changed_when: false
+
+    - name: Run the full prompt through the D-first proxy
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ run_dir }}/long_probe.py"
+          - --proxy
+          - "http://{{ ip }}:{{ proxy_port }}"
+          - --tokenize
+          - "http://{{ ip }}:{{ prefill_config.api_port }}"
+          - --output
+          - "{{ run_dir }}/logs/probe_1m_{{ probe_nonce.stdout }}.jsonl"
+      async: 10920
+      poll: 15
+      register: probe
+
+    - name: Report the complete stream result
+      ansible.builtin.debug:
+        var: probe.stdout_lines

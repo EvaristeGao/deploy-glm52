@@ -1,0 +1,96 @@
+---
+- name: Cut over the captured vLLM deployment
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Check previous engines have no running or waiting requests
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          python3 - <<'PY'
+          import urllib.request
+          for endpoint in {{ previous_engine_endpoints | to_json }}:
+              with urllib.request.urlopen(f"http://{endpoint}/metrics", timeout=10) as response:
+                  lines = response.read().decode().splitlines()
+              values = [float(line.rsplit(" ", 1)[1]) for line in lines
+                        if line.startswith(("vllm:num_requests_running{", "vllm:num_requests_waiting{"))]
+              assert len(values) >= 2 and all(value == 0 for value in values), (endpoint, values)
+          print("All captured previous engines are idle")
+          PY
+      delegate_to: p0
+      run_once: true
+      changed_when: false
+      tags: [cutover]
+
+    - name: Stop captured predecessor and verify NPU ownership
+      ansible.builtin.script:
+        cmd: >-
+          container.py cutover --name {{ container_name | quote }}
+          --previous {{ previous_containers[inventory_hostname] | quote }}
+          --directory {{ run_dir | quote }} --image {{ image | quote }}
+        executable: python3
+      tags: [cutover]
+
+    - name: Verify free NPUs before launching engines
+      ansible.builtin.script:
+        cmd: >-
+          container.py check-free --name {{ container_name | quote }}
+          --previous {{ previous_containers[inventory_hostname] | quote }}
+          --directory {{ run_dir | quote }} --image {{ image | quote }}
+        executable: python3
+      tags: [launch]
+
+    - name: Start private Mooncake Master on P0
+      ansible.builtin.command:
+        argv: [docker, exec, -d, "{{ container_name }}", bash, /root/pd/start_master.sh]
+      when: inventory_hostname == 'p0'
+      tags: [launch]
+
+    - name: Wait for Mooncake Master
+      ansible.builtin.wait_for:
+        host: "{{ hostvars['p0'].ip }}"
+        port: "{{ master_port }}"
+        timeout: 60
+      tags: [launch]
+
+    - name: Start the node's two isolated TP engines
+      ansible.builtin.command:
+        argv: [docker, exec, -d, "{{ container_name }}", bash, /root/pd/start_engines.sh]
+      tags: [launch]
+
+- name: Wait for every API and start D-first proxy
+  hosts: p0
+  gather_facts: false
+  tasks:
+    - name: Wait for all eight engines
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[item.0].ip }}:{{ (prefill_config.api_port if item.0 in groups['prefill'] else decode_config.api_port) + hostvars[item.0].idx * dp_local + item.1 }}/health"
+        timeout: 10
+        use_proxy: false
+      loop: "{{ groups['all'] | product(range(dp_local) | list) | list }}"
+      register: engine_health
+      until: engine_health.status | default(0) == 200
+      retries: "{{ ready_retries }}"
+      delay: 10
+      tags: [wait]
+
+    - name: Start D-first layerwise proxy
+      ansible.builtin.command:
+        argv: [docker, exec, -d, "{{ container_name }}", bash, /root/pd/start_proxy.sh]
+      tags: [proxy]
+
+    - name: Verify proxy sees all four P and four D engines
+      ansible.builtin.uri:
+        url: "http://{{ ip }}:{{ proxy_port }}/healthcheck"
+        timeout: 10
+        use_proxy: false
+        return_content: true
+      register: proxy_health
+      until: >-
+        proxy_health.status | default(0) == 200 and
+        proxy_health.json.prefill_instances | default(0) == dp_size and
+        proxy_health.json.decode_instances | default(0) == dp_size
+      retries: 30
+      delay: 5
+      tags: [proxy]

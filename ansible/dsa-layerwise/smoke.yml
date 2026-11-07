@@ -1,0 +1,29 @@
+---
+- name: Verify requests and receipts on all four Decode engines
+  hosts: p0
+  gather_facts: false
+  tasks:
+    - name: Stage the functional request probe
+      ansible.builtin.copy:
+        src: smoke.py
+        dest: "{{ run_dir }}/smoke.py"
+        mode: "0644"
+
+    - name: Run short, multichunk and prefix replay requests through D-first proxy
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ run_dir }}/smoke.py"
+          - --proxy
+          - "http://{{ ip }}:{{ proxy_port }}"
+          - --logs
+          - "{{ deployment_root }}/{{ run_name }}"
+          - --tp
+          - "{{ tp_size | string }}"
+      async: 3600
+      poll: 15
+      register: smoke
+
+    - name: Report request results
+      ansible.builtin.debug:
+        var: smoke.stdout_lines
