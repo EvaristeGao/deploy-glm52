@@ -1,4 +1,4 @@
-> **2026-11-08 重构进行中**：按审查开始分批实施。080220d72移除未用的全局channel/Pipe组装器，保留测试夹具，RPC直接使用独立retention协议；首批200项CPU通过/1跳过。镜像替换已补原生SDK保护和陈旧模块清理，文件系统5项测试通过，尚未部署重构版。当前现场仍为此前dfb52bd0a候选，本轮只读健康复核通过。范围、剩余项与证据见[重构执行清单](receipt-refactor-progress-20261108.md)。
+> **2026-11-08 重构进行中**：按审查开始分批实施。080220d72移除未用的全局channel/Pipe组装器，保留测试夹具，RPC直接使用独立retention协议；cf4ad2e31进一步拆分接收组件和请求索引，全套217项CPU通过/1跳过，另37项旧ledger通过。镜像源替换6项文件系统测试通过，两D空闲候选1395项SDK校验不变、旧模块不可导入；原生PD仍待验收。当前现场仍为此前dfb52bd0a候选，本轮只读健康复核通过。范围、剩余项与证据见[重构执行清单](receipt-refactor-progress-20261108.md)。
 
 > **2026-11-07 PR检视与重构审查最新更新**：已提交batch共享校验/完成事件、真实graph update stream fence、线程启动失败检测，以及`dfb52bd0a`的编译图限制；203项测试通过、1跳过、112子用例。后续无计时MTP3/mode0语义仅17/20，同提示对照18/20，并非仅首个冷请求异常，旧mode0性能数据不能当作已验收服务基线。源码及Ansible已拒绝mode0，仅允许eager或mode3/FULL_DECODE_ONLY，最终dfb52bd0a的mode3/MTP3/无计时新镜像已通过40/40语义、加断连41/41全rank生命周期，实际prefix命中约49.4%；八引擎健康空闲，D保留...-review-safe，P/Master/proxy保持原进程，profile见artifacts/review-fixes-20261107/safe.yml。新配置尚未重跑正式性能矩阵，异常根因未完全定位。默认inventory仍为fe559c440/eager，勿用旧graph.yml重新部署。首轮结构审查见[重构报告](receipt-code-refactor-audit-20261107.md)，过程和最终现场见runbook §11.78；下面同日记录为较早阶段的历史结果。
 

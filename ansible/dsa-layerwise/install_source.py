@@ -34,7 +34,7 @@ def native_hashes(package, names):
         root = package / name
         paths = root.rglob("*") if root.is_dir() else (root,)
         for path in paths:
-            if path.is_file() and "__pycache__" not in path.parts:
+            if path.is_file() and "__pycache__" not in path.parts and path.name != ".gitkeep":
                 result[path.relative_to(package)] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
 
@@ -58,7 +58,15 @@ def install_source(source, package, examples):
     if examples.name != "disaggregated_prefill_v1" or not incoming_examples.is_dir():
         raise ValueError("Expected explicit disaggregated example roots")
     names = sdk_names(package)
-    if any(p.name in names for p in incoming.iterdir()) or any(shared_library(p) for p in incoming.rglob("*")):
+    for path in incoming.iterdir():
+        if path.name in SDK_DIRECTORIES and path.is_dir():
+            # Git carries only a placeholder; the generated operator kit is
+            # installed here by the native SDK, not rebuilt by a source overlay.
+            if all(p.is_file() and p.name == ".gitkeep" for p in path.rglob("*")):
+                continue
+        if path.name in names:
+            raise ValueError("Source must not replace pinned native artifacts or generated metadata")
+    if any(shared_library(p) for p in incoming.rglob("*")):
         raise ValueError("Source must not replace pinned native artifacts or generated metadata")
     before = native_hashes(package, names)
     for path in package.iterdir():

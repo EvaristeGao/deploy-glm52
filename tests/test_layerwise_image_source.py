@@ -37,6 +37,7 @@ class TestImageSource(unittest.TestCase):
         self.put(self.examples / "obsolete_proxy.py", "old proxy")
         self.put(self.source / "vllm_ascend/__init__.py", "new = True")
         self.put(self.source / "vllm_ascend/new_module.py", "new = True")
+        self.put(self.source / "vllm_ascend/_cann_ops_custom/.gitkeep", "tracked placeholder")
         self.put(self.source / "examples/disaggregated_prefill_v1/new_proxy.py", "new proxy")
 
     @staticmethod
@@ -76,6 +77,12 @@ class TestImageSource(unittest.TestCase):
             installer.install_source(self.source, self.package, self.examples)
         self.assertTrue((self.package / "obsolete.py").is_file())
         self.assertTrue((self.package / "ops/unclassified.so").is_file())
+
+    def test_native_operator_source_cannot_be_overridden_by_the_overlay(self):
+        self.put(self.source / "vllm_ascend/_cann_ops_custom/operator.py", "changed operator")
+        with self.assertRaisesRegex(ValueError, "pinned native"):
+            installer.install_source(self.source, self.package, self.examples)
+        self.assertEqual((self.package / "_cann_ops_custom/operator.py").read_text(), "pinned operator source")
 
     def test_incomplete_sdk_fails_closed(self):
         (self.package / "_build_info.py").unlink()

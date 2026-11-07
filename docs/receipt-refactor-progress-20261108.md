@@ -8,11 +8,11 @@
 
 | 项目 | 完成证据要求 | 当前状态 |
 | --- | --- | --- |
-| 清理旧全局 channel 和 Pipe 组装原型 | 生产无依赖；显式独立 owner、双向 Pipe/进程故障回归 | `080220d72`，200 项通过/1 跳过；另增 legacy frame 用例待下一批聚焦回归 |
+| 清理旧全局 channel 和 Pipe 组装原型 | 生产无依赖；显式独立 owner、双向 Pipe/进程故障回归 | `080220d72`，并入后续全套217项通过/1跳过，含新增v1/v2 legacy frame用例 |
 | retention 协议与传输解耦 | RPC 不再继承 Pipe 类；v1/v2 schema 保持兼容 | `target_retention_protocol.py`，Pipe 仅在测试目录；同上 |
-| 干净镜像源替换 | 陈旧 Python/字节码消失，SDK native/operator/metadata 校验不变 | 标准库文件系统测试 5/5；真实新镜像待验证 |
-| connector 请求状态和锁归属 | 一个 worker-local 请求索引；安装/退役/取消/延迟消息、并发测试；保持锁序 | 待实现 |
-| 拆分 connector receipt 组装 | 明确 scheduler/worker/receive 边界，减少主 connector 职责；原生 PD 回归 | 待实现 |
+| 干净镜像源替换 | 陈旧 Python/字节码消失，SDK native/operator/metadata 校验不变 | 文件系统测试6/6；两D空闲镜像1395个SDK哈希不变，旧模块不可import |
+| connector 请求状态和锁归属 | 一个 worker-local 请求索引；安装/退役/取消/延迟消息、并发测试；保持锁序 | cf4ad2e31，CPU217项/1跳过、旧ledger37项通过；原生PD待验 |
+| 拆分 connector receipt 组装 | 明确 scheduler/worker/receive 边界，减少主 connector 职责；原生 PD 回归 | cf4ad2e31提取ReceiptReceiver/ReceiveRequestIndex；原生PD待验 |
 | provider/runtime 状态重复 | 明确共享转换契约，减少重复拷贝，保留 descriptor/block/native-completion 各自证明 | 待实现 |
 | wire 几何 normalization 重复 | 共用语义相同的纯函数，保留两套 trust/version 边界和 whitelist | 待实现 |
 | 完成事件历史 | 按真实 stream 有序 frontier 压缩，覆盖乱序退出、动态 stream、失败恢复 | 待实现 |
@@ -31,3 +31,8 @@
 `artifacts/receipt-refactor-20261108/`。
 
 尚未完成全目标；每项单独提交并记录测试，原生验收前不宣称重构版可用。
+
+首次真实构建因源码内_cann_ops_custom/.gitkeep被过严的SDK保护规则拒绝，
+失败发生在构建器而非服务切换。已补允许该占位文件、禁止实际operator覆盖
+的回归，重新构建成功；删除模块与原生SDK的1395项校验在两台D上通过。
+原dfb52bd0a服务未切换；新r1容器只用于独立源码/SDK检查和真实导入测试。

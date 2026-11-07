@@ -2586,3 +2586,17 @@ PipeOwnerChannel组装器；RPC继承无transport字段的RemoteRetentionAuthori
 5项回归覆盖删除模块不可import、旧字节码消失、重复快照删除、native/symlink
 内容保留、metadata碰撞和未知嵌套native库拒绝。真实新镜像与后续结构改造
 仍待验收，不将首批CPU通过当全目标完成。详见执行清单及本轮artifacts。
+
+11.79补记：真实SDK构建检测到源码内_cann_ops_custom/.gitkeep；初次过严规则
+在镜像构建期拒绝，不涉及服务切换。补充只允许.gitkeep、不允许覆盖实际
+operator文件的回归后6项文件系统测试通过，新080220d72镜像构建成功；两台D
+的空闲refactor-r1候选均1395项SDK哈希通过，已删除的channel/wire模块及旧
+pyc不可import。完整日志image-check.log，初次失败保存在phase1-build-attempt1.log。
+
+cf4ad2e31继续拆分ReceiptReceiver和ReceiveRequestIndex，去除receive端平行
+ledger/id/deadline字典及worker_admitted_target_blocks；旧普通P/D映射保留，
+exact目标通过接收记录查询。delivery->index->ledger锁序明确，外部provider
+回调在index锁之外；回调后检查记录仍存活，取消赢得visibility锁时不发布。
+同时覆盖共享external-id多代次、未知/延迟身份、正常legacy发布与状态集轮换；
+16项接收用例使用真实msgpack0.22在CPU运行，全套217通过/1跳过/112子用例，
+旧ledger37通过。真实SDK connector导入回归正在运行，尚未做新版本原生PD验收。
