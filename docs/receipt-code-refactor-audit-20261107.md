@@ -1,5 +1,8 @@
 # P Main reuse / D receipt 代码重构审查
 
+后续实现与验收状态见[重构执行记录](receipt-refactor-progress-20261108.md)。
+本文件保留2026-11-07审查时的规模、证据和建议，不将历史待办当成当前状态。
+
 审查对象：`src/vllm-ascend-reuse` 的 `p-main-buffer-reuse`，固定代码
 `dfb52bd0a`，相对上游基线 `4234a1f18`。这是首轮边界、调用者和热路径审查，
 不是全仓所有函数的逐行正确性证明。统计脚本和原始清单在

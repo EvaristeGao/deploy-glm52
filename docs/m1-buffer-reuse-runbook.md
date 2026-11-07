@@ -2570,7 +2570,7 @@ TPOT收益。限制mode0和这批mode3成功样本不构成全部历史异常根
 safe-prefix-proof.json、safe-cancel.log、safe-health.json、safe-manifest.json、
 safe-log-audit.json、safe-dlogs.tar.gz、p0-control-safe.json。最终不再发新请求。
 
-### 11.79 Receipt重构第一批（2026-11-08，进行中）
+### 11.79 Receipt重构与原生验收（2026-11-08，已收尾）
 
 源码080220d72移除生产无调用者的target_owner_channel和target_owner_wire，
 Pipe双向真实线程/进程故障夹具移至tests/owner_pipe.py，清除无调用者的
@@ -2598,5 +2598,44 @@ ledger/id/deadline字典及worker_admitted_target_blocks；旧普通P/D映射保
 exact目标通过接收记录查询。delivery->index->ledger锁序明确，外部provider
 回调在index锁之外；回调后检查记录仍存活，取消赢得visibility锁时不发布。
 同时覆盖共享external-id多代次、未知/延迟身份、正常legacy发布与状态集轮换；
-16项接收用例使用真实msgpack0.22在CPU运行，全套217通过/1跳过/112子用例，
+16项接收用例使用真实msgspec0.22在CPU运行，全套217通过/1跳过/112子用例，
 旧ledger37通过。真实SDK connector导入回归正在运行，尚未做新版本原生PD验收。
+
+11.79第二批：f72583434/d634632f6实现真实stream+序号frontier，乱序返回、
+不同stream/owner、opaque依赖不互相覆盖；失败record保留撤销订阅的stream，
+无法识别stream时隔离owner。event析构引用在runtime锁外淘汰。a32335a55
+共享dtype/block范围纯检查，删除provider闲置exception字段和释放后的delivery
+别名。64代次复用回归保留stale拒绝和release幂等，compact指纹不任意淘汰。
+provider/runtime状态和可注入回调的防御副本经核对仍必要，未机械合并。
+最后CPU227 passed、1 skipped、112 subtests，legacy37；真实SDK phase2首次
+因测试bootstrap的源码相对路径collection失败，b2c4c5e1d修正后48 passed。
+
+原dfb52bd0a mode3/MTP3控制样本已跑55K/700、N40/C10和N40/C20，固定seed
+20261106、逐条salt无外部prefix命中。40+40全部SSE/700输出完成，全8-rank
+receipt/release审计通过；随机文本不检查语义。TTFT P50/P99为
+13.32/31.72和23.57/53.15秒，TPOT P50/P99为32.81/40.02及41.95/55.86ms。
+只是一组顺序样本，不宣称稳态性能结论。证据before/、before-audit80.json、
+before-manifest.json；P/Master/proxy尚未重启。基线完成后才开始构建/分发
+最终d634632f6候选；新代码完整模型验收仍待进行。
+
+11.79最终验收：d634632f6镜像两D一致
+sha256:0ac34e9dd889ed5c254fa9285d4521298c9730c45e345a316012672b9435aede。
+CPU227通过/1跳过/112子项，legacy37、SDK48、镜像6项通过；真实双stream
+1000步只保留2个frontier屏障且tensor值正确。新nonce和原失败提示各20条
+语义/全rank回执及释放通过；整体冷+回放组prefix命中约49.4%。生成中断连
+仅8次提议/24个draft token后回收，队列/KV归零，合计41/41生命周期通过。
+
+匹配55K/700、N40/C10/C20新旧各80条，prompt hashes/input_lens一致、所有salt
+独立、外部prefix命中0，全8-rank回收。新D TTFT P50/P99为13.46/34.98及
+25.12/57.04s；TPOT为31.44/38.97及39.60/50.13ms。旧D为13.32/31.72、
+23.57/53.15s和32.81/40.02、41.95/55.86ms。单轮TPOT小幅下降、TTFT略升，
+不能宣称稳定latency收益；保留所有样本，不重跑挑数字。完整表见执行记录。
+
+最终保留...-refactor-r3 D，原P e9bd1ce19/dgraph、Master2435912/proxy2470638
+及其启动时刻不变。配置仍D TP8×DP4/Host100GiB每DP/seq8/token32/async/
+mode3/FULL_DECODE_ONLY/MTP3；target graph、draft eager，无timer/profiler。
+八引擎和proxy健康空闲、KV归零，D应用日志ERROR/Traceback/thread exception
+及timer均0，四D target图捕获成功。原dfb D和r1/r2候选停止保留，CPU客户端
+停止。source/native manifest、health/control/owned-container最终证据均保存。
+不外推历史异常根因、MTP5/1M输入或native delayed-DMA/reset故障注入。
+详见docs/receipt-refactor-progress-20261108.md和本轮artifacts。

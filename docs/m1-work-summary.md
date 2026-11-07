@@ -382,3 +382,28 @@ draft KV。并发 10 的短探针 10/10、正式 55K/700 压测 40/40，均通�
 D 的 16 个 TP rank receipt 和目标释放检查。D MTP5 将 TPOT P50 从
 349.91 ms 降到 112.80 ms，原始 INT8 档为 44.11 ms。D 候选每台 16 条
 序列、每步 32 token，TopK buffer 实测 33.33 GiB。见 runbook §11.71。
+
+
+2026-11-08，receipt结构清理进行中。已删除旧生产全局/Pipe原型，拆出
+transport-neutral retention及ReceiptReceiver/ReceiveRequestIndex，明确
+锁序和取消后的发布检查。完成事件改为按stream有序frontier；退休时清理
+live request-id别名，保留重放指纹。provider的块归属和runtime的native完成
+证明继续独立；防御副本保留，删除无人读取的异常traceback留存。
+CPU227项通过/1跳过/112子项，legacy37项通过；真实SDK connector导入48项
+通过。镜像构建修复陈旧Python/pyc残留并保护1395项SDK原生文件，6项文件系统
+测试通过。d634632f6新镜像正在构建，完整原生PD和最终性能尚待验收。
+旧dfb/mode3/MTP3的55K/700、C10/C20各40条全部完成并全8-rank回收；
+TTFT P50为13.32/23.57秒，TPOT P50为32.81/41.95毫秒。详见执行清单
+`docs/receipt-refactor-progress-20261108.md`和runbook§11.79。
+
+本轮d634632f6新D镜像已通过真实SDK48项、双stream/1000步NPU事件检查，以及
+40条语义+1次生成中断连，共41条全8-rank生命周期审计。整体冷+回放组外部命中
+约49.4%，P、Master/proxy身份不变。当前D容器为...-refactor-r3，mode3/MTP3；
+最终C10的40条性能请求通过，C20运行中。原dfb容器已停止保留，默认inventory
+仍不自动改为实验profile。历史异常根因、MTP5新镜像及1M输入不从本轮外推。
+
+本轮已收尾：源码运行版本d634632f6、D ...-refactor-r3继续运行。固定hash性能
+前后各80条均全rank完成并释放，55K/700/C10、C20新TPOT P50为31.44/39.60ms，
+旧为32.81/41.95；新TTFT为13.46/25.12s，旧为13.32/23.57。这是单轮匹配样本，
+不宣称稳定提速。八引擎和proxy健康空闲，原P/Master/proxy未重启，旧D及中间
+候选停止保留。最新状态以执行记录最终段和runbook§11.79收尾为准。
