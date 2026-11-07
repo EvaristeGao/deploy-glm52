@@ -2569,3 +2569,20 @@ TPOT收益。限制mode0和这批mode3成功样本不构成全部历史异常根
 证据：safe-functional-verdict.json、safe-compare-verdict.json、safe-audit41.json、
 safe-prefix-proof.json、safe-cancel.log、safe-health.json、safe-manifest.json、
 safe-log-audit.json、safe-dlogs.tar.gz、p0-control-safe.json。最终不再发新请求。
+
+### 11.79 Receipt重构第一批（2026-11-08，进行中）
+
+源码080220d72移除生产无调用者的target_owner_channel和target_owner_wire，
+Pipe双向真实线程/进程故障夹具移至tests/owner_pipe.py，清除无调用者的
+PipeOwnerChannel组装器；RPC继承无transport字段的RemoteRetentionAuthority，
+不再跳过Pipe构造函数。RetentionOp/Result字段与codec v1/v2名称保持不变。
+原全局slot测试改为两个同时存活的显式DispatcherOwnerTransport独立生命周期
+和未绑定/关闭拒绝测试，真实connector接线用例仍保留。首批200 passed、
+1 skipped、112 subtests；额外legacy wire frame兼容回归待下一次聚焦运行。
+
+镜像源替换前读取实际SDK文件清单，发现除.so/metadata还有整套CANN生成算子
+目录及include/lib64，必须整体保留。install_source.py校验并保留这些SDK产物，
+删除其余管理的源码树后复制新快照；构建改为mktemp独立context。文件系统
+5项回归覆盖删除模块不可import、旧字节码消失、重复快照删除、native/symlink
+内容保留、metadata碰撞和未知嵌套native库拒绝。真实新镜像与后续结构改造
+仍待验收，不将首批CPU通过当全目标完成。详见执行清单及本轮artifacts。

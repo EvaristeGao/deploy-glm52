@@ -60,6 +60,12 @@
             dest: "{{ build_dir }}/Dockerfile"
             mode: "0644"
 
+        - name: Stage managed source installer
+          ansible.builtin.copy:
+            src: install_source.py
+            dest: "{{ build_dir }}/install_source.py"
+            mode: "0644"
+
         - name: Verify source and build image
           ansible.builtin.shell:
             executable: /bin/bash
@@ -67,8 +73,12 @@
             cmd: |
               set -euo pipefail
               exec > >(tee build.log) 2>&1
-              tar -xzf source.tar.gz
-              printf '%s\n' "$SOURCE_REVISION" > SOURCE_REVISION
+              build_context="$(mktemp -d "$PWD/context.XXXXXX")"
+              trap 'rm -rf -- "$build_context"' EXIT
+              export GLM52_BUILD_CONTEXT="$build_context"
+              tar -xzf source.tar.gz -C "$build_context"
+              cp Dockerfile install_source.py "$build_context/"
+              printf '%s\n' "$SOURCE_REVISION" > "$build_context/SOURCE_REVISION"
               python3 - <<'PY'
               import hashlib
               import os
@@ -77,16 +87,17 @@
                   Path("vllm_ascend"): os.environ["PACKAGE_ROOT"],
                   Path("examples/disaggregated_prefill_v1"): "/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1",
               }
-              with open("SOURCE_SHA256SUMS", "w") as output:
+              context = Path(os.environ["GLM52_BUILD_CONTEXT"])
+              with open(context / "SOURCE_SHA256SUMS", "w") as output:
                   for root, target in roots.items():
-                      for path in sorted(root.rglob("*")):
+                      for path in sorted((context / root).rglob("*")):
                           if path.is_file():
                               digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                              output.write(f"{digest}  {target}/{path.relative_to(root)}\n")
+                              output.write(f"{digest}  {target}/{path.relative_to(context / root)}\n")
               PY
               docker build --build-arg BASE_IMAGE="$BASE_IMAGE" \
                 --build-arg SOURCE_REVISION="$SOURCE_REVISION" \
-                --build-arg PACKAGE_ROOT="$PACKAGE_ROOT" -t "$IMAGE" .
+                --build-arg PACKAGE_ROOT="$PACKAGE_ROOT" -t "$IMAGE" "$build_context"
               docker save -o image.tar.tmp "$IMAGE"
               mv image.tar.tmp image.tar
               docker image inspect --format '{% raw %}{{.Id}}{% endraw %}' "$IMAGE" > image.id
