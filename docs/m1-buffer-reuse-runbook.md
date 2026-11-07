@@ -2284,3 +2284,108 @@ ID、启动时间和启动脚本 hash 完全相同。只停止本次 CPU 性能�
 
 证据与可复现脚本：`artifacts/mtp-prefix-20261107/`；日志：
 `/mnt/sfs_turbo/g00832294/layerwise-guide/tp8-dp4-1m-cann92-mtp-prefix/`。
+
+
+### 11.76 D decode 性能定位与首轮优化（2026-11-07，性能验证完成）
+
+用户要求定位 D 性能劣化的主要原因并开始优化。PR #1 的三条意见分别指向
+完整 lease 深比较、共享注册池逐请求校验、receipt eager 限制与图外事件开销。
+当前尚未量出这些项的现场占比，不把静态复杂度或不同配置的历史性能差距
+直接当成因果结论。
+
+诊断源码 `f0abb2e8a` 增加默认关闭的 `receipt_timing_interval`，在已绑定的
+worker 实例上记录 target/draft 两种 batch 上下文的进入、body wall、退出，
+以及 lease、资源、tensor 元数据、注册快照、visibility 和 record_use 嵌套
+计时。计时不新增 NPU 同步或事件；嵌套项不可相加，body wall 也不是纯
+kernel 时长。min_prompt_tokens=50000 排除功能探针；每64个上下文汇总日志。
+90项和48子用例通过，包含异常传播和原有完成路径的透明性验证。
+
+独立 Ansible 诊断覆盖配置为 `artifacts/d-decode-performance-20261107/diagnostic.yml`，
+新容器 `vllm-ascend-glm52-layerwise-guide-dtiming`，前任 `...-mtp-prefix` 保留。
+不改默认 inventory，仍保留 TP8×DP4、P/D MTP1/3、1M、P B2、D Host100GiB、
+D seq8/token32、eager。先运行未开启 NPU trace 的20条55K/700/C10样本，
+再单独跑10条请求，并在收到8条首token后选择活跃D实例采集8步trace；后者
+不用于正式性能结论。设备trace、计时日志和分项统计尚待采集。
+
+诊断已完成：20/20随机性能请求成功，TPOT P50=117.632ms、TTFT P50=15.452s，
+输入1,099,510/output14,000；该20条样本不能把吞吐直接与前轮40条结果比较。
+32个D worker按target/draft分别统计：target enter/exit合计约4.71ms，body
+326.75ms；draft enter/exit约4.89ms，body19.88ms；target step interval
+369.81ms。receipt进入/退出约占2.6%，嵌套检查不重复累计，不对TP耗时求和。
+
+独立8步trace已采集，在D1容器中离线解析TP0/1（profiler子进程的在线导出器
+不能创建子进程，离线analyse成功）。TP0的stage3.510s、compute0.518s、
+free2.967s，36,680次kernel launch；host self MLA0.764s、MoE0.466s。
+TP1表现为更多通信等待：stage3.864s、compute1.255s、通信2.257s、free0.352s。
+各rank不能互相当作相同空闲率，也不能把trace绝对时长当作正常性能。
+优先验证eager host下发/图外执行，而非把完整劣化归于receipt metadata。
+
+原诊断smoke在short-2(540input/7output)返回MAPLEPAMAPLE，正常stop但未满足
+单词语义断言；已保留smoke-attempt1.log，尚未证明原因。独立随机性能阶段
+仅验证完整SSE/usage/700输出，未以随机文本语义阻断定位。
+
+候选源码e9bd1ce19允许registered D target使用FULL_DECODE_ONLY，仍拒绝
+其他graph模式和PP/CP/DCP>1。P侧eager、Main复用、MTP1及D MTP3/Host/
+AsyncReceiptScheduler均保留；receipt admission仍在graph外，实际target和
+draft replay由原use上下文包围，消费stream前的visibility和replay后的完成
+事件均未删。93项/60子用例通过。候选Ansible graph.yml只对D切换target和
+draft graph并固定1..32的10个capture尺寸；无计时/trace配置。新容器...-dgraph，
+日志run_name=tp8-dp4-1m-cann92-dgraph。部署和NPU验证进行中，不视为已可用。
+
+图候选已完成现场性能验证，源码e9bd1ce19，新镜像
+`glm52-vllm-ascend:0.30.0-layerwise-guide-e9bd1ce19-cann92`，四节点ID一致：
+`sha256:4c7a55de5cdc31eab28a8b97c8f7af099d30825957824d3de67e2e5f6180099d`。
+四D引擎decode捕获成功，约38–39s、每rank7.75GiB；保留9174blocks/
+1,174,272tokens容量。P仍为B2 Main复用/eager/MTP1，D为Host100GiB/DP/
+MTP3/AsyncReceiptScheduler/FULL_DECODE_ONLY。没有变更attention算法、TopK、
+KV容量或receipt/retention检查。所有性能组关闭host计时和NPU trace。
+
+同一组20条55K/700/C10、逐请求hash及实际token总数完全一致的现场对照：
+eager诊断组TPOT P50/P99=117.632/160.511ms，吞吐56.442token/s、
+248.043s；图组32.087/44.819ms，150.347token/s、93.118s。MTP平均
+接受长度2.9390/2.9691。该对照的eager侧启用了低频host计时，未启用NPU
+trace；计时开销不能解释72.72%的TPOT降幅，下面再与无计时的40条基线核对。
+
+正式40条组与§11.75同日eager基线比较，55K输入/700输出、0%前缀命中，
+seed和客户端相同；每组实际输入2,197,493/output28,000，40条prompt SHA256
+向量完全一致。不是背靠背切换运行，仍可能受现场负载和调度差异影响。
+
+| 并发 | D执行 | TTFT均值/P50/P99(s) | TPOT P50/P99(ms) | 吞吐(token/s) | 耗时(s) | MTP平均接受长度 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 10 | eager | 12.92/10.81/27.85 | 118.51/157.59 | 67.76 | 413.23 | 2.9648 |
+| 10 | graph | 13.29/11.54/27.47 | 31.15/39.98 | 183.40 | 152.67 | 2.9584 |
+| 20 | eager | 24.06/17.23/52.48 | 120.62/150.66 | 111.10 | 252.03 | 3.0123 |
+| 20 | graph | 24.38/19.99/51.13 | 47.51/70.65 | 210.37 | 133.10 | 2.9394 |
+
+图组10/20并发TPOT P50降低73.72%/60.61%，输出吞吐提升到2.71/1.89倍；
+不是靠更高MTP接受率。结合host计时和设备trace，D主要劣化来自eager下
+大量host执行/下发及其引发的rank等待；receipt逐请求检查在旧eager C10中约
+2.6%，不是原主要瓶颈。图执行之后这些检查的占比尚未重新量化，仍可继续
+研究每batch共用注册校验、紧凑lease身份等优化，但本轮未删任何安全检查。
+TTFT没有改善：P50由10.81/17.23升到11.54/19.99s，不能声称P侧或端到端
+首token瓶颈已解决；20并发图组仍有47.51ms TPOT，亦未宣称逼近所有原始基线。
+
+候选初次严格smoke的short-0返回MAPLEPMAPLE(540input/6output，normal stop)，
+与eager诊断组的重复词同类，尚不能归因于graph，也未证明修复。完整性能
+结束后，独立新nonce的12条短请求/多chunk/前缀回放全部语义正确且normal
+stop，覆盖四D及全8-rank receipt/target释放。此轮observer先记录全部样本，
+再对12个answer/finish作严格后置断言；没有把放宽断言后的进程exit0当语义
+正确证据。初次异常完整保留，因此默认inventory仍保持fe559c440/eager，
+不自动提升候选为默认服务版本。
+
+100条随机性能请求全都完整输出700token，逐请求全8-rank receipt及释放审计
+通过；加初次short-0和后续12条功能探针，共113条，D receipt904、释放113，
+P/D success各113、error/abort=0。最终八引擎/代理健康且空闲，KV使用归零，
+八份引擎日志ERROR=0。现场保留...-dgraph候选容器（旧...-dtiming及...-mtp-prefix
+均停止保留）；默认inventory与当前临时候选有意不同，部署候选须用本轮graph.yml。
+
+用户授权D Host KV可扩大到1TB；现场每D节点约2TiB物理内存、约1.7TiB可用。
+若按节点1TiB预算，两DP可各512GiB，仍需核对HBM Indexer与TopK工作区预算。
+本次55K/10和20并发无需扩大Host容量，为保持对照仍为每DP100GiB，未修改
+主机大页、内核参数或vLLM以外的服务。未重跑1M长度，也未重跑50%命中性能矩阵。
+
+复现与证据：`artifacts/d-decode-performance-20261107/`内graph.yml、
+deploy-graph.sh、comparison.json、trace-summary.json、timing-summary.json、
+performance-audit.log、graph-observer.log、observer-verification.json及最终
+health/manifest。设备原始trace留在...-dtiming/d1/logs/npu-profile，图候选服务
+日志在`/mnt/sfs_turbo/g00832294/layerwise-guide/tp8-dp4-1m-cann92-dgraph/`。

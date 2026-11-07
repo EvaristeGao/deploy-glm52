@@ -1,3 +1,8 @@
+> **2026-11-07 现场状态**：当前运行 `...-dgraph` 图候选，默认 inventory 仍为
+> `fe559c440` eager。下面默认命令管理的是默认档；管理现场候选必须附加
+> `-e @artifacts/d-decode-performance-20261107/graph.yml`。候选性能已验证，
+> 初次短请求重复词异常仍待查，详细证据与边界见 runbook §11.76。
+
 # GLM-5.2 layerwise guide deployment
 
 本档参考 sig-ai-inference 的 DSA Offload 部署指南
@@ -23,7 +28,7 @@ reuse。D 保留 Mooncake Host offload、AsyncReceiptScheduler 和完整 TP rece
 | P prefix caching | 开启 | HBM 关闭；MTP1 通过 Mooncake 复用跨请求前缀 |
 | D Host / TopK / threads | 100 GiB / 4096 / 16 | 100 GiB / 4096 / 16 |
 | P / D utilization | 0.75 / 0.88 | 0.75 / 0.88 |
-| D execution | FULL_DECODE_ONLY | eager，当前 registered target owner 的要求 |
+| D execution | FULL_DECODE_ONLY | eager（默认）；decode graph 候选已完成性能验证，见下文 |
 | D recompute scheduler | 开启 | 关闭，保留 AsyncReceiptScheduler 的 target 生命周期接线 |
 | Receipt 总交付超时 | 块级路径 | layerwise_receipt_timeout_s=7200，覆盖长 prefill |
 | CANN / Mooncake | 9.2 / pr3952 | 9.2 / pr3952，固定提交和 wheel 摘要 |
@@ -118,3 +123,13 @@ ansible-playbook -i ansible/inventories/a3-layerwise-guide/inventory.yaml ansibl
 # 或直接执行探针，在终端实时查看流式结果。
 ssh root@ott9-a31 'python3 -u -' < ansible/dsa-layerwise/long_probe.py
 ```
+
+D decode graph 候选的实现、同输入性能结果及限制见
+[runbook §11.76](../../docs/m1-buffer-reuse-runbook.md)。
+模板支持按角色设置`enforce_eager`和`compilation_config`，以及可选的
+`profiler_config`与D receipt host计时；未配置时仍采用原eager行为，不启用诊断。
+当前实验只将D设为`enforce_eager: false`、`cudagraph_mode: FULL_DECODE_ONLY`，
+MTP沿用该角色的eager设置；P保持eager。PP/CP/DCP仍限制为1，其他graph模式
+继续拒绝。默认inventory尚未提升为图候选：初次短请求有重复词异常，虽随后
+12条语义与生命周期探针全部通过，原因仍待分析。现场临时候选与默认配置
+有意不同，复现使用runbook记录的`graph.yml`，不要直接用默认参数重部署。

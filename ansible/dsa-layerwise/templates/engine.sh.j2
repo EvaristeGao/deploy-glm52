@@ -56,6 +56,10 @@ kv_config=$(cat <<EOF
   "kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_consumer",
   "kv_port": {{ role.kv_port }}, "kv_load_failure_policy": "fail",
   "kv_connector_extra_config": {
+{% if role.receipt_timing_interval | default(0) | int > 0 %}
+    "receipt_timing_interval": {{ role.receipt_timing_interval }},
+    "receipt_timing_min_prompt_tokens": {{ role.receipt_timing_min_prompt_tokens | default(50000) }},
+{% endif %}
     "layerwise_receipt_mode": true, "target_owner_rpc_base_port": $owner_port,
     "target_retention_rpc_port": $retention_port,
     "layerwise_receipt_timeout_s": {{ role.receipt_timeout_s }}
@@ -76,7 +80,16 @@ exec vllm serve {{ model_path | quote }} \
   --max-num-batched-tokens {{ role.max_num_batched_tokens }} --max-num-seqs {{ role.max_num_seqs }} \
   --gpu-memory-utilization {{ role.gpu_memory_utilization }} \
   --kv-cache-dtype auto --attention_config.indexer_kv_dtype int8 \
-  --quantization ascend --enforce-eager \
+  --quantization ascend \
+{% if role.enforce_eager | default(true) %}
+  --enforce-eager \
+{% endif %}
+{% if role.compilation_config is defined %}
+  --compilation-config {{ role.compilation_config | to_json | quote }} \
+{% endif %}
+{% if role.profiler_config is defined %}
+  --profiler-config {{ role.profiler_config | to_json | quote }} \
+{% endif %}
   --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm45 --seed 1024 \
 {% if node_role == 'prefill' %}
   --no-enable-prefix-caching --enable-chunked-prefill \
@@ -87,5 +100,5 @@ exec vllm serve {{ model_path | quote }} \
   --scheduler-cls vllm_ascend.core.receipt_scheduler.AsyncReceiptScheduler \
   --no-disable-hybrid-kv-cache-manager --hf-overrides '{"use_index_cache":true}' \
 {% endif %}
-  --speculative-config '{"method":"deepseek_mtp","num_speculative_tokens":{{ role.mtp }},"enforce_eager":true}' \
+  --speculative-config '{"method":"deepseek_mtp","num_speculative_tokens":{{ role.mtp }},"enforce_eager":{{ role.enforce_eager | default(true) | to_json }}}' \
   --additional-config "$additional_config" --kv-transfer-config "$kv_config"
