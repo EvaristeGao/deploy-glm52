@@ -2389,3 +2389,183 @@ deploy-graph.sh、comparison.json、trace-summary.json、timing-summary.json、
 performance-audit.log、graph-observer.log、observer-verification.json及最终
 health/manifest。设备原始trace留在...-dtiming/d1/logs/npu-profile，图候选服务
 日志在`/mnt/sfs_turbo/g00832294/layerwise-guide/tp8-dp4-1m-cann92-dgraph/`。
+
+### 11.77 Graph 后 receipt host 开销重测（2026-11-07）
+
+在e9bd1ce19同镜像下只通过Ansible替换两台D容器，P、Master、代理保持原
+进程。临时档`...-dgraph-timing`，FULL_DECODE_ONLY、async scheduling、MTP3、
+Host100GiB/DP、seq8/token32、1M均不变，64个上下文记录一次；不启用NPU
+trace，不新增同步/事件。55K/700、C10/C20各40条，输入hash及token总数与前轮
+相同，均40/40成功、零外部前缀命中，80条全8-rank receipt/释放审计通过。
+每worker/phase排除首个窗口；C20去掉C10已有记录并再排除转换首窗。原D日志
+先归档再恢复，P0容器/启动时间、Master和proxy PID前后完全相同，结束恢复
+原...-dgraph无计时D、八引擎健康空闲，压测客户端已停止。
+
+| 每步target+实际draft，跨32worker取中位数 | C10(ms) | C20(ms) |
+| --- | --- | --- |
+| lease查找与完整比较 | 2.893 | 4.460 |
+| 注册池完整校验（含以下嵌套项） | 3.212 | 4.722 |
+| visibility wait入队 | 0.113 | 0.196 |
+| record_use完成事件管理 | 0.767 | 1.053 |
+| receipt进入/退出合计 | 7.402 | 11.203 |
+| target step interval | 99.273 | 104.071 |
+| 上述receipt合计/interval | 7.54% | 10.62% |
+
+典型窗口估计占比为8.03%/10.61%；interval可能包含调度/空闲间隔，比例只是
+近似。每个target/draft上下文平均batch分别约1.745/2.410，请勿将TP耗时相加。
+资源检查内含tensor signature与registration snapshot，不能再累加；进入/退出
+残差还包括scheduler allocation比较、上下文及计时开销，不当作纯lease比较。
+计时包含观察者成本，这些数字也不等于删除检查后可以直接获得的TPOT收益。
+
+带计时TPOT P50/P99为31.025/47.262ms(C10)、36.895/43.661ms(C20)，
+吞吐175.97/226.73token/s，TTFT P50=13.008/25.620s。此前未计时graph结果
+分别为31.149/39.981ms、47.512/70.649ms。C20本次batch密度与调度也变化，
+不能把更低TPOT归为计时收益，亦不据此声称精确量出了观察者开销。
+
+最初--limit decode使原start.yml委派P0的SSH跳板参数错误，发生在切换前，
+原服务未动；本轮拆为显式P0空闲检查和D-only cutover，再复用原launch任务。
+证据及可复现Ansible/采样/恢复脚本见
+`artifacts/d-graph-host-timing-20261107/`，其中summary.json、audit.log、
+final-health.json、p0-control-before/after.json及前后D日志归档均保留。
+
+### 11.78 PR 检视修改、batch execution 与重构首审（2026-11-07）
+
+用户要求先处理必要检视意见，再审视几万行实现的重构/优化空间。
+源码57c1b306e将完整lease比较移到admission，worker-local不可序列化句柄
+仅绑定当前owner/state，热路径仍逐请求核对scheduler实际BlockAllocation，
+每batch校验一次共享注册池并共用一组完成事件；visibility仍逐请求安装，
+stale/foreign/duplicate、改变block map、storage、mapping与TE registration
+继续拒绝。没有删除cold/wire descriptor校验或提前授权block释放。
+
+真实CPU torch2.10环境回归：202 passed、1 skipped、107 subtests（包括后续
+startup与graph stream测试）。skip为缺少完整vLLM/msgspec的connector导入用例，
+原生服务接线另验。scoped Ruff和git diff --check通过。
+
+通过Ansible仅替换D，P仍e9bd1ce19/eager/Main B2/MTP1，Master/proxy保持原进程。
+57c1b306e D容器...-dbatch，MTP3、FULL_DECODE_ONLY、compilation mode0、
+async scheduling，seq8/token32、Host100GiB/DP，1M不变。mode0的target graph
+确实capture，但runner._use_aclgraph()不启用draft graph；不得将speculative
+enforce_eager=false当成draft graph已开启。
+
+首次启动DP3/TP7 receive线程bind57031冲突后退出，主线程永久等ready_event，
+其它TP停于backing identity all_gather、其它DP停于graph metadata all_reduce。
+启动前尚无业务请求；nonblocking py-spy仅用于故障启动，未用于性能采样。
+原占用很快消失，未识别到占用者；未杀其它服务、未改host ephemeral range。
+候选改用检查空闲且位于32768–60999临时端口范围之外的KV24700、owner24100。
+8ecddeb82另修send/recv线程启动等待：检测死亡并限制60秒，增加真实ZMQ冲突、
+dead-after-ready和timeout回归，避免同类故障表现为永远无API。bb679f01d把真实
+graph update stream加入native完成fence，图模式缺此接线时fail closed。
+
+控制机自动采样脚本曾重叠，导致一次功能/性能请求混跑；全部归档在
+attempt2-contaminated，不用于正式数字。停掉自有controller和CPU压测客户端、
+确认八引擎空闲后，单一controlled-run依次执行20条独立功能与两组性能。
+20/20短请求、多chunk、前缀回放语义及全8-rank receipt/释放通过，覆盖四D。
+55K/700、N40、C10/C20均40/40成功，hash向量与此前相同，实际输入2,197,493、
+输出28,000/组，零外部命中；80条全8-rank receipt/释放审计通过。
+
+| 每step target+实际draft、32worker中位数 | 修改前C10/C20(ms) | 修改后C10/C20(ms) |
+| --- | --- | --- |
+| lease完整比较 | 2.893/4.460 | 0/0 |
+| 注册池校验 | 3.212/4.722 | 1.640/1.652 |
+| visibility | 0.113/0.196 | 0.083/0.108 |
+| record_use | 0.767/1.053 | 0.490/0.492 |
+| receipt host合计 | 7.402/11.203 | 2.514/2.593 |
+| 占step interval | 7.54%/10.62% | 2.42%/2.36% |
+
+排除每worker/phase首窗；C20去掉已有C10记录及转换首窗。shared资源计数应按
+batch而非request解释，不能将嵌套tensor/registration耗时再次相加。host总耗时
+约减少66%/77%，但带计时TPOT P50/P99=32.256/48.453、38.276/49.945ms，
+吞吐166.30/207.31token/s，TTFT P50=13.257/30.026s；相比上一轮带计时
+31.025/36.895ms，TPOT没有提升。只确认CPU重复工作下降，不宣称端到端加速。
+
+正式后四份vLLM D日志ERROR/Traceback/Exception in thread均为0，八引擎空闲。
+ACL debug plog在启动graph阶段有GE GetPointerByIndex attr越界日志，服务未
+因之失败；未宣称所有底层ACL日志无ERROR。D日志已归档，避免后续启动覆盖。
+完整证据：artifacts/review-fixes-20261107的controlled-*、summary.json、
+timing-*、functional20-pass.json、post-controlled-idle.json及测试日志。
+
+首轮重构审查见[代码审查](receipt-code-refactor-audit-20261107.md)：相对基线新增
+运行代码约10.35K、测试9.94K、文档2.20K。优先清生产无调用者的co-located
+原型、拆retention协议与Pipe耦合，再整理connector多份请求状态和锁；另发现
+event历史、退休请求记录无上界，以及COPY覆盖镜像无法删除旧Python模块。
+本轮未实施大范围拆分；MTP5原生组合及最终无计时服务状态另补以下实测记录。
+
+bb679f01d后续使用独立...-dbatch-mtp5容器，MTP5、seq8/token48、mode3、
+FULL_DECODE_ONLY、async scheduling；P/Master/proxy继续保留。四D均完成target
+graph capture（38秒、7.77GiB），32worker启动日志明确draft_graph=False：当前
+GLM draft仍由框架的family gate强制eager，mode3未改变这一点，不能称双图验收。
+20条独立语义/多chunk/前缀回放及55K/700 N8/C8全部通过；提议1695次、draft
+token8475，比例精确5。224个host计时窗口覆盖32worker的target/draft，实际
+batch最大2，每batch一次资源校验/record_use、逐请求visibility、无完整lease
+比较、无timing failures。四vLLM D日志ERROR/Traceback/Exception in thread均0。
+N8探针TPOT P50/P99=28.364/35.128ms、TTFT P50=18.940s、吞吐116.68token/s，
+仅为该组合执行验证，不与N40/C10或C20作性能提升比较。
+
+两次真实客户端在收到8个content chunk后断连，target均很快释放、KV/队列归零。
+首次探针错误地要求frontend request_success{abort}增长，进程exit1，原始失败
+日志保留为mtp5-cancel-metric-assumption.log；未据此修改服务代码或伪造exit0。
+补充探针测得8次draft/40个draft token（生成上界48，远小于ignore_eos/4096
+的正常长度完成），success没有增长，且精确request ID的全8-rank receipt与
+target释放通过，证明提前终止和实际回收。共30条（20功能+8性能+2断连）生命周期
+审计通过，四D覆盖。不是native delayed-DMA/registration-reset故障注入验收。
+新增证据：mtp5-native-verification.json、mtp5-native-proof.json、mtp5-audit30.json、
+mtp5-dlogs.tar.gz、mtp5-post-health.json；首次错误指标假设与补充实测均保留。
+
+**后续MTP3/mode0验收失败，撤回该配置可用性结论。** 在bb679f01d的新无计时
+...-review-final容器上，20条生命周期全部通过，但逐条语义只有17/20：
+short-0=MAPLEPMAPLEPMAPLE、short-1=MAPLEPSEUDO-ATTENTION、
+multichunk-4=MAPLEAFETY_INSTRUCTION!。首次严格verifier只报首个失败，后续
+完整统计纠正为3条，未将shell尾部健康检查的exit0当成功。原始结果保留在
+final-functional20.log、final-functional-verdict.json，不重跑覆盖失败。
+
+为隔离配置，用同一source、MTP3、无计时、同一20条完整提示与run_nonce，
+分别使用新的arm cache_salt防止旧公共cache命中；两arm内部仍做prefix回放。
+mode0再次18/20（两条回放QUARTZTRAUQ），mode3为20/20，均全8-rank生命周期
+审计通过，覆盖四D。prefix回放失败说明问题不限于冷启动首请求。
+该比较仍含重建D容器、P计算非确定性和不同cache key等边界，支持限制未经
+验收mode0，不足以单凭一组通过宣布全部异常根因已修复。此前eager也有异常，
+尚不能认定全都同因。旧mode0性能数字保留，但不作为语义已验收的可用基线。
+
+代码检查发现mode0虽然能通过继承路径capture target graph，runner._use_aclgraph
+却为false，且不走其编译图参数初始化；这是一处配置不一致，不是完整因果证明。
+dfb52bd0a将receipt图模式限制为解析后的CompilationMode.VLLM_COMPILE及
+FULL_DECODE_ONLY，eager和原PP/CP/DCP1限制保留；Ansible gen也在切换前拒绝
+mode0。新增回归后203 passed、1 skipped、112 subtests，scoped Ruff通过。
+Ansible mode3 check全通过、mode0 check预期exit2且changed0；README已移除
+旧graph.yml作为可用复现入口。新增证据：compiled-graph-gate-unit.log、
+gate-compile3-check.log、gate-compile0-rejection.log、isolate-compile*-*。
+
+带限制的新镜像由同一Ansible构建、分发到D，并准备最终mode3/MTP3/无计时
+候选；最终身份、回归结论与保留状态见下面收尾记录。P、Master、proxy仍不重启。
+
+**最终保留现场：dfb52bd0a / mode3 / MTP3 / 无计时。** 镜像
+`glm52-vllm-ascend:0.30.0-layerwise-guide-dfb52bd0a-cann92`，两D一致ID
+`sha256:4aac85d0b0c9128a0ae72e6eee15f6b997dd5189a3b403252d7182714db9cc58`。
+容器`vllm-ascend-glm52-layerwise-guide-review-safe`，run_name
+`tp8-dp4-1m-cann92-review-safe`，实际profile为
+`artifacts/review-fixes-20261107/safe.yml`：D TP8×DP4、Host100GiB/DP、
+seq8/token32、MTP3、async、FULL_DECODE_ONLY、compilation mode3，未启用
+receipt timer或NPU profiler。KV24700、owner24100；P继续e9bd1ce19的...-dgraph，
+eager/Main B2/MTP1。默认inventory仍fe559c440/eager，未自动提升候选为默认。
+此profile已在源码和Ansible限制下成功原生启动，证明真实parsed compile mode
+及graph update stream接线满足启动约束；32worker日志均确认target graph，draft eager。
+
+新nonce冷启动20/20语义与生命周期通过；随后同一原失败提示、独立新salt的
+20/20也通过，均覆盖四D。两组P external prefix命中267264/540752和
+267264/540692，约49.42%/49.43%，证明回放实际走了公共Store复用。最后一条
+ignore_eos/4096输出请求收到8个content chunk后断连，仅8次提议/24个draft
+token（生成上界32），正常success未增长、KV和队列归零；精确request ID的
+8-rank receipt与target释放通过。共41/41生命周期通过，含40条完整语义回归。
+
+最终八引擎及proxy健康空闲，KV使用归零；四份vLLM D日志ERROR/Traceback/
+Exception in thread和RECEIPT_HOST_TIMING均0，四D完成graph capture；底层ACL
+日志不在此零ERROR声明范围。P0/P1容器ID、image ID和StartedAt均与原先一致，
+P0 Master=2435912/proxy=2470638未重启，CPU压测客户端已停止。拒绝的mode0
+容器、MTP5和中间mode3容器均停止保留，只有最终D候选运行。
+
+正式C10/C20性能矩阵尚未在该最终mode3配置重跑；不从mode0数字推算新配置
+TPOT收益。限制mode0和这批mode3成功样本不构成全部历史异常根因已修复的证明，
+亦未补做native delayed-DMA/registration-reset故障注入或新1M长请求。
+证据：safe-functional-verdict.json、safe-compare-verdict.json、safe-audit41.json、
+safe-prefix-proof.json、safe-cancel.log、safe-health.json、safe-manifest.json、
+safe-log-audit.json、safe-dlogs.tar.gz、p0-control-safe.json。最终不再发新请求。

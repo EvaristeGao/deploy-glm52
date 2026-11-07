@@ -15,6 +15,19 @@
           - decode_config.max_num_batched_tokens >= decode_config.max_num_seqs * (decode_config.mtp + 1)
         quiet: true
 
+    - name: Reject unvalidated Decode graph compilation combinations
+      ansible.builtin.assert:
+        that:
+          - decode_config.enforce_eager | default(true) | bool or decode_graph.get('mode', -1) | int == 3
+          - decode_config.enforce_eager | default(true) | bool or decode_graph.get('cudagraph_mode', 'NONE') == 'FULL_DECODE_ONLY'
+        fail_msg: >-
+          Receipt Decode graphs require compilation mode 3 (VLLM_COMPILE)
+          and FULL_DECODE_ONLY. Uncompiled mode 0 had native semantic failures.
+          Eager remains supported.
+        quiet: true
+      vars:
+        decode_graph: "{{ decode_config.compilation_config | default({}) }}"
+
     - name: Create isolated generated directory
       ansible.builtin.file:
         path: "{{ generated_dir }}/{{ inventory_hostname }}"

@@ -1,7 +1,9 @@
-> **2026-11-07 现场状态**：当前运行 `...-dgraph` 图候选，默认 inventory 仍为
-> `fe559c440` eager。下面默认命令管理的是默认档；管理现场候选必须附加
-> `-e @artifacts/d-decode-performance-20261107/graph.yml`。候选性能已验证，
-> 初次短请求重复词异常仍待查，详细证据与边界见 runbook §11.76。
+> **2026-11-07 更新**：默认 inventory 仍为 `fe559c440` eager。现场D为
+> `...-review-safe`，运行dfb52bd0a/mode3/MTP3/无计时，40条语义及含断连41条
+> 生命周期通过；P/Master/proxy未重启。候选参数在
+> `artifacts/review-fixes-20261107/safe.yml`，完整身份、限制及验收见runbook §11.78。旧 `graph.yml` 使用 mode0，
+> 已复现多条语义错误，不再作为可用配置，生成器会在切换容器前拒绝它。
+> receipt 图模式必须同时设置 compilation mode3 和 `FULL_DECODE_ONLY`。
 
 # GLM-5.2 layerwise guide deployment
 
@@ -28,7 +30,7 @@ reuse。D 保留 Mooncake Host offload、AsyncReceiptScheduler 和完整 TP rece
 | P prefix caching | 开启 | HBM 关闭；MTP1 通过 Mooncake 复用跨请求前缀 |
 | D Host / TopK / threads | 100 GiB / 4096 / 16 | 100 GiB / 4096 / 16 |
 | P / D utilization | 0.75 / 0.88 | 0.75 / 0.88 |
-| D execution | FULL_DECODE_ONLY | eager（默认）；decode graph 候选已完成性能验证，见下文 |
+| D execution | FULL_DECODE_ONLY | eager（默认）；编译图候选须使用 mode3，见下文 |
 | D recompute scheduler | 开启 | 关闭，保留 AsyncReceiptScheduler 的 target 生命周期接线 |
 | Receipt 总交付超时 | 块级路径 | layerwise_receipt_timeout_s=7200，覆盖长 prefill |
 | CANN / Mooncake | 9.2 / pr3952 | 9.2 / pr3952，固定提交和 wheel 摘要 |
@@ -124,12 +126,14 @@ ansible-playbook -i ansible/inventories/a3-layerwise-guide/inventory.yaml ansibl
 ssh root@ott9-a31 'python3 -u -' < ansible/dsa-layerwise/long_probe.py
 ```
 
-D decode graph 候选的实现、同输入性能结果及限制见
-[runbook §11.76](../../docs/m1-buffer-reuse-runbook.md)。
+D decode graph 候选的实现、同输入性能结果及后续语义问题见
+[runbook §11.76–11.78](../../docs/m1-buffer-reuse-runbook.md)。
 模板支持按角色设置`enforce_eager`和`compilation_config`，以及可选的
 `profiler_config`与D receipt host计时；未配置时仍采用原eager行为，不启用诊断。
-当前实验只将D设为`enforce_eager: false`、`cudagraph_mode: FULL_DECODE_ONLY`，
-MTP沿用该角色的eager设置；P保持eager。PP/CP/DCP仍限制为1，其他graph模式
-继续拒绝。默认inventory尚未提升为图候选：初次短请求有重复词异常，虽随后
-12条语义与生命周期探针全部通过，原因仍待分析。现场临时候选与默认配置
-有意不同，复现使用runbook记录的`graph.yml`，不要直接用默认参数重部署。
+图候选将D设为`enforce_eager: false`、`compilation_config.mode: 3`、
+`cudagraph_mode: FULL_DECODE_ONLY`，P保持eager。当前GLM draft仍受框架family
+guard约束使用eager，需看启动的`Receipt MTP execution`日志确认真实决策。
+PP/CP/DCP仍限制为1，其他graph模式继续拒绝。旧mode0虽然capture成功，
+无计时语义回归仅17/20，同提示对照18/20，不能作为已验收的性能基线。
+源码和Ansible均拒绝该组合；mode3隔离验证和最终候选profile记录在§11.78，
+不要使用旧graph.yml或默认参数重部署实验服务。
