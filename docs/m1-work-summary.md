@@ -1,4 +1,24 @@
-> **2026-11-08 重构进行中**：按审查开始分批实施。080220d72移除未用的全局channel/Pipe组装器，保留测试夹具，RPC直接使用独立retention协议；cf4ad2e31进一步拆分接收组件和请求索引，全套217项CPU通过/1跳过，另37项旧ledger通过。镜像源替换6项文件系统测试通过，两D空闲候选1395项SDK校验不变、旧模块不可导入；原生PD仍待验收。当前现场仍为此前dfb52bd0a候选，本轮只读健康复核通过。范围、剩余项与证据见[重构执行清单](receipt-refactor-progress-20261108.md)。
+> **2026-11-09 提交状态**：源码已提交为 `p-main-buffer-reuse@85f7f6e50`，包括P侧CPU元数据优化、限量失败诊断和三个文件的回归测试。提交前重跑3300组CPU新旧对照通过；两个补丁及三个测试文件与此前201项SDK回归快照逐字节一致。现有P仍是e9bd1ce19基础镜像加相同SHA的两个模块补丁，**不是整树升级至该commit**；本次未重建镜像、未重新部署、未触碰集群。下方“未提交”等表述为对应实验时的历史状态。
+
+> **2026-11-08 约50%公共前缀复测已完成，原优化服务保留**：128K/2K、C30/C40、各N80，最终有效四点320/320成功；DCP实测47.9978%命中、我们的49.9977%，输入/7客户端一致，优化组含预热186条全8-rank回收通过、抢占0、排空。C30：我们的TTFT P5058.03对DCP46.95s（慢23.6%），吞吐374.98对397.81tok/s（低5.7%）；C40：69.29对84.24s（快17.7%），吞吐424.34对398.27（高6.5%）；TPOT38.69/44.22对35.31/37.13ms均偏慢。P prefill27.00/22.63对9.84/9.92s仍明显更长。
+>
+> 首轮优化C30的78/80作废：两次proxy P通知ReadError→502，D未检查状态码而持续deferred；Master低压无淘汰/-704，完成102条全rank通过。恢复8/8后，同源码独立代理8334只重测一次（C40→C30），两点全成功；旧ReadError根因/502传播缺口未修复，不能抹去失败轮。模型代码/参数未改；最终8334/临时DCP/客户端/监控均停止，原8333/Master PID保留，原P meta40/D refactor-r3同ID/镜像/源码、正式到最终StartedAt不变、八引擎健康空闲和KV归零。清理helper转义错误由manual-finish接管修正，未重启模型，全部核验通过。完整数据/限制见[性能报告末节](prefill-metadata-optimization-20261108.md)、runbook§11.85及`artifacts/pd-prefix50-r3-20261108/comparison.json`。下方为0%和较早历史记录。
+
+> **2026-11-08 最新同预热重测完成，优化服务已恢复保留**：新起DCP，与P meta40/D refactor-r3分别测128000/2000、C30/C40，各N80，共320/320成功；两边相同短/长预热、输入/7客户端匹配、prefix命中0、抢占0。优化组TTFT P50为124.96/168.73s，DCP150.51/222.46s（低17%/24%），吞吐276.13/279.76对237.35/232.47tok/s（高16%/20%），TPOT34.21/38.88对36.06/36.26ms。P prefill仍约33.3对17s，但P排队更短；C30未完全复现前轮103s最好TTFT，prefill稳定，变化主要在排队。优化组含预热176条全8-rank回收通过。四模型容器本次重启但ID/镜像/源码不变，原独立Master/代理PID保留；最终源码/身份/NPU归属、八引擎健康空闲、队列/逻辑KV归零通过，临时DCP/CPU客户端/只读监控均停止。未改代码或默认inventory。P Store40GiB/rank仍是容量缓解，活动前缀保活窗口未修复。详见[最新重测](prefill-metadata-optimization-20261108.md)末节、runbook§11.84及artifacts/pd-dcp-retest-20261108/comparison.json；下方为首轮记录。
+
+> **2026-11-08 128K首轮CPU优化及完整压力验证已完成，保留新P运行**：批量地址构造与bounded range只读描述符复用，P维持16K/Main B2/eager/MTP1；P Store20→40GiB/rank（全局1280GiB），私有shm1TiB/huge=always，D维持原Host100GiB/MTP3/mode3。96K/C30、128K/C30、128K/C40各N80/2K全成功，含短测288条全8-rank receipt/释放通过、输入/7客户端匹配、prefix命中0、抢占0。128K C30/C40 prefill47.88/48.40→33.21/33.49s，TTFT211.98/291.05→103.46/173.14s，吞吐+42%/+39%；TPOT28.10/28.39→42.90/37.92ms，代价已报告。原始96→128超线性来自历史恢复量+86%、Indexer+84%及CPU/同步放大；当前C30增长58%→47%。
+>
+> 原20GiB候选在128K/C30已确认活动公共前缀GET=-704，129块缺失，强烈指向PutEnd到首次Query的淘汰窗口；**40GiB只是容量缓解，未实现完整生存期保护**。本轮实际新增淘汰164717、分配失败0。现场P为`...-prefill-meta40-20261108`，e9bd1ce19基镜像+两个明确SHA补丁，代码未提交/未打新镜像；默认inventory未改。201项SDK回归通过，最终四节点源码/身份/NPU归属、八引擎健康空闲、队列/KV归零均通过；D/Master/代理相对本轮baseline不变，CPU客户端与只读监控已停止。详见[最终报告](prefill-metadata-optimization-20261108.md)、runbook§11.83、artifacts/prefill-meta40-20261108/final-verification.json。
+
+> **2026-11-08 128K首轮定位/优化验证已收尾，候选未推广**：16K分块下GET读量96K→128K约+86%，Indexer约+84%，未掩盖通信/CPU准备同步放大；大量GET与实际model core执行重叠，不能全算净传输损失。只改P chunk32K、保留Main B2/eager/MTP1和原D后，128K/C30/N80/2K的P prefill47.88→38.71s、TTFT211.98→116.79s、吞吐198.7→269.3tok/s，但TPOT28.1→37.5ms。短输出48条及两个C30共160条全8-rank回收通过；128K/C40在57/80完成后因P DP1无法打开已提交Store前缀退出，23条未获first token，整轮无效。因此32K未推广，超线性增长与活动前缀可读性/保活仍未完全解决。
+>
+> **最终现场已恢复并验证**：原P e9bd1ce19/...-dgraph使用16K，原D d634632f6/...-refactor-r3保留原镜像/脚本、Host100GiB/MTP3/mode3；故障取消后有目标KV保留，故D两个容器已由Ansible重启，其StartedAt已改变。原P容器init、Master、8333代理PID/StartedAt不变；八引擎健康空闲、KV归零，恢复8/8全rank释放通过，四节点源码manifest与NPU进程归属通过。候选P及CPU客户端均停止，生产源码未改；32K参数片段明确标为实验、不作为默认。结论、限制及失败原始证据见[128K定位报告](prefill-128k-optimization-20261108.md)、runbook§11.81，最终证明在artifacts/prefill-128k-20261108/recovery-final-verification.json。
+
+> **2026-11-08 高并发/长输入对照已完成**：kvoffload、原始INT8、1m(DCP)三档，55K/700、96K/2K、128K/2K，各C30/C40、N80，共1440/1440成功，逐条输入匹配、P侧跨请求prefix命中0、抢占0。kvoffload480条全8-rank receipt/释放通过。30→40并发主要增加排队，吞吐基本饱和；128K下kvoffload相对DCP的TTFT高约36%–40%、吞吐低12%–15%，P长上下文路径仍是瓶颈，D逻辑KV块池采样峰值98.6%。完整数据、P99/E2E、配置差异和闭环口径见[性能报告](performance-scale-20261108.md)、runbook§11.80。
+>
+> 原P e9bd1ce19/...-dgraph、D d634632f6/...-refactor-r3的容器/镜像/脚本已恢复并校验，Host仍100GiB/DP；八引擎和8333代理健康空闲、KV归零，恢复探针8/8全rank释放通过。此次P/Master/proxy随切换重启，旧PID/StartedAt不再适用。两个stock测试容器集合和CPU客户端已停止，默认inventory未改；修正部署助手恢复路径的docker top缺PID列问题。以下较早“当前现场/待验收”条目为历史记录，以本条及§11.79–80为准。
+
+> **2026-11-08 重构进行中（历史阶段）**：按审查开始分批实施。080220d72移除未用的全局channel/Pipe组装器，保留测试夹具，RPC直接使用独立retention协议；cf4ad2e31进一步拆分接收组件和请求索引，全套217项CPU通过/1跳过，另37项旧ledger通过。镜像源替换6项文件系统测试通过，两D空闲候选1395项SDK校验不变、旧模块不可导入；原生PD仍待验收。当前现场仍为此前dfb52bd0a候选，本轮只读健康复核通过。范围、剩余项与证据见[重构执行清单](receipt-refactor-progress-20261108.md)。
 
 > **2026-11-07 PR检视与重构审查最新更新**：已提交batch共享校验/完成事件、真实graph update stream fence、线程启动失败检测，以及`dfb52bd0a`的编译图限制；203项测试通过、1跳过、112子用例。后续无计时MTP3/mode0语义仅17/20，同提示对照18/20，并非仅首个冷请求异常，旧mode0性能数据不能当作已验收服务基线。源码及Ansible已拒绝mode0，仅允许eager或mode3/FULL_DECODE_ONLY，最终dfb52bd0a的mode3/MTP3/无计时新镜像已通过40/40语义、加断连41/41全rank生命周期，实际prefix命中约49.4%；八引擎健康空闲，D保留...-review-safe，P/Master/proxy保持原进程，profile见artifacts/review-fixes-20261107/safe.yml。新配置尚未重跑正式性能矩阵，异常根因未完全定位。默认inventory仍为fe559c440/eager，勿用旧graph.yml重新部署。首轮结构审查见[重构报告](receipt-code-refactor-audit-20261107.md)，过程和最终现场见runbook §11.78；下面同日记录为较早阶段的历史结果。
 

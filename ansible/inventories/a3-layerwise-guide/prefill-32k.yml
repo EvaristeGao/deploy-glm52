@@ -1,0 +1,14 @@
+# Experimental: 128K/C40 hit a committed-prefix failure; not promoted.
+# P chunk tuning overlay; load after the validated image/Decode profile.
+# Keeps TP8 x DP4, Main buffer reuse and MTP1 from the layerwise deployment.
+# This file selects P parameters only, not images or the Decode graph mode.
+# Evidence and current deployment identity: docs/prefill-128k-optimization-20261108.md.
+prefill_config:
+  api_port: 8100
+  rpc_port: 17591
+  kv_port: 56000
+  max_num_batched_tokens: 32768
+  max_num_seqs: 8
+  gpu_memory_utilization: 0.75
+  mtp: 1
+  enforce_eager: true

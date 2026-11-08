@@ -1,3 +1,13 @@
+> **2026-11-09 提交状态**：源码已提交为 `p-main-buffer-reuse@85f7f6e50`，包括P侧CPU元数据优化、限量失败诊断和三个文件的回归测试。提交前重跑3300组CPU新旧对照通过；两个补丁及三个测试文件与此前201项SDK回归快照逐字节一致。现有P仍是e9bd1ce19基础镜像加相同SHA的两个模块补丁，**不是整树升级至该commit**；本次未重建镜像、未重新部署、未触碰集群。下方“未提交”等表述为对应实验时的历史状态。
+
+> **2026-11-08 最新50%公共前缀复测完成**：128K/2K、C30/C40、各N80，最终有效320/320、优化组含预热186条全8-rank、输入匹配、抢占0及排空通过。DCP实际命中47.9978%，我们的49.9977%。C30我们的TTFT P5058.03对46.95s，吞吐374.98对397.81；C40为69.29对84.24s，吞吐424.34对398.27tok/s；TPOT38.69/44.22对35.31/37.13ms。首轮78/80因proxy ReadError/502作废，D状态码传播缺口未修复；同源码独立8334代理有界复测通过后已停止，原8333/P meta40/D refactor-r3健康空闲保留。模型/默认inventory未改，四节点源码/身份/StartedAt及停止证明通过；本地清理helper错误已由manual-finish修正接管，未重启模型。详见[报告末节](../../docs/prefill-metadata-optimization-20261108.md)、runbook§11.85、artifacts/pd-prefix50-r3-20261108/comparison.json。以下为0%和较早历史。
+
+> **2026-11-08 最新复测**：已新起DCP完成128K/2K、C30/C40各N80，再恢复优化配置复测，总320/320成功，优化组含预热176条全8-rank回收通过。新TTFT为DCP150.51/222.46s、优化组124.96/168.73s；吞吐237.35/232.47→276.13/279.76tok/s。已恢复保留原P meta40/D refactor-r3，同ID/镜像/源码，四模型容器本次重启，原独立Master/代理PID保留。最终身份/源码/健康空闲检查通过，临时DCP/CPU客户端/监控均停止。默认inventory/源码未改。原始独立Ansible及最终证明artifacts/pd-dcp-retest-20261108/comparison.json，详细均值与限制见[报告末节](../../docs/prefill-metadata-optimization-20261108.md)。下面为上一轮记录。
+
+> **2026-11-08 当前P保留`...-prefill-meta40-20261108`，完整负载已通过**：e9bd1ce19基镜像加明确SHA的CPU元数据优化与失败日志，P仍16K/Main B2/eager/MTP1；Store40GiB/rank（全局1280GiB），仅P私有shm1TiB/huge=always，D仍原d634632f6/Host100GiB/MTP3/mode3。三组N80/2K共240/240，含短测288条全8-rank通过；128K C30/C40 prefill33.21/33.49s、TTFT103.46/173.14s，TPOT42.90/37.92ms有代价。八引擎健康空闲，四节点源码/身份/NPU归属验证通过，D/Master/代理相对本轮baseline不变；CPU客户端及只读监控均停止。独立Ansible在artifacts/prefill-meta40-20261108，最终证明final-verification.json。默认inventory未改，补丁未提交/未打镜像；容量缓解未修复活动前缀保护窗口。详见[最终性能报告](../../docs/prefill-metadata-optimization-20261108.md)。下方“当前现场”均为历史阶段。
+
+> **2026-11-08 当前现场**：P为`...-dgraph`/e9bd1ce19，chunk16K、Main B2/eager/MTP1；D为`...-refactor-r3`/d634632f6，Host100GiB/DP、mode3/FULL_DECODE_ONLY/MTP3。P chunk32K的实验在两组C30改善性能，但128K/C40触发已提交Store前缀打开失败，候选未推广，已恢复上述原配置并通过8条全rank回收及健康空闲检查。恢复时两个D容器同镜像重启，Master/8333代理原进程保留。`prefill-32k.yml`只是未推广的P参数片段，默认inventory仍是旧fe559c440/eager，不能当作当前完整部署参数。结果与确切身份见[128K定位报告](../../docs/prefill-128k-optimization-20261108.md)、runbook§11.81；下面较早“当前现场”均为对应历史阶段。
+
 > **2026-11-07 更新**：默认 inventory 仍为 `fe559c440` eager。现场D为
 > `...-review-safe`，运行dfb52bd0a/mode3/MTP3/无计时，40条语义及含断连41条
 > 生命周期通过；P/Master/proxy未重启。候选参数在

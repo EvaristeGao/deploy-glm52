@@ -187,7 +187,8 @@ def main():
             print("Captured deployment uses an independently managed Master")
             return
         if previous["State"]["Running"]:
-            processes = docker("top", previous["Id"], "-eo", "args")
+            # Docker requires a PID column even for command-only matching.
+            processes = docker("top", previous["Id"], "-eo", "pid,args")
             if component == "engine":
                 marker = (
                     "start_engines.sh"

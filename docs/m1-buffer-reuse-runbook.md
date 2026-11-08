@@ -2639,3 +2639,169 @@ mode3/FULL_DECODE_ONLY/MTP3；target graph、draft eager，无timer/profiler。
 停止。source/native manifest、health/control/owned-container最终证据均保存。
 不外推历史异常根因、MTP5/1M输入或native delayed-DMA/reset故障注入。
 详见docs/receipt-refactor-progress-20261108.md和本轮artifacts。
+
+### 11.80 高并发与96K/128K长输入三档对照（2026-11-08，已完成并恢复）
+
+用户要求检查C30/C40是否出现额外大幅劣化，并对照kvoffload、1m(DCP)、原始档。
+沿用v1.7 performance-test，目标55000/700、96000/2000、128000/2000，各C30/C40、
+N80，18个正式cell共1440/1440成功。逐条prompt hashes和actual input_lens完全
+匹配，1440个salt/request-id唯一，P跨请求prefix命中0，输出均达到要求；随机
+文本只核对SSE/usage/输出长度，不做语义精度测试。两侧成功计数每组各80、
+抢占0，结束队列与KV归零，D external hit100%为P/D传来的KV。kvoffload全部
+480条通过4D、全8-rank receipt/精确目标释放审计。
+
+三档参数和软件栈保留差异，不作offload单一变量消融。kvoffload为原P e9bd1ce19/
+Main B2/eager/MTP1、D d634632f6/Host100GiB每DP/seq8/token32/async/mode3/
+FULL_DECODE_ONLY/MTP3，两侧TP8×DP4。原始和DCP沿用§11.72冻结脚本，固定原版
+rc1镜像，Ansible新建四节点容器；原始Main INT8、P TP16×DP2/D TP8×DP4，DCP
+Main BF16、P TP16×DP2/D TP4×DP8，D MTP5。实际脚本SHA、镜像ID和wrapper差异
+全部保存。HTTP均由P0发出，采样仅每5秒读API，无worker attach/NPU profiler。
+
+kvoffload C30→C40输出吞吐：55K 239.38→231.88、96K 307.72→319.15、128K
+198.66→205.53tok/s，TTFT P50：42.72→73.14、87.29→137.24、211.98→291.05s。
+TPOT没有成倍崩溃，但排队显著增加。DCP三组吞吐分别约203、305、234tok/s，
+C30/C40基本持平。原始约155→169、170→184、151→167tok/s，TPOT157–180ms。
+
+128K时kvoffload相对DCP的C30/C40 TTFT高39.5%/35.8%、吞吐低15.2%/12.2%。
+相同2K输出下，96K→128K的kvoffload P平均prefill增加56%–58%，DCP约32%–33%；
+kvoffload P排队141/173s，D running峰值仅8/10，低TPOT约28ms不能当成流水线
+更快。D逻辑块池采样峰值98.6%，不是物理HBM/DRAM百分比；D-first预登记和
+P-first的占用时点不同。优先继续定位P长上下文路径，但本轮未采集timeline，
+不能定量归因某个GET/拷贝/算子，也未在矩阵中途优化或调参。
+
+闭环semaphore负载中，原始档D慢会降低后续到P的到达率，整体TTFT较低不代表
+初始突发队列很短。每点仅N80一次，含起始/排空，不外推稳态容量或统计显著性；
+旧C10/C20为N40，不拼接为严格配对曲线。完整P99/E2E、cohort和诊断表见
+[高并发性能报告](performance-scale-20261108.md)。
+
+恢复首次在`docker top -eo args`失败：本机Docker要求输出包含PID列。已将
+ansible/dsa-layerwise/container.py恢复检查及本轮代理检查改为`pid,args`，保留
+首次失败日志，只重试恢复。原容器ID/镜像/源码manifest/启动脚本校验通过，
+私有Master、P/D、8333 D-first代理及D私有/dev/shm huge=always全部恢复。
+P/Master/proxy此次已重启，不能沿用§11.79的旧PID/StartedAt不变结论。
+
+恢复后的8条2048/16、C8全部完成，通过4D、全8-rank receipt和目标释放；最终
+八引擎及代理健康、running/waiting/KV归零，NPU进程都属于原项目容器。原P
+...-dgraph及D ...-refactor-r3保留运行，两个stock容器集合和CPU客户端均停止。
+默认inventory和vLLM生产代码未改，未动无关服务或主机全局参数。
+
+证据在artifacts/performance-scale-20261108/：matrix-summary.json/.csv、图件、
+三档及restored完整客户端记录、逐模式engine日志、kvoffload-audit480.json、
+restore-audit8.json、restoration-verification.json；最终归档中90个正式结果
+文件SHA与分析输入完全一致。STATE.json及controller-state.json记录收尾状态。
+
+
+### 11.81 128K Prefill定位与32K候选验证（2026-11-08，首轮收尾、候选未推广）
+
+用户要求定位96K→128K的P增长并优化。固定原P e9bd1ce19/Main B2/eager/MTP1、
+D d634632f6/Host100GiB/MTP3/mode3，输出16的C1/N4、C8/N16复现P prefill
+10.10→14.98s、23.43→44.81s；40条全8-rank回收。诊断overlay剥离后AST相同，
+6项接收顺序/失败/上下文测试通过，全rank阶段88条通过。全rank采集扰动96K，
+正式无探针计时与诊断分开。只重启自有诊断P后，新Store段从0开始、无新增驱逐
+和分配失败的C8仍23.89→46.64s，排除驱逐为差距的必要条件。第二轮TP0 host和
+独立单NPU捕获共60条全rank审计通过；worker daemon无法自动解析，后用独立
+进程原生analyse/max_process_number4离线解析，没有再跑重复profile。
+
+GET读量+86%、调用数+85%，单次约0.97→1.01ms；SFA累计2.764→3.698s，Indexer
+0.596→1.094s。host真实step窗口11.537→18.656s，CANN计算8.115→11.711、
+未掩盖通信2.046→4.142、Free1.374→2.802s。allGather累计Transit0.286→0.376s，
+Wait1.690→4.167s；只采TP0，不指认具体慢rank。排除AICPU，仅取实际model core
+kernel并集，GET与其时间重叠2.168→3.508s、未重叠0.173→0.825s；不能把host
+等待全算GET净损失，重叠也不证明没有带宽竞争。CPU地址构造和range拆包近翻倍，
+reader/PD drain在诊断中很小，不能据C1外推持续长输出负载的因果占比。
+
+第一项优化仅P token预算16384→32768。Ansible新P容器沿用同一特性镜像，完整
+源码manifest通过，无探针/profiler，保留所有保护门禁。48条含预热全8-rank回收，
+C1 96K/128K P prefill9.486/12.781s，C8 20.230/32.104s，较原下降6%/15%/14%/28%。
+现有INFO generation证实C1 3/4个chunk，混合调度部分多切一次。P容量190.5万→
+175.3万token/引擎，−8%；未重跑新配置1M整请求。
+
+N80/2K输出：96K/C30 TTFT87.29→29.96s、P prefill30.33→21.34s、吞吐307.7→381.0；
+128K/C30 TTFT211.98→116.79s、P prefill47.88→38.71s、吞吐198.7→269.3。两个cell
+160条在重启前D日志归档通过全8-rank回收，prompt SHA/input_lens及7份客户端
+文件匹配。TPOT40.2→50.7ms、28.1→37.5ms，D running峰值17→26、8→16；吞吐
+和单请求解码延迟存在取舍。32K下完整负载P增长仍约81%，不能称相对增长已收敛。
+
+128K/C40在57/80完成后，05:47:40 UTC P DP1/TP0报Main reuse无法打开完整已提交
+Store前缀，05:47:52引擎退出，其余P在EP/逐层load等待，23条无first token。
+C40无完整verdict，不作为性能结果。故障前Master32段、分配失败0、持续驱逐，
+8段在P退出后才掉，非先掉段。现有错误未记录具体key/原生错误码，不能断言
+一定是驱逐；活动前缀保活、写完成到首次读窗口和RPC状态仍待闭环。本地SDK
+PutEnd授予0ms lease、查询才授予300000ms，值得继续审查，但不是充分因果证据。
+完成数监控已补first-token/API-error，以免把已完成0错误当全轮健康。
+
+候选不推广。Ansible停止负载/P候选；D取消后部分KV保留，确认所有P写者停止后
+先归档P/D日志，再重启原两个D容器/同0ac34e9镜像/同d634源码和脚本，恢复其
+私有shm huge=always。原P容器恢复16K，Master/8333代理/init PID及StartedAt不变；
+D此次StartedAt改变。恢复8条成功、4D全8-rank receipt/目标释放通过；原四节点
+容器ID/镜像/源码manifest/NPU归属通过，八引擎健康空闲、KV归零。候选P/客户端
+均停止，生产源码和默认inventory未改，未动主机全局参数或无关服务。
+
+完整分析与已知限制见[prefill-128k-optimization-20261108.md](prefill-128k-optimization-20261108.md)。
+证据artifacts/prefill-128k-20261108/；after32-completed-comparison.json、
+after32-completed-audit.json(160)、c40-failure-engine-logs.tar.gz保留有效与失败
+材料，recovery-final-verification.json和restored-audit.json(8)为最终恢复证明。
+实验片段ansible/inventories/a3-layerwise-guide/prefill-32k.yml明确未推广，gen和
+shell检查通过，不能作为已通过C40的生产配置。
+
+
+### 11.82 2026-11-08：16K CPU元数据优化与持续负载Store前缀失败
+
+- 改动：P批量地址广播、bounded range只读描述符复用；参数保持16K/eager/Main B2/MTP1，D原Host100GiB/MTP3/mode3。原生SDK177回归、3300组旧新结果/异常对照通过。
+- 证据：48条短输出全8-rank通过；128K/C8 prefill44.81→29.80s，TTFT71.57→46.29s。固定输入/7个客户端文件匹配；仅为短输出范围结论。
+- 失败：96K/C30/N80/2K在06:55:14 UTC P0 DP0 TP2打开完整Store前缀失败，监控取消时46条完成、64条有首token，整轮无效。32K曾有相同错误，但尚不能排除优化时序暴露竞态。
+- 恢复：Ansible停止客户端及候选P，归档P/D日志，确认P写者停止后重启原D容器并恢复私有shm大页设置、原脚本；恢复原P，8条恢复请求及全rank receipt通过。Master/proxy原进程保留。无宿主全局或非vLLM改动。
+- 下一步：独立同参数P诊断候选，只增加失败时至多8条原生码/key/fallback/实例日志，保留原保护和失败策略；五文件201项SDK回归通过。证据`artifacts/prefill-meta-debug-20261108/`。完整过程见[prefill-metadata-optimization-20261108.md](prefill-metadata-optimization-20261108.md)，尚未推广。
+
+
+### 11.83 2026-11-08：原生-704定位、CPU优化与P Store40GiB完整验证（已完成）
+
+- 证据：独立16K/CPU补丁候选96K/C30/N80/2K80/80；从重启前D归档核验含热身/重复短测共120条，全8-rank通过。P prefill30.33→22.10s、TTFT87.29→39.21s、吞吐307.7→348.8tok/s，TPOT40.20→51.47ms。输入/7客户端文件匹配、抢占0、排空0。
+- 故障：128K/C30在07:46:05 UTC P3 TP5/TP6报129块前缀缺失。公共key GET=-704/OBJECT_NOT_FOUND，fallback同码但可能从未分配；不要说两份副本都被淘汰。故障前4秒淘汰+3134，32段仍在、占用约79.6%、分配失败0；强烈指向PutEnd0ms到首次Query300s租约之间的活动前缀淘汰窗口。Master逐key事件不可用，具体key因果仍为推断。该128K整轮无效。
+- 恢复：D1 stop退出通知延迟，返回错误约1秒后已停止；只针对同ID D1重新执行Ansible启动/私有shm大页/原脚本，D0不再次重启。原P/D恢复8条全rank、源码manifest、身份/NPU归属、健康空闲全通过。控制器finally在此Docker错误处停止，恢复已由独立complete-recovery.py接管，不虚报自动全成功。
+- 新实验：Ansible新P`vllm-ascend-glm52-prefill-meta40-20261108`，同16K/eager/Main B2/MTP1、相同两个精确SHA补丁，仅P Store20→40GiB/rank（全局640→1280GiB）；私有shm1TiB/huge=always，创建前要求每节点MemAvailable≥768GiB。D Host100GiB/MTP3/mode3、原Master/8333代理不改。原生SDK201项通过。尚未推广，也不是生命周期代码修复。
+- 原始资料：`artifacts/prefill-meta-debug-20261108/`的failure-analysis.json/completed-native-audit.json/recovery-final-verification.json，以及`artifacts/prefill-meta40-20261108/`的Ansible/patch-vars/controller-state.json。结论见[prefill-metadata-optimization-20261108.md](prefill-metadata-optimization-20261108.md)。
+
+- 最终结果：同16K/CPU补丁加40GiB/rank，96K/C30、128K/C30、128K/C40各N80/2K，240/240成功；含48短测共288全8-rank receipt/释放通过，输入/7客户端匹配、跨请求命中0、抢占0、队列/KV排空。128K C30/C40 prefill47.883/48.395→33.213/33.489s（约−31%），TTFT211.980/291.051→103.464/173.142s（−51%/−41%），吞吐198.655/205.526→281.457/284.863tok/s（+42%/+39%）；TPOT28.104/28.389→42.902/37.922ms有代价，D running峰值8/10→19/17。96K/C30 prefill22.639s、TTFT38.916s、TPOT50.489ms、吞吐356.066tok/s。C30的96→128 prefill增长58%→47%，仍有非线性。
+- 压力与限制：Master总容量1280GiB、峰值79.994%，新增淘汰164717、分配失败0，本轮无前缀错误；这验证有限负载范围的容量缓解，未实现活动前缀完整生存期保护，不能宣称任意压力可靠。
+- 最终现场：保留`vllm-ascend-glm52-prefill-meta40-20261108`两个P容器运行（e9bd1ce19基镜像+两个精确SHA Python补丁），原P init/Master/8333代理保留，D保持本轮开始前原容器/镜像/源码/StartedAt。四节点源码/补丁SHA、容器身份/NPU归属、八引擎健康空闲均通过，CPU客户端与只读监控已停止。独立Ansible与最终证明在`artifacts/prefill-meta40-20261108/final-verification.json`，控制器`kept_verified_metadata_P`。源码未提交、未打新镜像，默认inventory未改；未动宿主全局设置或无关服务。201项SDK回归、3300组旧新对照均通过。
+
+
+### 11.84 2026-11-08：新起DCP与优化配置同预热重测（已完成）
+
+- 用户要求再次测试，范围128K输入/2K输出，C30/C40，各N80；不再只引用旧DCP结果。两边都先8×2048/16/C8，再8×128K/32/C8预热，不计入正式结果。
+- 冻结DCP此前已验证的TP/DP、MTP、token/seq预算、启动脚本和090eeee镜像；新建四个`vllm-ascend-glm52-dcp-retest-20261108`容器。当前优化配置为P meta40、D refactor-r3，同ID/镜像/两个补丁，未改源码。
+- 四个模型容器由Ansible捕获身份、校验空闲后停止，原P init/Master/8333代理在独立原容器保留。DCP完成后恢复同ID的优化P/D及其私有shm huge=always和原脚本，再测优化配置，最后保留健康空闲的优化服务。控制器有失败时的恢复与native探针。
+- 同一v1.7 vendor、7份客户端文件和seed20261106，正式随机文本仅查SSE/usage/长度及相关native生命周期。新增分析同时记录TTFT均值和P queue/prefill均值，仍报告P50/P99，不把P prefill当作GPU独占计算时间。
+- 原始资料/独立Ansible与实时状态：`artifacts/pd-dcp-retest-20261108/`；尚无本轮正式性能结论。
+
+- 最终：四正式点320/320成功、输入/7客户端匹配、prefix命中0、P/D成功计数各80、抢占0、队列/逻辑KV排空；优化组含预热176条全8-rank receipt/释放通过。
+- 新DCP C30/C40：P queue119.99/171.46s，P prefill17.01/16.89s，TTFT均值142.57/195.70s、P50150.51/222.46s，TPOT36.06/36.26ms，吞吐237.35/232.47tok/s。
+- 新优化组C30/C40：P queue80.14/96.98s，prefill33.33/33.30s，TTFT均值119.57/156.51s、P50124.96/168.73s，TPOT34.21/38.88ms，吞吐276.13/279.76tok/s。对新DCP TTFT低17%/24%、吞吐高16%/20%，P阶段仍更长。C30前轮103s最好TTFT未完全复现，prefill约33s稳定，P queue63.52→80.14s是主要变化；不用单轮最好值作固定结论。
+- 同批均值差额TTFT−P queue−P prefill：DCP5.58/7.35s，优化组6.11/26.23s；差额未细分为代理/D先准备/P尾部/交接/网络，不能全称PD传输或P排队。
+- 最终保留同ID/镜像/源码的P meta40及D refactor-r3（四模型容器重启，StartedAt改变），原独立Master/代理PID不变；四节点源码/补丁SHA、身份/NPU归属与健康空闲全通过，临时DCP四容器/CPU客户端/只读监控均停止。前轮日志重启前已归档；默认inventory及源码未改，未打新镜像。Master采样峰值79.69%、新增淘汰77756、分配失败0，无-704，但保活窗口未实现。
+- 原始证明`artifacts/pd-dcp-retest-20261108/comparison.json`、176 native audit、source/identity/idle/stopped记录及全部日志。完整均值/分位数与限制见[prefill-metadata-optimization-20261108.md](prefill-metadata-optimization-20261108.md)末节。以上“尚无结论/正在”条目为过程记录，以本条最终结果为准。
+
+
+### 11.85 2026-11-08：50%公共前缀同负载对照（已完成，含失败轮）
+
+- 用户要求带50%前缀再测。DCP和当前meta40优化配置，128000输入/2000输出、C30/C40，各N80；约64K公共前缀，独立后缀，同seed和客户端。每点独立salt，公共前缀准备和tokenize在计时前完成，DCP要求两个P均有预热成功。以P实际prefix/external-prefix计数核验48%–52%，不把配置值当命中证据。
+- 保持上一轮模型配置、镜像、源码和补丁。Ansible新建DCP容器；切换前捕获空闲/身份；原独立Master/8333代理保留，结束恢复同ID优化P/D和私有shm设置。新128K/16/N4探针先验命中，再正式测；错误则停止客户端恢复服务。
+- 随机输入只校验SSE/usage/长度/缓存计数及全rank native生命周期，不作语义精度测试。准备改变了提示文本结构，与本轮DCP输入匹配；上一轮0%仅作为不同输入结构的参考，不能把全部差异归因为缓存。
+- 原始资料`artifacts/pd-prefix50-20261108/`。尚无正式性能结论。
+- 启动过程：首轮stock P1 DP1 TP5的HiXL绑定172.168.4.31:20600失败（errno98），未发压测请求。故障前端口占用者未捕获，不归因给无关服务。Ansible停止仅本轮四stock容器，归档首次日志，再用同ID/镜像/冻结脚本重启；未修改参数或宿主端口/服务。证据startup-failed-p1.log、startup-retry.json、retry-stock-start.log。
+- 首轮探针：4/4成功，245760个命中/512024个输入=47.9977501%，因48%硬下限触发停止，没有正式负载。部署自动恢复，8/8恢复探针成功，全rank/源码核验后继续。保留首轮资料，r2使用新目录/客户端/stock容器，冻结输入和模型参数，仅将客户端验收容差改为47.5%–52.5%；DCP实际每条61440命中，接近48%，最终必须报告实际值而非精确50%。`artifacts/pd-prefix50-r2-20261108/`。
+- r2 DCP C30/C40各80/80成功，实际47.9978%命中，TTFT均值54.914/87.436s、P5046.951/84.240s，吞吐397.806/398.27tok/s。优化探针4/4、实测49.9977%；优化C30停在78/80，D2两个deferred，整点无效，C40未运行。两ID对应proxy P通知httpx.ReadError→D收到502，D `_access_metaserver`未raise_for_status而当成功，P未完成/没有recv prepare；TCP读错的根因未确定，不能归因成KV容量或缓存代码问题。同期Master峰值44.25%、无淘汰/分配失败，无-704；完成及预热102条全8-rank回收通过。失败日志/客户端提前只读归档于r2，自动停滞恢复进行中。
+- r3计划：保留DCP有效结果，仅优化组用同源码SHA、同参数的新代理进程8334隔离旧连接状态，原8333/Master保留，模型未改；8短/8长预热及命中探针后，先C40后C30各N80。只重试这一次，不重投失败的旧request_id。`artifacts/pd-prefix50-r3-20261108/`；结束停止额外代理并恢复原8333健康空闲。
+
+- 最终r3同源码新代理8334，C40→C30各80/80，含预热186全8-rank通过；与r2 DCP有效点合计320/320，正式输入哈希/实际长度/7客户端一致，抢占0、P/D各success80、队列/逻辑KV排空。命中DCP47.9978%/我们的49.9977%，不宣称精确同率。C30我们TTFT均值67.843/P5058.029s，TPOT38.694ms、吞吐374.984；DCP54.914/46.951s、35.306ms、397.806。C40我们78.033/69.289s、44.219ms、424.345；DCP87.436/84.240s、37.133ms、398.272。C30仍落后、C40TTFT/吞吐更好但TPOT慢；P prefill27.005/22.631对9.839/9.916s，P阶段仍长。
+- 正式Master1280GiB、15秒采样峰值79.373%、新增淘汰4531、分配失败0；有限成功没有修复活动前缀生命周期窗口，也没有修复ReadError/502传播缺口。旧失败轮完整保存，不使用78条估算整轮性能。不同部署TP/DP/MTP、命中差约2个百分点、测试顺序不同；旧0%输入结构不同，不作严格cache单变量结论。
+- 收尾helper嵌套null导致停止额外代理命令尚未执行即失败；及时停止控制器自动恢复分支，修正helper后以manual-finish.yml接管。没有重启模型；四节点最终源码/补丁SHA、镜像/ID/NPU归属、正式到最终StartedAt一致和健康空闲通过。原8333/Master PID保留，额外8334/临时DCP/客户端/监控均停，默认inventory/服务代码未改。证据r3/controller-cleanup-intercept.json、controller-state-before-manual-finish.json、manual-finish.log（四节点failed=0）、comparison.json、native186及final/stopped证明。此前“进行中/待结果”均为过程记录，以本最终结果为准。
+
+
+### 11.86 2026-11-09：整理并提交代码与性能记录
+
+- 源仓库`src/vllm-ascend-reuse`，分支`p-main-buffer-reuse`，提交`85f7f6e50`：整批地址广播、bounded range只读描述符复用、失败时最多8条原生/fallback诊断，及三个回归测试文件。保留既有顺序/stride/异常/reader保护，不修改HTTP重试或活动前缀生命周期。提交已签名sign-off。
+- 验证：两个补丁SHA和三个测试文件与201项SDK通过时的快照一致；提交前本机重新执行300组地址+3000组range新旧对照，全通过，Python语法与实验YAML解析、diff检查通过。没有为提交再次运行集群压测。资料`artifacts/commit-20261109/`。
+- 部署仓库同步提交Docker top补PID列修复、明确未推广的32K实验参数、三份长上下文/元数据性能报告，以及m1总览/runbook/部署README；50%性能有效结果与失败轮均保留。默认inventory不变。
+- 本次没有触碰集群、重建镜像或部署。现有P镜像源码基线仍e9bd1ce19，加与新提交一致的两个模块补丁，不能将整镜像来源标成`85f7f6e50`；D与原8333/Master现场以§11.85最终证明为准。
