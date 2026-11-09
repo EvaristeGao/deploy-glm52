@@ -57,6 +57,8 @@ def main():
     parser.add_argument("--previous", required=True)
     parser.add_argument("--directory", required=True)
     parser.add_argument("--image", required=True)
+    parser.add_argument("--shm-size", default="500g")
+    parser.add_argument("--previous-shm-huge", action="store_true")
     args = parser.parse_args()
     directory = Path(args.directory)
     if args.action == "check-free":
@@ -122,6 +124,8 @@ def main():
             current = inspect(args.name)
             if current["Config"]["Labels"].get("glm52.deployment") != "layerwise-guide":
                 raise RuntimeError("Development container ownership mismatch")
+            if current["HostConfig"]["IpcMode"] != "private":
+                raise RuntimeError("Development container requires private IPC")
             if (
                 current["Image"]
                 != json.loads(docker("image", "inspect", args.image))[0]["Id"]
@@ -142,7 +146,7 @@ def main():
             "--ipc",
             "private",
             "--shm-size",
-            "500g",
+            args.shm_size,
             "--ulimit",
             "memlock=-1:-1",
             "--privileged",
@@ -183,9 +187,12 @@ def main():
             raise RuntimeError("Predecessor ID changed before restoration")
         commands = json.loads((directory / "previous-commands.json").read_text())
         component = args.action.removeprefix("restore-")
-        if component == "master" and component not in commands:
-            print("Captured deployment uses an independently managed Master")
+        if component in ("master", "proxy") and component not in commands:
+            print(f"Captured deployment uses an independently managed {component}")
             return
+        restore_shm = component == "engine" and args.previous_shm_huge
+        if restore_shm and previous["HostConfig"]["IpcMode"] != "private":
+            raise RuntimeError("Cannot remount shm without private IPC")
         if previous["State"]["Running"]:
             # Docker requires a PID column even for command-only matching.
             processes = docker("top", previous["Id"], "-eo", "pid,args")
@@ -206,6 +213,10 @@ def main():
             check_npu()
         if not previous["State"]["Running"]:
             docker("start", previous["Id"])
+        if restore_shm:
+            docker(
+                "exec", previous["Id"], "mount", "-o", "remount,huge=always", "/dev/shm"
+            )
         docker("exec", "-d", previous["Id"], *commands[component])
     else:
         current = inspect(args.name)

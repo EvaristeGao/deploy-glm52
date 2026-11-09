@@ -50,7 +50,7 @@ additional_config='{
 }'
 # Explicitly isolate the receipt owner and retention ports of each DP engine.
 owner_port=$(({{ role.owner_rpc_port }} + rank * 32))
-retention_port=$((owner_port + {{ tp_size }}))
+retention_port=$((owner_port + {{ node_tp_size }}))
 kv_config=$(cat <<EOF
 {
   "kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_consumer",
@@ -72,9 +72,9 @@ exec vllm serve {{ model_path | quote }} \
   --host {{ ip }} --port "$port" --api-server-count 1 \
   --trust-remote-code --served-model-name {{ model_name | quote }} \
   --distributed-executor-backend mp --enable-expert-parallel \
-  --data-parallel-size {{ dp_size }} --data-parallel-rank "$rank" \
+  --data-parallel-size {{ node_dp_size }} --data-parallel-rank "$rank" \
   --data-parallel-address {{ hostvars['p0' if node_role == 'prefill' else 'd0'].ip }} \
-  --data-parallel-rpc-port {{ role.rpc_port }} --tensor-parallel-size {{ tp_size }} \
+  --data-parallel-rpc-port {{ role.rpc_port }} --tensor-parallel-size {{ node_tp_size }} \
   --prefill-context-parallel-size 1 --decode-context-parallel-size 1 \
   --max-model-len {{ max_model_len }} --block-size {{ block_size }} \
   --max-num-batched-tokens {{ role.max_num_batched_tokens }} --max-num-seqs {{ role.max_num_seqs }} \

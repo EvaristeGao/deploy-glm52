@@ -1,0 +1,15 @@
+---
+- name: Wait for each API on the selected node
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[engine_node].ip }}:{{ engine_config.api_port + hostvars[engine_node].idx * engine_local + item }}/health"
+    timeout: 10
+    use_proxy: false
+  vars:
+    engine_config: "{{ prefill_config if engine_node in groups['prefill'] else decode_config }}"
+    engine_local: "{{ engine_config.dp_local | default(dp_local) }}"
+  loop: "{{ range(engine_local) | list }}"
+  register: engine_health
+  until: engine_health.status | default(0) == 200
+  retries: "{{ ready_retries }}"
+  delay: 10
+  tags: [wait]

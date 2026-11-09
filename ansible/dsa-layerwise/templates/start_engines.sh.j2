@@ -2,10 +2,10 @@
 set -eo pipefail
 source /root/pd/settings.sh
 pids=()
-for local_rank in $(seq 0 {{ dp_local - 1 }}); do
-  rank=$(({{ idx }} * {{ dp_local }} + local_rank))
+for local_rank in $(seq 0 {{ node_dp_local - 1 }}); do
+  rank=$(({{ idx }} * {{ node_dp_local }} + local_rank))
   port=$(({{ (prefill_config if node_role == 'prefill' else decode_config).api_port }} + rank))
-  devices=$(seq -s, $((local_rank * {{ tp_size }})) $(((local_rank + 1) * {{ tp_size }} - 1)))
+  devices=$(seq -s, $((local_rank * {{ node_tp_size }})) $(((local_rank + 1) * {{ node_tp_size }} - 1)))
   bash /root/pd/engine.sh "$rank" "$port" "$devices" > "$LOG_PATH/vllm_{{ node_role }}_dp$rank.log" 2>&1 &
   pids+=("$!")
 done

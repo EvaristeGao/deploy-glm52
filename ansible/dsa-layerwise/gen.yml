@@ -3,13 +3,21 @@
   hosts: all
   connection: local
   gather_facts: false
+  vars:
+    node_role: "{{ 'prefill' if inventory_hostname in groups['prefill'] else 'decode' }}"
+    node_config: "{{ prefill_config if node_role == 'prefill' else decode_config }}"
+    node_tp_size: "{{ node_config.tp_size | default(tp_size) }}"
+    node_dp_size: "{{ node_config.dp_size | default(dp_size) }}"
+    node_dp_local: "{{ node_config.dp_local | default(dp_local) }}"
   tasks:
     - name: Validate supported topology and layerwise contracts
       ansible.builtin.assert:
         that:
-          - tp_size * dp_local == 16
-          - dp_size == dp_local * 2
-          - prefill_config.max_num_batched_tokens % tp_size == 0
+          - node_tp_size * node_dp_local == 16
+          - node_dp_size == node_dp_local * 2
+          - prefill_config.max_num_batched_tokens % (prefill_config.tp_size | default(tp_size)) == 0
+          - (prefill_config.tp_size | default(tp_size)) >= (decode_config.tp_size | default(tp_size))
+          - (prefill_config.tp_size | default(tp_size)) % (decode_config.tp_size | default(tp_size)) == 0
           - prefill_config.mtp == 1
           - decode_config.mtp > 0
           - decode_config.max_num_batched_tokens >= decode_config.max_num_seqs * (decode_config.mtp + 1)

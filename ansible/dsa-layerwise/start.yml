@@ -4,6 +4,16 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    - name: Check the external Master before stopping the previous engines
+      ansible.builtin.wait_for:
+        host: "{{ hostvars['p0'].ip }}"
+        port: "{{ master_port }}"
+        timeout: 60
+      run_once: true
+      delegate_to: p0
+      when: external_master | default(false) | bool
+      tags: [cutover]
+
     - name: Check previous engines have no running or waiting requests
       ansible.builtin.shell:
         executable: /bin/bash
@@ -44,7 +54,7 @@
     - name: Start private Mooncake Master on P0
       ansible.builtin.command:
         argv: [docker, exec, -d, "{{ container_name }}", bash, /root/pd/start_master.sh]
-      when: inventory_hostname == 'p0'
+      when: inventory_hostname == 'p0' and not (external_master | default(false) | bool)
       tags: [launch]
 
     - name: Wait for Mooncake Master
@@ -54,7 +64,7 @@
         timeout: 60
       tags: [launch]
 
-    - name: Start the node's two isolated TP engines
+    - name: Start the node's isolated TP engines
       ansible.builtin.command:
         argv: [docker, exec, -d, "{{ container_name }}", bash, /root/pd/start_engines.sh]
       tags: [launch]
@@ -63,16 +73,11 @@
   hosts: p0
   gather_facts: false
   tasks:
-    - name: Wait for all eight engines
-      ansible.builtin.uri:
-        url: "http://{{ hostvars[item.0].ip }}:{{ (prefill_config.api_port if item.0 in groups['prefill'] else decode_config.api_port) + hostvars[item.0].idx * dp_local + item.1 }}/health"
-        timeout: 10
-        use_proxy: false
-      loop: "{{ groups['all'] | product(range(dp_local) | list) | list }}"
-      register: engine_health
-      until: engine_health.status | default(0) == 200
-      retries: "{{ ready_retries }}"
-      delay: 10
+    - name: Wait for every role's engines
+      ansible.builtin.include_tasks: wait-node.yml
+      loop: "{{ groups['all'] }}"
+      loop_control:
+        loop_var: engine_node
       tags: [wait]
 
     - name: Start D-first layerwise proxy
@@ -80,7 +85,7 @@
         argv: [docker, exec, -d, "{{ container_name }}", bash, /root/pd/start_proxy.sh]
       tags: [proxy]
 
-    - name: Verify proxy sees all four P and four D engines
+    - name: Verify proxy sees all configured P and D engines
       ansible.builtin.uri:
         url: "http://{{ ip }}:{{ proxy_port }}/healthcheck"
         timeout: 10
@@ -89,8 +94,8 @@
       register: proxy_health
       until: >-
         proxy_health.status | default(0) == 200 and
-        proxy_health.json.prefill_instances | default(0) == dp_size and
-        proxy_health.json.decode_instances | default(0) == dp_size
+        proxy_health.json.prefill_instances | default(0) == (prefill_config.dp_size | default(dp_size)) and
+        proxy_health.json.decode_instances | default(0) == (decode_config.dp_size | default(dp_size))
       retries: 30
       delay: 5
       tags: [proxy]

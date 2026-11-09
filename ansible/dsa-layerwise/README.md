@@ -1,3 +1,58 @@
+# GLM-5.2 layerwise guide deployment
+
+## Decode TP2
+
+选择 [decode-tp2.yml](../inventories/a3-layerwise-guide/decode-tp2.yml) 部署
+P TP8×DP4 和 D TP2×DP16。配置固定源码 `a1a45e9be` 和 CANN 9.2 SDK，
+由 `build.yml` 从本地 `src/vllm-ascend-reuse` 的该提交构建同一 P/D 镜像。
+不带配置文件的 inventory 仍选择历史 TP8 档。
+
+| | Prefill | Decode |
+| --- | --- | --- |
+| 每节点实例 | 2 × TP8 | 8 × TP2 |
+| token budget / max seqs | 16,384 / 8 | 32 / 8 |
+| 执行方式 | eager、MTP1、Main 共享槽 2 | mode 3 FULL_DECODE_ONLY、MTP3 |
+| Host 内存 | Store 40 GiB/rank，640 GiB/节点 | KV 100 GiB/实例，800 GiB/节点 |
+
+上下文上限为 1,048,576。四个候选容器均使用 1 TiB 私有 shm，容器内
+`/dev/shm` 设置 `huge=always`。P 端口 8100–8103，D0 端口 8200–8207，
+D1 端口 8208–8215，候选 D-first 代理在 P0 的 8336。此档依赖原控制容器
+提供的 Mooncake Master（P0:52551），切换前先检查 Master。原 8333 代理
+用于恢复后访问原八个引擎。
+
+在部署仓库根目录运行以下命令。若 P0 缺少固定版本的 SDK，先用同一配置运行
+`run_tp2 build-stack`。首次切换前确认配置中的 `previous_containers`
+和 `previous_engine_endpoints` 对应当前服务，`start` 会检查空闲后切换。
+
+```bash
+export ANSIBLE_LOCAL_TEMP="$PWD/ansible/.ansible-tmp" ANSIBLE_HOST_KEY_CHECKING=False
+run_tp2() {
+  local playbook="$1"
+  shift
+  ansible/.venv/bin/ansible-playbook \
+    -i ansible/inventories/a3-layerwise-guide/inventory.yaml \
+    -e @ansible/inventories/a3-layerwise-guide/decode-tp2.yml \
+    "ansible/dsa-layerwise/$playbook.yml" "$@"
+}
+run_tp2 gen
+run_tp2 build
+run_tp2 prepare
+run_tp2 start
+run_tp2 smoke
+```
+
+需要切回原服务时，执行 `run_tp2 restore`，恢复 prepare 捕获的原容器。
+
+`start` 检查 4 个 P 和 16 个 D 端点，`smoke` 按 D TP2 检查逐请求的
+双 rank receipt 和 target 释放，并检查全部 16 个 D 实例覆盖。日志位于
+`/mnt/sfs_turbo/g00832294/layerwise-guide/tp8-dp4-decode-tp2-dp16/<node>/logs/`。
+压测使用隔离容器中的同一 Python 实现和 SDK，固化镜像由上面的构建命令生成。
+实测见 [128K/2K 性能对照](../../docs/layerwise-tp-performance-20261109.md)。
+
+## TP8×DP4 历史部署
+
+> **2026-11-09 最新约90%前缀结果**：128K/2K、C30/C40、各N80，四点320/320，优化组含预热186全8-rank通过。DCP实际89.60%，我们的91.10%。我们的TTFT P50 7.15/33.97s对DCP5.93/7.45s，吞吐523.65/520.07对552.90/684.47tok/s；C40明显落后，D running峰32、逻辑KV99.15%、出现capacity等待，P prefill仍3.4–3.9倍。P Store峰22.29%、无淘汰/分配失败。已保留原P meta40/D refactor-r3与原8333/Master，源码/身份/健康空闲通过，临时DCP/8334/客户端/监控均停，默认配置/服务代码未改。详见[报告末节](../../docs/prefill-metadata-optimization-20261108.md)、runbook§11.87、artifacts/pd-prefix90-20261109/comparison.json。下方为提交状态与旧轮记录。
+
 > **2026-11-09 提交状态**：源码已提交为 `p-main-buffer-reuse@85f7f6e50`，包括P侧CPU元数据优化、限量失败诊断和三个文件的回归测试。提交前重跑3300组CPU新旧对照通过；两个补丁及三个测试文件与此前201项SDK回归快照逐字节一致。现有P仍是e9bd1ce19基础镜像加相同SHA的两个模块补丁，**不是整树升级至该commit**；本次未重建镜像、未重新部署、未触碰集群。下方“未提交”等表述为对应实验时的历史状态。
 
 > **2026-11-08 最新50%公共前缀复测完成**：128K/2K、C30/C40、各N80，最终有效320/320、优化组含预热186条全8-rank、输入匹配、抢占0及排空通过。DCP实际命中47.9978%，我们的49.9977%。C30我们的TTFT P5058.03对46.95s，吞吐374.98对397.81；C40为69.29对84.24s，吞吐424.34对398.27tok/s；TPOT38.69/44.22对35.31/37.13ms。首轮78/80因proxy ReadError/502作废，D状态码传播缺口未修复；同源码独立8334代理有界复测通过后已停止，原8333/P meta40/D refactor-r3健康空闲保留。模型/默认inventory未改，四节点源码/身份/StartedAt及停止证明通过；本地清理helper错误已由manual-finish修正接管，未重启模型。详见[报告末节](../../docs/prefill-metadata-optimization-20261108.md)、runbook§11.85、artifacts/pd-prefix50-r3-20261108/comparison.json。以下为0%和较早历史。
@@ -14,8 +69,6 @@
 > `artifacts/review-fixes-20261107/safe.yml`，完整身份、限制及验收见runbook §11.78。旧 `graph.yml` 使用 mode0，
 > 已复现多条语义错误，不再作为可用配置，生成器会在切换容器前拒绝它。
 > receipt 图模式必须同时设置 compilation mode3 和 `FULL_DECODE_ONLY`。
-
-# GLM-5.2 layerwise guide deployment
 
 本档参考 sig-ai-inference 的 DSA Offload 部署指南
 `b4965c0625c9f89ffd6c8f61dee6f8ed2f62cc8b`，使用开发分支

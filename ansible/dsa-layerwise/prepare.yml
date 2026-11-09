@@ -62,6 +62,7 @@
           container.py prepare --name {{ container_name | quote }}
           --previous {{ previous_containers[inventory_hostname] | quote }}
           --directory {{ run_dir | quote }} --image {{ image | quote }}
+          --shm-size {{ shm_size | default('500g') | quote }}
         executable: python3
 
     - name: Verify source checksums inside development container
@@ -74,4 +75,4 @@
     - name: Enable transparent huge pages on this container's private shm
       ansible.builtin.command:
         argv: [docker, exec, "{{ container_name }}", mount, -o, "remount,huge=always", /dev/shm]
-      when: inventory_hostname in groups['decode']
+      when: inventory_hostname in groups['decode'] or prefill_shm_huge | default(false) | bool

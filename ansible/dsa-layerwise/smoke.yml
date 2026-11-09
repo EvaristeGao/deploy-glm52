@@ -1,5 +1,5 @@
 ---
-- name: Verify requests and receipts on all four Decode engines
+- name: Verify requests and receipts on all Decode engines
   hosts: p0
   gather_facts: false
   tasks:
@@ -19,7 +19,9 @@
           - --logs
           - "{{ deployment_root }}/{{ run_name }}"
           - --tp
-          - "{{ tp_size | string }}"
+          - "{{ decode_config.tp_size | default(tp_size) | string }}"
+          - --expected-decode-engines
+          - "{{ decode_config.dp_size | default(dp_size) | string }}"
       async: 3600
       poll: 15
       register: smoke

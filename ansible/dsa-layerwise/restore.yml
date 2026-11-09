@@ -24,6 +24,7 @@
           container.py restore-engine --name {{ container_name | quote }}
           --previous {{ previous_containers[inventory_hostname] | quote }}
           --directory {{ run_dir | quote }} --image {{ image | quote }}
+          {{ '--previous-shm-huge' if previous_shm_huge | default(false) | bool else '' }}
         executable: python3
 
 - name: Restore previous proxy after engine readiness

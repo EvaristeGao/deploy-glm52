@@ -2805,3 +2805,45 @@ shell检查通过，不能作为已通过C40的生产配置。
 - 验证：两个补丁SHA和三个测试文件与201项SDK通过时的快照一致；提交前本机重新执行300组地址+3000组range新旧对照，全通过，Python语法与实验YAML解析、diff检查通过。没有为提交再次运行集群压测。资料`artifacts/commit-20261109/`。
 - 部署仓库同步提交Docker top补PID列修复、明确未推广的32K实验参数、三份长上下文/元数据性能报告，以及m1总览/runbook/部署README；50%性能有效结果与失败轮均保留。默认inventory不变。
 - 本次没有触碰集群、重建镜像或部署。现有P镜像源码基线仍e9bd1ce19，加与新提交一致的两个模块补丁，不能将整镜像来源标成`85f7f6e50`；D与原8333/Master现场以§11.85最终证明为准。
+
+
+### 11.87 2026-11-09：约90%前缀性能对照（已完成）
+
+- 用户要求90%命中重测；延续128K/2K、C30/C40、每点N80，DCP→优化组，各组C30→C40。同模型/镜像/TP-DP/MTP/预算，新的DCP容器由Ansible驱动；原P meta40/D refactor-r3捕获后停止、测试后恢复同ID/源码/私有shm设置，独立原Master/8333代理保留。
+- DCP缓存管理器只读源码确认：DCP放大cache block，EAGLE/MTP命中会扣除一个对齐块；统一公共前缀116736 content tokens，使两套实际命中接近90%，但必须分别实测。独立salt和后缀，计时前tokenize/两条完整P-D代理前缀预热；DCP每个P都要有成功覆盖；先N4/16token探针再N80/2K正式，指标门槛88.5%–91.5%，实际值进入报告。
+- 两组均新代理，优化组8334与原8333并存，源码SHA与上轮一致，结束停止8334。新增只读代理通知错误监测，发现ReadError/502相关日志即终止并保存证据，不重投模糊状态旧请求。测试失败先保存日志/客户端再恢复；全部性能通过后清理错误只重试清理和验证，不因本地helper错误无谓重启模型。
+- 四节点源码/补丁/身份/独占NPU/空闲预检通过。原始资料`artifacts/pd-prefix90-20261109/`；尚无正式结果。未修改服务代码、默认inventory或宿主全局配置，随机输入只查SSE/usage/长度及native生命周期。
+
+- 最终首轮四点320/320、优化组含预热186全8-rank通过、输入哈希/实际token/7客户端一致、P/D各点success80、抢占0及排空通过。命中DCP89.5958%/我们的91.0957%，每条114688/116608缓存token，不称精确同率。C30我们TTFT均值17.083/P50 7.153s、TPOT41.806ms、吞吐523.651；DCP10.382/5.931s、39.264ms、552.901。C40我们40.929/33.966s、45.568ms、520.071；DCP15.340/7.449s、42.681ms、684.469。C30吞吐低5.3%，C40低24.0%，C40 TTFT P50 为4.56倍。
+- P prefill8.492/11.039对2.464/2.861s，P queue1.687/3.947对2.491/4.973s；P prefill仍慢，不能怪P排队更长。C40我们的TTFT均值减两项P指标后差额25.943s，对C30的6.904s；不称为纯传输。D running峰30→32，而DCP30→40；我们D逻辑KV88.24%→99.15%，capacity等待0→峰7，5秒采样积分估计C40约14s/请求。配置D4DP×seq8及token32、块池容量均相关，未独立消融精确贡献；D queue与P时间重叠，未相加。
+- Master正式41个15秒采样：容量1280GiB，峰22.292%、分配失败0、淘汰0，本轮无前缀缺失或代理通知错误。P Store容量不是本轮C40劣化证据；活动前缀完整保活窗口和HTTP502传播缺口仍未修复。不同部署、实际命中差1.5个百分点、单轮有限N80、跨命中轮文本结构不同，结论保留这些边界。
+- 最终控制器complete_feature_running；四节点源码/补丁SHA、同ID/镜像/NPU归属、正式到最终StartedAt稳定及健康空闲通过，原Master/8333 PID/starttime不变，临时DCP四容器/额外8334/客户端/监控均停。本轮按Ansible切换时重启四模型，但恢复后未再重启；未改服务代码/默认inventory/宿主全局配置。完整证据`artifacts/pd-prefix90-20261109/comparison.json`、phase-analysis.json、native186、final/finish-checks/stopped及全量日志。此前“进行中”条目为过程记录，以本条最终结果为准。
+
+
+### 11.88 2026-11-09：P TP8 → D TP4 支持（已完成候选验证）
+
+- 实现GLM DSA复制Main/Indexer的P TP整倍数D TP路径；Main P0单写，Indexer前D-TP个P rank对应写，额外P rank无远端读者/终止回执，Store本地PUT/fence与请求防重放保留。CP/量化/其他模型/反向TP继续fail-closed。回执/manifest wire不变，等TP路径不变。
+- Ansible按角色配置TP/DP/local DP，默认渲染与旧版本逐字节一致；新拓扑12个健康检查循环check-mode展开通过。独立候选完整Python源码覆盖保留原生SDK全部哈希，四节点源码SHA与本地快照一致；原始镜像身份不冒充新提交构建。
+- SDK回归234/234（最终源码重复一次全部通过），含P8D4实际CPU逐字节两chunk复制、少活跃writer不放行、额外P rank空远端reader退休、重放和反向/错误拓扑拒绝。源码/配置lint、语法和diff检查通过。
+- 原生P8DP4→D4DP8、1M配置启动，D保留MTP3/async/mode3主模型图（draft eager）。24/24短/33,660token多chunk/重复前缀请求覆盖8个D，另128,056token长请求通过，共25/25，每条四rank prepare_decode及target release齐全。
+- P/D各success25，P真实前缀hits267264/queries670920（混合首次/重放，非性能命中率档）；D草稿150、接受64；结束队列和逻辑KV0，12引擎无传输/协议/ReadError/traceback。8个D均完成实际图捕获。
+- D每实例仍9174blocks×128，总逻辑tokens9394176、全局seq64，较旧TP8DP4均翻倍。每DP Host100GiB不变。没有C40占用/吞吐/TTFT性能结论；也没有全1M请求或DCP支持结论。
+- Ansible恢复原P meta40/D refactor-r3，同ID/镜像/源码/脚本SHA/私有shm huge设置、独占NPU验证通过；原Master/8333控制PID不变。全部原8API健康，追加原拓扑请求成功、8rank receipts及release完整，队列/逻辑KV0。候选已停、8335关闭；没有改默认inventory/原服务代码或宿主全局配置，未commit或发布新镜像。
+- 证据 `artifacts/tp-mismatch-20261109/`（controller complete_original_restored/candidate_passed=true、SDK234、native25、容量/指标/source manifests、restored与candidate-final证明）；说明 `docs/layerwise-unequal-tp-20261109.md`。此前§11.87的90%性能记录保持原样，此处只验证新TP能力。
+
+### 11.89 2026-11-09：TP2/TP4 与 DCP，0/90%性能矩阵（已完成）
+
+- 128K目标输入/2K输出、C30/C40、每点N80，三部署共12点960/960成功。相同v1.7客户端、seed与逐条输入哈希/实际长度；0%实测0，90%实测DCP89.5958%、特性91.0957%。同量预热与pilot均排除；随机文本只查SSE/usage/足量输出。
+- 特性P固定TP8DP4、B2/MTP1/eager、Store40GiB/rank；D2DP16或D4DP8、CP1、Host100GiB/DP、seq8/token32、MTP3/main mode3图。DCP沿用stock090 P16DP2/DCP16、D4DP8/DCP4/MTP5生产配置。特性两档§11.88相同812文件快照、运行前后身份及native SDK哈希一致；是整套部署比较。
+- 0% C30/C40：DCP TTFT P50 152.738/226.535s、TPOT36.437/37.605ms、吞吐232.376/234.701；TP4为125.590/177.743s、24.912/25.559ms、294.503/296.319；TP2为123.792/181.743s、23.068/23.082ms、308.958/310.136。特性两档TTFT/TPOT/吞吐均赢；TP2输出高32.1–33.0%。
+- 90% C30/C40：DCP TTFT P50 6.152/7.654s、TPOT39.444/41.365ms、吞吐565.451/652.862；TP4为6.932/21.933s、31.417/34.934ms、647.912/694.168；TP2为11.758/21.213s、25.598/27.668ms、753.160/794.338。两档赢TPOT/吞吐，DCP首token领先；TP2吞吐高33.2/21.7%、TPOT低35.1/33.1%。TP2四点E2E P50均最低。
+- 90%C40 D running峰TP2/TP4/DCP=39/40/40，KV峰33.18/55.24/44.02%，特性采样容量等待0。TP2比DCP平均TTFT多13.93s、P阶段多14.14s；P prefill15.56 vs2.91s是主要差距，非D容量问题。0% C30→C40吞吐近持平，P排队增约41s。D2/4各9174块/实例，总逻辑tokens18.79M/9.39M，Host每D节点800/400GiB。
+- 两档各390/390含预热及pilot的2/4-rank receipt/release覆盖全部16/8D；正式各点P/D计数80、无抢占、结束队列/KV0，无扫描到的传输/协议错误。P Store1,280GiB，正式采样峰约79–80%，有淘汰、分配失败增量0。90%接在0%后，不与历史冷池结果作TP单变量归因。
+- 恢复原四容器同ID/镜像/源码/脚本SHA/私有shm，原Master/8333控制PID保留，8API健康，原拓扑独立请求8-rank回执/释放与空闲通过。12个候选容器/三个临时代理/CPU客户端均已停。无默认inventory或运行源码改动；本轮未提交或发布镜像。
+- 完整表与原始证据见 `docs/layerwise-tp-performance-20261109.md`、`artifacts/pd-tp-sweep-20261109/`；controller `complete_original_restored`、`performance_passed=true`。
+
+### 11.90 2026-11-09：Decode TP2 配置与源码提交
+
+- 源码提交 `a1a45e9be` 固化 unequal-TP 实现。812 个压测源码文件及 925 个 SDK 回归快照文件经核对，唯一运行模块差异是 writer 注释，AST 一致。新增路由和空读者计划回收由单测覆盖，本地相关 44 项通过。
+- `ansible/inventories/a3-layerwise-guide/decode-tp2.yml` 固定该提交和原生 SDK，按 §11.89 选择 P TP8×DP4、D TP2×DP16。切换前检查现有 Master，候选代理用 8336。prepare 为四个私有 shm 配置 1 TiB 和 `huge=always`，restore 在原引擎重启前恢复其私有 shm 大页策略。
+- 本地渲染 24 个 TP2 文件与压测脚本一致，只有日志目录调整；旧等 TP 档 24 个文件逐字节一致。九个 playbook 通过语法检查，TP2 健康检查展开 4 P / 16 D。固化镜像由 `build.yml` 生成，本次提交整理在控制机完成。

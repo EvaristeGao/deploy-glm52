@@ -132,13 +132,15 @@ def main():
             assert data["usage"]["prompt_tokens"] > 16384, result
         return result
 
-    # Exercise every D engine, then the four D engines concurrently across chunks.
-    results = [request((f"short-{rank}", 60)) for rank in range(4)]
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results.extend(
-            pool.map(request, [(f"multichunk-{rank}", 4200) for rank in range(4)])
-        )
-    results.extend(request((f"replay-multichunk-{rank}", 4200)) for rank in range(4))
+    # Exercise every D engine, including deployments with different P/D DP.
+    decode_engines = args.expected_decode_engines
+    results = [request((f"short-{rank}", 60)) for rank in range(decode_engines)]
+    multichunk = [(f"multichunk-{rank}", 4200) for rank in range(decode_engines)]
+    with ThreadPoolExecutor(max_workers=decode_engines) as pool:
+        results.extend(pool.map(request, multichunk))
+    results.extend(
+        request((f"replay-{label}", repetitions)) for label, repetitions in multichunk
+    )
     audit_receipts(args, results)
 
 

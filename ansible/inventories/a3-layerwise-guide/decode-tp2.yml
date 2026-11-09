@@ -1,0 +1,65 @@
+# Layerwise GLM-5.2 with P TP8×DP4 and D TP2×DP16.
+# Apply to inventory.yaml for every playbook in a deployment.
+source_revision: a1a45e9be70b1bf5bce1d504a4a16e340bfc0914
+native_source_revision: 9937133058b417e6238e238e44277998ee541e79
+container_name: vllm-ascend-glm52-layerwise-decode-tp2
+run_name: tp8-dp4-decode-tp2-dp16
+generated_dir: "{{ playbook_dir }}/../generated/layerwise-guide-decode-tp2"
+max_model_len: 1048576
+block_size: 128
+shared_buffers: 2
+
+prefill_config:
+  tp_size: 8
+  dp_size: 4
+  dp_local: 2
+  api_port: 8100
+  rpc_port: 17591
+  kv_port: 56000
+  max_num_batched_tokens: 16384
+  max_num_seqs: 8
+  gpu_memory_utilization: 0.75
+  mtp: 1
+  enforce_eager: true
+
+decode_config:
+  tp_size: 2
+  dp_size: 16
+  dp_local: 8
+  api_port: 8200
+  rpc_port: 17660
+  kv_port: 24700
+  max_num_batched_tokens: 32
+  max_num_seqs: 8
+  gpu_memory_utilization: 0.88
+  mtp: 3
+  host_gib: 100
+  topk_buffer_size: 4096
+  lru_threads: 16
+  owner_rpc_port: 24100
+  receipt_timeout_s: 7200
+  enforce_eager: false
+  compilation_config:
+    mode: 3
+    cudagraph_mode: FULL_DECODE_ONLY
+    cudagraph_capture_sizes: [1, 2, 4, 8, 12, 16, 20, 24, 28, 32]
+    max_cudagraph_capture_size: 32
+
+store_segment_bytes: 42949672960  # 40 GiB per P rank
+shm_size: 1t
+prefill_shm_huge: true
+
+# Keep the existing control container's Master on P0:52551.
+external_master: true
+master_port: 52551
+master_metrics_port: 52553
+proxy_port: 8336
+
+# These four containers own the live model engines. The existing 8333 proxy
+# and Master are independent of them. Endpoints and proxy URL are inherited.
+previous_containers:
+  p0: vllm-ascend-glm52-prefill-meta40-20261108
+  p1: vllm-ascend-glm52-prefill-meta40-20261108
+  d0: vllm-ascend-glm52-layerwise-guide-refactor-r3
+  d1: vllm-ascend-glm52-layerwise-guide-refactor-r3
+previous_shm_huge: true
